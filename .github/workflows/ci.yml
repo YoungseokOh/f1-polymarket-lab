@@ -1,0 +1,43 @@
+name: ci
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Enable pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.6.3 --activate
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile=false
+
+      - name: Install Python dependencies
+        run: uv sync --group dev
+
+      - name: JS checks
+        run: |
+          pnpm lint
+          pnpm typecheck
+          pnpm test
+
+      - name: Python checks
+        run: |
+          uv run ruff check .
+          uv run pytest
+

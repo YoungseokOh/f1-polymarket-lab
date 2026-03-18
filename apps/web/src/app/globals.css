@@ -1,0 +1,27 @@
+@import url("https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  @apply min-h-screen bg-slate-950 text-slate-100;
+  background-image: radial-gradient(
+      circle at top left,
+      rgba(56, 189, 248, 0.2),
+      transparent 28%
+    ),
+    radial-gradient(
+      circle at top right,
+      rgba(249, 115, 22, 0.18),
+      transparent 24%
+    ), linear-gradient(180deg, rgba(15, 23, 42, 1) 0%, rgba(2, 6, 23, 1) 100%);
+}
+
+a {
+  @apply text-cyan-300 transition hover:text-cyan-200;
+}

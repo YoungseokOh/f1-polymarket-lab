@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f1-polymarket-experiments"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "f1-polymarket-common",
+  "f1-polymarket-features",
+  "f1-polymarket-models",
+  "f1-polymarket-storage"
+]
+
+[tool.uv.sources]
+f1-polymarket-common = { workspace = true }
+f1-polymarket-features = { workspace = true }
+f1-polymarket-models = { workspace = true }
+f1-polymarket-storage = { workspace = true }
+
+[project.optional-dependencies]
+tracking = ["mlflow>=2.20.3"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true

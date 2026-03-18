@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=75.8.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "f1-polymarket-worker"
+version = "0.1.0"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+  "f1-polymarket-common",
+  "f1-polymarket-connectors",
+  "f1-polymarket-features",
+  "f1-polymarket-storage",
+  "typer>=0.15.2"
+]
+
+[tool.uv.sources]
+f1-polymarket-common = { workspace = true }
+f1-polymarket-connectors = { workspace = true }
+f1-polymarket-features = { workspace = true }
+f1-polymarket-storage = { workspace = true }
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+namespaces = true

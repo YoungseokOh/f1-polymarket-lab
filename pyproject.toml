@@ -1,0 +1,72 @@
+[build-system]
+requires = ["uv_build>=0.7.19,<0.8.0"]
+build-backend = "uv_build"
+
+[project]
+name = "f1-polymarket-lab-root"
+version = "0.1.0"
+description = "Root workspace package for the f1-polymarket-lab monorepo."
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "alembic>=1.14.1",
+  "mypy>=1.15.0",
+  "pytest>=8.3.5",
+  "pytest-asyncio>=0.25.3",
+  "ruff>=0.11.2"
+]
+modeling = [
+  "catboost>=1.2.8",
+  "lightgbm>=4.6.0",
+  "mlflow>=2.20.3",
+  "optuna>=4.2.1",
+  "pymc>=5.20.1",
+  "scikit-learn>=1.6.1",
+  "shap>=0.47.1",
+  "torch>=2.6.0",
+  "xgboost>=2.1.4"
+]
+
+[tool.uv.workspace]
+members = [
+  "apps/api",
+  "apps/worker",
+  "py/agent",
+  "py/common",
+  "py/connectors",
+  "py/experiments",
+  "py/features",
+  "py/models",
+  "py/storage"
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  ".",
+  "apps/api/src",
+  "apps/worker/src",
+  "py/common/src",
+  "py/connectors/src",
+  "py/storage/src",
+  "py/features/src",
+  "py/models/src",
+  "py/experiments/src",
+  "py/agent/src"
+]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
