@@ -6,6 +6,7 @@ Research platform for Formula 1 prediction-market data ingestion, feature snapsh
 
 ```bash
 cp .env.example .env
+# set a local-only POSTGRES_PASSWORD in .env before starting infra
 make bootstrap
 make infra-up
 make db-upgrade

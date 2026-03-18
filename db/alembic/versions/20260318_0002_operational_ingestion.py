@@ -21,7 +21,10 @@ def upgrade() -> None:
 
     source_fetch_columns = {column["name"] for column in inspector.get_columns("source_fetch_log")}
     if "job_run_id" not in source_fetch_columns:
-        op.add_column("source_fetch_log", sa.Column("job_run_id", sa.String(length=36), nullable=True))
+        op.add_column(
+            "source_fetch_log",
+            sa.Column("job_run_id", sa.String(length=36), nullable=True),
+        )
         op.create_index(
             op.f("ix_source_fetch_log_job_run_id"),
             "source_fetch_log",
