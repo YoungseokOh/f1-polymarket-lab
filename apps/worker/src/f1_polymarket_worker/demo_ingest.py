@@ -5,7 +5,14 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
 
-from f1_polymarket_lab.common import get_settings, payload_checksum, slugify, utc_now
+from f1_polymarket_lab.common import (
+    get_settings,
+    parse_gap_value,
+    parse_result_time_value,
+    payload_checksum,
+    slugify,
+    utc_now,
+)
 from f1_polymarket_lab.connectors import (
     FastF1ScheduleConnector,
     OpenF1Connector,
@@ -55,27 +62,12 @@ def session_code_from_name(name: str) -> str | None:
         "Practice 2": "FP2",
         "Practice 3": "FP3",
         "Qualifying": "Q",
+        "Sprint Qualifying": "SQ",
+        "Sprint Shootout": "SQ",
         "Sprint": "S",
         "Race": "R",
     }
     return mapping.get(name)
-
-
-def normalize_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        numeric = [float(item) for item in value if item not in (None, "")]
-        return min(numeric) if numeric else None
-    return float(value)
-
-
-def normalize_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return " | ".join(str(item) for item in value if item not in (None, ""))
-    return str(value)
 
 
 def record_fetch(
@@ -235,6 +227,9 @@ def ingest_f1_demo(
             session_key = int(session["session_key"])
             session_id = f"session:{session_key}"
             session_name = str(session["session_name"])
+            session_code = session_code_from_name(session_name)
+            if session_code is None:
+                continue
             session_rows.append(
                 {
                     "id": session_id,
@@ -243,17 +238,17 @@ def ingest_f1_demo(
                     "meeting_id": meeting_id,
                     "session_name": session_name,
                     "session_type": session.get("session_type"),
-                    "session_code": session_code_from_name(session_name),
+                    "session_code": session_code,
                     "date_start_utc": parse_dt(session.get("date_start")),
                     "date_end_utc": parse_dt(session.get("date_end")),
                     "status": "complete" if session.get("date_end") else "scheduled",
                     "session_order": None,
-                    "is_practice": session_name.startswith("Practice"),
+                    "is_practice": session_code in {"FP1", "FP2", "FP3"},
                     "raw_payload": session,
                 }
             )
 
-            if not session_name.startswith("Practice"):
+            if session_code not in {"FP1", "FP2", "FP3"}:
                 continue
 
             drivers = openf1.fetch_drivers(session_key)
@@ -305,14 +300,34 @@ def ingest_f1_demo(
             )
             for result in results:
                 driver_id = f"driver:{result.get('driver_number')}"
+                parsed_result_time = parse_result_time_value(
+                    result.get("duration"),
+                    session_code=session_code,
+                    session_type=session.get("session_type"),
+                )
+                parsed_gap = parse_gap_value(
+                    result.get("gap_to_leader"),
+                    position=result.get("position"),
+                    allow_segments=True,
+                )
                 result_rows.append(
                     {
                         "id": f"{session_key}:{result.get('driver_number')}",
                         "session_id": session_id,
                         "driver_id": driver_id,
                         "position": result.get("position"),
-                        "fastest_lap_seconds": normalize_float(result.get("duration")),
-                        "gap_to_leader": normalize_text(result.get("gap_to_leader")),
+                        "result_time_seconds": parsed_result_time.seconds,
+                        "result_time_kind": parsed_result_time.kind,
+                        "result_time_display": parsed_result_time.display,
+                        "result_time_segments_json": parsed_result_time.segments_json,
+                        "gap_to_leader_display": parsed_gap.display,
+                        "gap_to_leader_seconds": parsed_gap.seconds,
+                        "gap_to_leader_laps_behind": parsed_gap.laps_behind,
+                        "gap_to_leader_status": parsed_gap.status,
+                        "gap_to_leader_segments_json": parsed_gap.segments_json,
+                        "dnf": result.get("dnf"),
+                        "dns": result.get("dns"),
+                        "dsq": result.get("dsq"),
                         "number_of_laps": result.get("number_of_laps"),
                         "raw_payload": result,
                     }
@@ -549,7 +564,20 @@ def ingest_polymarket_demo(
     trade_rows: list[dict[str, Any]] = []
 
     for market in candidate_markets:
-        parsed = parse_market_taxonomy(market.get("question") or "", market.get("description"))
+        event_context = market.get("events", [{}])[0] if market.get("events") else {}
+        parsed = parse_market_taxonomy(
+            market.get("question") or "",
+            " ".join(
+                str(value or "")
+                for value in [
+                    market.get("description"),
+                    event_context.get("description"),
+                ]
+                if value
+            )
+            or None,
+            title=event_context.get("title"),
+        )
         token_ids = json.loads(market.get("clobTokenIds") or "[]")
         event_id = str(market["events"][0]["id"]) if market.get("events") else None
         best_bid = float(market["bestBid"]) if market.get("bestBid") is not None else None

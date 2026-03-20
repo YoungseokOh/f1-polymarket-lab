@@ -2,8 +2,9 @@ COMPOSE_FILE := infra/compose/local.yml
 DEMO_SEASON ?= 2024
 DEMO_WEEKENDS ?= 1
 DEMO_MARKET_BATCHES ?= 1
+SESSION_KEY ?=
 
-.PHONY: bootstrap infra-up infra-down api web worker dev db-upgrade ingest-demo lint test typecheck format sync-f1-calendar sync-polymarket-catalog
+.PHONY: bootstrap infra-up infra-down api web worker dev db-upgrade ingest-demo lint test typecheck format sync-f1-calendar sync-polymarket-catalog sync-polymarket-f1-catalog backfill-f1-history backfill-f1-history-all bootstrap-f1db-history sync-jolpica-history hydrate-polymarket-f1-history discover-session-polymarket
 
 bootstrap:
 	corepack enable
@@ -41,6 +42,27 @@ sync-f1-calendar:
 
 sync-polymarket-catalog:
 	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli sync-polymarket-catalog --max-pages $(DEMO_MARKET_BATCHES)
+
+sync-polymarket-f1-catalog:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli sync-polymarket-f1-catalog --max-pages $(DEMO_MARKET_BATCHES) --execute
+
+backfill-f1-history:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-f1-history --season-start 2023 --season-end $(DEMO_SEASON) --execute
+
+bootstrap-f1db-history:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli bootstrap-f1db-history --season-start 1950 --season-end 2022 --execute
+
+sync-jolpica-history:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli sync-jolpica-history --season-start 1950 --season-end 2022 --execute
+
+backfill-f1-history-all:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-f1-history-all --season-start 1950 --season-end $(DEMO_SEASON) --execute
+
+hydrate-polymarket-f1-history:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli hydrate-polymarket-f1-history --execute
+
+discover-session-polymarket:
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli discover-session-polymarket --session-key $(SESSION_KEY) --execute
 
 lint:
 	pnpm lint

@@ -125,7 +125,7 @@ class DataQualityCheck(Base):
     __tablename__ = "data_quality_checks"
     __table_args__ = (UniqueConstraint("check_name", name="uq_data_quality_check_name"),)
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uuid_str)
     check_name: Mapped[str] = mapped_column(String(128), index=True)
     dataset: Mapped[str] = mapped_column(String(128), index=True)
     severity: Mapped[str] = mapped_column(String(16), default="warning")
@@ -138,8 +138,8 @@ class DataQualityCheck(Base):
 class DataQualityResult(Base):
     __tablename__ = "data_quality_results"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    check_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uuid_str)
+    check_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     job_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     dataset: Mapped[str] = mapped_column(String(128), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
@@ -218,8 +218,18 @@ class F1SessionResult(Base):
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     position: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    fastest_lap_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
-    gap_to_leader: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    result_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    result_time_kind: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    result_time_display: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    result_time_segments_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    gap_to_leader_display: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    gap_to_leader_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gap_to_leader_laps_behind: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gap_to_leader_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
+    gap_to_leader_segments_json: Mapped[list[Any] | None] = mapped_column(JSON, nullable=True)
+    dnf: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    dns: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    dsq: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     number_of_laps: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
@@ -307,8 +317,14 @@ class F1Interval(Base):
     session_id: Mapped[str] = mapped_column(String(64), index=True)
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     observed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    gap_to_leader: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    interval: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gap_to_leader_display: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    gap_to_leader_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gap_to_leader_laps_behind: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gap_to_leader_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    interval_display: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    interval_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    interval_laps_behind: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    interval_status: Mapped[str | None] = mapped_column(String(16), nullable=True)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 

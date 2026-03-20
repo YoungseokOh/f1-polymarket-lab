@@ -89,11 +89,35 @@ class PolymarketConnector:
             if max_pages is not None and page_index >= max_pages:
                 return
 
-    def list_events(self, *, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
-        payload = self._get_json(
-            f"{self.gamma_base_url}/events",
-            params={"limit": limit, "offset": offset},
-        )
+    def list_events(
+        self,
+        *,
+        limit: int = 100,
+        offset: int = 0,
+        active: bool | None = None,
+        closed: bool | None = None,
+        archived: bool | None = None,
+        tag_id: int | str | None = None,
+        order: str | None = None,
+        ascending: bool | None = None,
+        slug: str | None = None,
+    ) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {"limit": limit, "offset": offset}
+        if active is not None:
+            params["active"] = str(active).lower()
+        if closed is not None:
+            params["closed"] = str(closed).lower()
+        if archived is not None:
+            params["archived"] = str(archived).lower()
+        if tag_id is not None:
+            params["tag_id"] = str(tag_id)
+        if order is not None:
+            params["order"] = order
+        if ascending is not None:
+            params["ascending"] = str(ascending).lower()
+        if slug is not None:
+            params["slug"] = slug
+        payload = self._get_json(f"{self.gamma_base_url}/events", params=params)
         return list(payload)
 
     def iterate_events(
@@ -101,11 +125,26 @@ class PolymarketConnector:
         *,
         batch_size: int = 100,
         max_pages: int | None = None,
+        active: bool | None = None,
+        closed: bool | None = None,
+        archived: bool | None = None,
+        tag_id: int | str | None = None,
+        order: str | None = None,
+        ascending: bool | None = None,
     ) -> Iterator[tuple[int, list[dict[str, Any]]]]:
         offset = 0
         page_index = 0
         while True:
-            batch = self.list_events(limit=batch_size, offset=offset)
+            batch = self.list_events(
+                limit=batch_size,
+                offset=offset,
+                active=active,
+                closed=closed,
+                archived=archived,
+                tag_id=tag_id,
+                order=order,
+                ascending=ascending,
+            )
             if not batch:
                 return
             yield offset, batch
@@ -115,6 +154,13 @@ class PolymarketConnector:
             page_index += 1
             if max_pages is not None and page_index >= max_pages:
                 return
+
+    def public_search(self, query: str) -> dict[str, Any]:
+        payload = self._get_json(
+            f"{self.gamma_base_url}/public-search",
+            params={"q": query},
+        )
+        return dict(payload)
 
     def get_order_book(self, token_id: str) -> dict[str, Any] | None:
         payload = self._get_json(

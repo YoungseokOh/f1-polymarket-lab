@@ -10,7 +10,9 @@ dependencies = [
   "f1-polymarket-common",
   "fastf1>=3.5.3",
   "httpx>=0.28.1",
-  "tenacity>=9.0.0"
+  "paho-mqtt>=2.1.0",
+  "tenacity>=9.0.0",
+  "websockets>=16.0"
 ]
 
 [tool.uv.sources]

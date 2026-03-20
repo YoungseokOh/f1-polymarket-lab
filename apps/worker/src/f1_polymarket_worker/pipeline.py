@@ -2,14 +2,28 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from typing import Any
+from datetime import date, datetime, timezone
+from typing import Any, cast
 
-from f1_polymarket_lab.common import Settings, get_settings, payload_checksum, slugify, utc_now
+from f1_polymarket_lab.common import (
+    Settings,
+    get_settings,
+    parse_gap_value,
+    parse_result_time_value,
+    payload_checksum,
+    slugify,
+    stable_uuid,
+    timestamp_date_variants,
+    utc_now,
+)
+from f1_polymarket_lab.common import (
+    normalize_float as common_normalize_float,
+)
 from f1_polymarket_lab.connectors import (
     FastF1ScheduleConnector,
     OpenF1Connector,
     PolymarketConnector,
+    infer_market_scheduled_date,
     parse_market_taxonomy,
 )
 from f1_polymarket_lab.connectors.base import FetchBatch
@@ -51,9 +65,11 @@ from f1_polymarket_lab.storage.models import (
     PolymarketResolution,
     PolymarketToken,
     PolymarketTrade,
+    PolymarketWsMessageManifest,
+    SourceFetchLog,
 )
 from f1_polymarket_lab.storage.repository import upsert_records
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from f1_polymarket_worker.lineage import (
@@ -94,33 +110,82 @@ def parse_dt(value: Any) -> datetime | None:
     return datetime.fromisoformat(text)
 
 
+MODERN_WEEKEND_SESSION_CODE_BY_NAME = {
+    "Practice 1": "FP1",
+    "Practice 2": "FP2",
+    "Practice 3": "FP3",
+    "Qualifying": "Q",
+    "Sprint Qualifying": "SQ",
+    "Sprint Shootout": "SQ",
+    "Sprint": "S",
+    "Race": "R",
+}
+MODERN_WEEKEND_SESSION_CODES = frozenset(MODERN_WEEKEND_SESSION_CODE_BY_NAME.values())
+PRACTICE_SESSION_CODES = frozenset({"FP1", "FP2", "FP3"})
+
+
 def session_code_from_name(name: str) -> str | None:
-    mapping = {
-        "Practice 1": "FP1",
-        "Practice 2": "FP2",
-        "Practice 3": "FP3",
-        "Qualifying": "Q",
-        "Sprint": "S",
-        "Race": "R",
-    }
-    return mapping.get(name)
+    return MODERN_WEEKEND_SESSION_CODE_BY_NAME.get(name)
+
+
+def is_practice_session_name(name: str) -> bool:
+    session_code = session_code_from_name(name)
+    return session_code in PRACTICE_SESSION_CODES
+
+
+def _delete_sessions_and_children(ctx: PipelineContext, session_ids: list[str]) -> None:
+    if not session_ids:
+        return
+
+    for model in (
+        F1SessionResult,
+        F1Lap,
+        F1Stint,
+        F1Weather,
+        F1RaceControl,
+        F1Position,
+        F1Interval,
+        F1Pit,
+        F1TelemetryIndex,
+        F1TeamRadioMetadata,
+        F1StartingGrid,
+        MappingCandidate,
+        EntityMappingF1ToPolymarket,
+        ManualMappingOverride,
+    ):
+        column_name = (
+            "f1_session_id"
+            if model in {MappingCandidate, EntityMappingF1ToPolymarket, ManualMappingOverride}
+            else "session_id"
+        )
+        ctx.db.execute(delete(model).where(getattr(model, column_name).in_(session_ids)))
+
+    ctx.db.execute(delete(F1Session).where(F1Session.id.in_(session_ids)))
+
+
+def _delete_meetings_and_children(ctx: PipelineContext, meeting_ids: list[str]) -> None:
+    if not meeting_ids:
+        return
+
+    for model in (
+        F1Weather,
+        F1RaceControl,
+        MappingCandidate,
+        EntityMappingF1ToPolymarket,
+        ManualMappingOverride,
+    ):
+        column_name = (
+            "f1_meeting_id"
+            if model in {MappingCandidate, EntityMappingF1ToPolymarket, ManualMappingOverride}
+            else "meeting_id"
+        )
+        ctx.db.execute(delete(model).where(getattr(model, column_name).in_(meeting_ids)))
+
+    ctx.db.execute(delete(F1Meeting).where(F1Meeting.id.in_(meeting_ids)))
 
 
 def normalize_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        numeric = [float(item) for item in value if item not in (None, "")]
-        return min(numeric) if numeric else None
-    return float(value)
-
-
-def normalize_text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, list):
-        return " | ".join(str(item) for item in value if item not in (None, ""))
-    return str(value)
+    return cast(float | None, common_normalize_float(value))
 
 
 def best_levels(book: dict[str, Any] | None) -> tuple[float | None, float | None]:
@@ -309,6 +374,9 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
     schedule_by_location = {str(record.get("Location", "")).lower(): record for record in schedule}
     sessions_by_meeting: dict[int, list[dict[str, Any]]] = {}
     for record in sessions:
+        session_name = str(record.get("session_name") or "")
+        if session_code_from_name(session_name) not in MODERN_WEEKEND_SESSION_CODES:
+            continue
         sessions_by_meeting.setdefault(int(record["meeting_key"]), []).append(record)
 
     meeting_rows: list[dict[str, Any]] = []
@@ -355,6 +423,9 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
         }
         for record in records:
             session_name = str(record.get("session_name") or "")
+            session_code = session_code_from_name(session_name)
+            if session_code not in MODERN_WEEKEND_SESSION_CODES:
+                continue
             session_rows.append(
                 {
                     "id": f"session:{record['session_key']}",
@@ -363,15 +434,45 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
                     "meeting_id": meeting_id,
                     "session_name": session_name,
                     "session_type": record.get("session_type"),
-                    "session_code": session_code_from_name(session_name),
+                    "session_code": session_code,
                     "date_start_utc": parse_dt(record.get("date_start")),
                     "date_end_utc": parse_dt(record.get("date_end")),
                     "status": "complete" if record.get("date_end") else "scheduled",
                     "session_order": None,
-                    "is_practice": session_name.startswith("Practice"),
+                    "is_practice": session_code in PRACTICE_SESSION_CODES,
                     "raw_payload": record,
                 }
             )
+
+    stale_session_ids = [
+        str(session_id)
+        for session_id in ctx.db.scalars(
+            select(F1Session.id)
+            .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+            .where(
+                F1Meeting.season == season,
+                F1Session.source == "openf1",
+                (
+                    F1Session.session_code.is_(None)
+                    | F1Session.session_code.not_in(tuple(MODERN_WEEKEND_SESSION_CODES))
+                ),
+            )
+        ).all()
+    ]
+    _delete_sessions_and_children(ctx, stale_session_ids)
+    current_meeting_ids = {row["id"] for row in meeting_rows}
+    existing_openf1_meeting_ids = [
+        str(meeting_id)
+        for meeting_id in ctx.db.scalars(
+            select(F1Meeting.id).where(F1Meeting.season == season, F1Meeting.source == "openf1")
+        ).all()
+    ]
+    stale_meeting_ids = [
+        meeting_id
+        for meeting_id in existing_openf1_meeting_ids
+        if meeting_id not in current_meeting_ids
+    ]
+    _delete_meetings_and_children(ctx, stale_meeting_ids)
 
     upsert_records(ctx.db, F1Meeting, meeting_rows)
     upsert_records(ctx.db, F1Session, session_rows)
@@ -535,6 +636,7 @@ def hydrate_f1_session(
             "raw_payload": driver,
         }
 
+    session_code = session_row.session_code or session_code_from_name(session_row.session_name)
     results = connector.fetch_session_results(session_key)
     persist_fetch(
         ctx,
@@ -551,14 +653,34 @@ def hydrate_f1_session(
         partition={"session_key": str(session_key)},
     )
     for result in results:
+        parsed_result_time = parse_result_time_value(
+            result.get("duration"),
+            session_code=session_code,
+            session_type=session_row.session_type,
+        )
+        parsed_gap = parse_gap_value(
+            result.get("gap_to_leader"),
+            position=result.get("position"),
+            allow_segments=True,
+        )
         result_rows.append(
             {
                 "id": f"{session_key}:{result.get('driver_number')}",
                 "session_id": session_row.id,
                 "driver_id": f"driver:{result.get('driver_number')}",
                 "position": result.get("position"),
-                "fastest_lap_seconds": normalize_float(result.get("duration")),
-                "gap_to_leader": normalize_text(result.get("gap_to_leader")),
+                "result_time_seconds": parsed_result_time.seconds,
+                "result_time_kind": parsed_result_time.kind,
+                "result_time_display": parsed_result_time.display,
+                "result_time_segments_json": parsed_result_time.segments_json,
+                "gap_to_leader_display": parsed_gap.display,
+                "gap_to_leader_seconds": parsed_gap.seconds,
+                "gap_to_leader_laps_behind": parsed_gap.laps_behind,
+                "gap_to_leader_status": parsed_gap.status,
+                "gap_to_leader_segments_json": parsed_gap.segments_json,
+                "dnf": result.get("dnf"),
+                "dns": result.get("dns"),
+                "dsq": result.get("dsq"),
                 "number_of_laps": result.get("number_of_laps"),
                 "raw_payload": result,
             }
@@ -661,38 +783,44 @@ def hydrate_f1_session(
         )
 
     if meeting_key is not None:
-        weather = connector.fetch_weather(meeting_key)
-        persist_fetch(
-            ctx,
-            job_run_id=run.id,
-            batch=FetchBatch(
-                source="openf1",
-                dataset="weather",
-                endpoint="/v1/weather",
-                params={"meeting_key": meeting_key},
-                payload=weather,
-                response_status=200,
-                checkpoint=str(meeting_key),
-            ),
-            partition={"meeting_key": str(meeting_key)},
+        existing_weather = ctx.db.scalar(
+            select(func.count())
+            .select_from(F1Weather)
+            .where(F1Weather.meeting_id == session_row.meeting_id)
         )
-        for item in weather:
-            weather_rows.append(
-                {
-                    "id": f"{meeting_key}:{item.get('date')}",
-                    "meeting_id": session_row.meeting_id,
-                    "session_id": None,
-                    "observed_at_utc": parse_dt(item.get("date")),
-                    "air_temperature_c": item.get("air_temperature"),
-                    "humidity_pct": item.get("humidity"),
-                    "pressure_hpa": item.get("pressure"),
-                    "rainfall": item.get("rainfall"),
-                    "track_temperature_c": item.get("track_temperature"),
-                    "wind_direction_deg": item.get("wind_direction"),
-                    "wind_speed_mps": item.get("wind_speed"),
-                    "raw_payload": item,
-                }
+        if not existing_weather:
+            weather = connector.fetch_weather(meeting_key)
+            persist_fetch(
+                ctx,
+                job_run_id=run.id,
+                batch=FetchBatch(
+                    source="openf1",
+                    dataset="weather",
+                    endpoint="/v1/weather",
+                    params={"meeting_key": meeting_key},
+                    payload=weather,
+                    response_status=200,
+                    checkpoint=str(meeting_key),
+                ),
+                partition={"meeting_key": str(meeting_key)},
             )
+            for item in weather:
+                weather_rows.append(
+                    {
+                        "id": f"{meeting_key}:{item.get('date')}",
+                        "meeting_id": session_row.meeting_id,
+                        "session_id": None,
+                        "observed_at_utc": parse_dt(item.get("date")),
+                        "air_temperature_c": item.get("air_temperature"),
+                        "humidity_pct": item.get("humidity"),
+                        "pressure_hpa": item.get("pressure"),
+                        "rainfall": item.get("rainfall"),
+                        "track_temperature_c": item.get("track_temperature"),
+                        "wind_direction_deg": item.get("wind_direction"),
+                        "wind_speed_mps": item.get("wind_speed"),
+                        "raw_payload": item,
+                    }
+                )
 
     if include_extended:
         positions = connector.fetch_positions(session_key)
@@ -738,14 +866,22 @@ def hydrate_f1_session(
             partition={"session_key": str(session_key)},
         )
         for item in intervals:
+            parsed_gap = parse_gap_value(item.get("gap_to_leader"), null_means_leader=True)
+            parsed_interval = parse_gap_value(item.get("interval"), null_means_leader=True)
             interval_rows.append(
                 {
                     "id": f"{session_key}:{item.get('driver_number')}:{item.get('date')}",
                     "session_id": session_row.id,
                     "driver_id": f"driver:{item.get('driver_number')}",
                     "observed_at_utc": parse_dt(item.get("date")),
-                    "gap_to_leader": normalize_text(item.get("gap_to_leader")),
-                    "interval": normalize_float(item.get("interval")),
+                    "gap_to_leader_display": parsed_gap.display,
+                    "gap_to_leader_seconds": parsed_gap.seconds,
+                    "gap_to_leader_laps_behind": parsed_gap.laps_behind,
+                    "gap_to_leader_status": parsed_gap.status,
+                    "interval_display": parsed_interval.display,
+                    "interval_seconds": parsed_interval.seconds,
+                    "interval_laps_behind": parsed_interval.laps_behind,
+                    "interval_status": parsed_interval.status,
                     "raw_payload": item,
                 }
             )
@@ -1130,9 +1266,19 @@ def sync_polymarket_catalog(
         for event in extract_event_rows(batch):
             event_rows[event["id"]] = event
         for market in batch:
+            event_context = market.get("events", [{}])[0] if market.get("events") else {}
             parsed = parse_market_taxonomy(
                 market.get("question") or "",
-                market.get("description"),
+                " ".join(
+                    str(value or "")
+                    for value in [
+                        market.get("description"),
+                        event_context.get("description"),
+                    ]
+                    if value
+                )
+                or None,
+                title=event_context.get("title"),
             )
             token_ids = json.loads(market.get("clobTokenIds") or "[]")
             outcomes = json.loads(market.get("outcomes") or "[]")
@@ -1212,7 +1358,11 @@ def sync_polymarket_catalog(
             )
             label_rows.append(
                 {
-                    "id": f"{market['id']}:{taxonomy_version.id}",
+                    "id": stable_uuid(
+                        "market-taxonomy-label",
+                        str(market["id"]),
+                        taxonomy_version.id,
+                    ),
                     "market_id": str(market["id"]),
                     "taxonomy_version_id": taxonomy_version.id,
                     "taxonomy": parsed.taxonomy,
@@ -1534,11 +1684,17 @@ def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) ->
     )
 
     sessions = ctx.db.scalars(
-        select(F1Session).where(F1Session.session_code.in_(["FP1", "FP2", "FP3"]))
+        select(F1Session).where(F1Session.session_code.in_(["FP1", "FP2", "FP3", "Q", "S", "R"]))
     ).all()
     markets = ctx.db.scalars(
         select(PolymarketMarket).where(PolymarketMarket.taxonomy != "other")
     ).all()
+    existing_candidates = {
+        candidate.id: candidate for candidate in ctx.db.scalars(select(MappingCandidate)).all()
+    }
+    existing_mappings = {
+        mapping.id: mapping for mapping in ctx.db.scalars(select(EntityMappingF1ToPolymarket)).all()
+    }
     overrides = {
         override.polymarket_market_id: override
         for override in ctx.db.scalars(
@@ -1548,8 +1704,45 @@ def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) ->
 
     candidate_rows: list[dict[str, Any]] = []
     mapping_rows: list[dict[str, Any]] = []
+
+    def _session_date_variants(session: F1Session) -> tuple[date, ...]:
+        raw_payload = session.raw_payload or {}
+        offset = raw_payload.get("gmt_offset")
+        offset_text = str(offset) if isinstance(offset, str) else None
+        return cast(
+            tuple[date, ...],
+            timestamp_date_variants(session.date_start_utc, gmt_offset=offset_text),
+        )
+
+    def _market_delta_days(
+        session: F1Session,
+        market: PolymarketMarket,
+        event: PolymarketEvent | None,
+    ) -> tuple[float | None, str]:
+        scheduled_date = infer_market_scheduled_date(
+            market.slug,
+            market.question,
+            market.description,
+            None if event is None else event.slug,
+            None if event is None else event.title,
+            None if event is None else event.description,
+        )
+        session_dates = _session_date_variants(session)
+        if scheduled_date is not None and session_dates:
+            delta = min(
+                abs((scheduled_date - candidate_date).days)
+                for candidate_date in session_dates
+            )
+            return float(delta), "scheduled_date"
+        if market.start_at_utc is None or session.date_start_utc is None:
+            return None, "unavailable"
+        delta = abs((market.start_at_utc - session.date_start_utc).total_seconds()) / 86400
+        return delta, "market_start_at_utc"
+
     for market in markets:
         if market.target_session_code is None:
+            continue
+        if market.taxonomy_confidence is not None and market.taxonomy_confidence < min_confidence:
             continue
         if market.id in overrides:
             override = overrides[market.id]
@@ -1570,16 +1763,23 @@ def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) ->
             continue
 
         best_match: tuple[F1Session, float, dict[str, Any]] | None = None
+        event = None if market.event_id is None else ctx.db.get(PolymarketEvent, market.event_id)
         for session in sessions:
             if session.session_code != market.target_session_code:
                 continue
-            if market.start_at_utc is None or session.date_start_utc is None:
+            delta_days, delta_source = _market_delta_days(session, market, event)
+            if delta_days is None:
                 continue
-            delta_days = abs((market.start_at_utc - session.date_start_utc).total_seconds()) / 86400
             if delta_days > 3:
                 continue
-            confidence = max(0.1, 1.0 - (delta_days / 3.0))
-            rationale = {"delta_days": round(delta_days, 3)}
+            date_confidence = max(0.1, 1.0 - (delta_days / 3.0))
+            taxonomy_confidence = market.taxonomy_confidence or min_confidence
+            confidence = min(0.99, (taxonomy_confidence * 0.55) + (date_confidence * 0.45))
+            rationale = {
+                "delta_days": round(delta_days, 3),
+                "delta_source": delta_source,
+                "taxonomy_confidence": taxonomy_confidence,
+            }
             if best_match is None or confidence > best_match[1]:
                 best_match = (session, confidence, rationale)
 
@@ -1587,22 +1787,27 @@ def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) ->
             continue
         session, confidence, rationale = best_match
         candidate_id = f"{market.id}:{session.id}"
-        candidate_rows.append(
-            {
-                "id": candidate_id,
-                "f1_meeting_id": session.meeting_id,
-                "f1_session_id": session.id,
-                "polymarket_event_id": market.event_id,
-                "polymarket_market_id": market.id,
-                "candidate_type": market.taxonomy,
-                "confidence": confidence,
-                "matched_by": "session_code_time_window",
-                "rationale_json": rationale,
-                "status": "candidate",
-                "created_at": utc_now(),
-            }
-        )
+        existing_candidate = existing_candidates.get(candidate_id)
+        if existing_candidate is None or (existing_candidate.confidence or 0.0) < confidence:
+            candidate_rows.append(
+                {
+                    "id": candidate_id,
+                    "f1_meeting_id": session.meeting_id,
+                    "f1_session_id": session.id,
+                    "polymarket_event_id": market.event_id,
+                    "polymarket_market_id": market.id,
+                    "candidate_type": market.taxonomy,
+                    "confidence": confidence,
+                    "matched_by": "session_code_time_window",
+                    "rationale_json": rationale,
+                    "status": "candidate",
+                    "created_at": utc_now(),
+                }
+            )
         if confidence >= min_confidence:
+            existing_mapping = existing_mappings.get(candidate_id)
+            if existing_mapping is not None and (existing_mapping.confidence or 0.0) >= confidence:
+                continue
             mapping_rows.append(
                 {
                     "id": candidate_id,
@@ -1667,12 +1872,58 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "active": True,
             "created_at": utc_now(),
         },
+        {
+            "id": "dq:f1_telemetry_nonempty",
+            "check_name": "f1_telemetry_nonempty",
+            "dataset": "f1_telemetry_index",
+            "severity": "warning",
+            "rule_type": "min_count",
+            "rule_config": {"min_count": 1},
+            "active": True,
+            "created_at": utc_now(),
+        },
+        {
+            "id": "dq:polymarket_ws_manifest_nonempty",
+            "check_name": "polymarket_ws_manifest_nonempty",
+            "dataset": "polymarket_ws_message_manifest",
+            "severity": "warning",
+            "rule_type": "min_count",
+            "rule_config": {"min_count": 1},
+            "active": True,
+            "created_at": utc_now(),
+        },
+        {
+            "id": "dq:polymarket_active_market_freshness",
+            "check_name": "polymarket_active_market_freshness",
+            "dataset": "source_fetch_log",
+            "severity": "warning",
+            "rule_type": "freshness_hours",
+            "rule_config": {"max_age_hours": 24},
+            "active": True,
+            "created_at": utc_now(),
+        },
     ]
     upsert_records(ctx.db, DataQualityCheck, checks, conflict_columns=["check_name"])
 
     result_rows: list[dict[str, Any]] = []
     session_count = ctx.db.scalar(select(func.count()).select_from(F1Session)) or 0
     market_count = ctx.db.scalar(select(func.count()).select_from(PolymarketMarket)) or 0
+    telemetry_count = ctx.db.scalar(select(func.count()).select_from(F1TelemetryIndex)) or 0
+    ws_manifest_count = (
+        ctx.db.scalar(select(func.count()).select_from(PolymarketWsMessageManifest)) or 0
+    )
+    latest_polymarket_fetch = ctx.db.scalar(
+        select(SourceFetchLog)
+        .where(SourceFetchLog.source.in_(["polymarket", "polymarket_ws"]))
+        .order_by(SourceFetchLog.finished_at.desc())
+        .limit(1)
+    )
+    freshness_hours = None
+    if latest_polymarket_fetch is not None and latest_polymarket_fetch.finished_at is not None:
+        freshness_hours = round(
+            (utc_now() - latest_polymarket_fetch.finished_at).total_seconds() / 3600,
+            3,
+        )
     result_rows.append(
         {
             "id": f"dq-result:{run.id}:f1_sessions",
@@ -1693,6 +1944,44 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "dataset": "polymarket_markets",
             "status": "pass" if market_count > 0 else "fail",
             "metrics_json": {"row_count": market_count},
+            "sample_path": None,
+            "observed_at": utc_now(),
+        }
+    )
+    result_rows.append(
+        {
+            "id": f"dq-result:{run.id}:f1_telemetry",
+            "check_id": "dq:f1_telemetry_nonempty",
+            "job_run_id": run.id,
+            "dataset": "f1_telemetry_index",
+            "status": "pass" if telemetry_count > 0 else "fail",
+            "metrics_json": {"row_count": telemetry_count},
+            "sample_path": None,
+            "observed_at": utc_now(),
+        }
+    )
+    result_rows.append(
+        {
+            "id": f"dq-result:{run.id}:polymarket_ws_manifest",
+            "check_id": "dq:polymarket_ws_manifest_nonempty",
+            "job_run_id": run.id,
+            "dataset": "polymarket_ws_message_manifest",
+            "status": "pass" if ws_manifest_count > 0 else "fail",
+            "metrics_json": {"row_count": ws_manifest_count},
+            "sample_path": None,
+            "observed_at": utc_now(),
+        }
+    )
+    result_rows.append(
+        {
+            "id": f"dq-result:{run.id}:polymarket_freshness",
+            "check_id": "dq:polymarket_active_market_freshness",
+            "job_run_id": run.id,
+            "dataset": "source_fetch_log",
+            "status": "pass"
+            if freshness_hours is not None and freshness_hours <= 24
+            else "fail",
+            "metrics_json": {"freshness_hours": freshness_hours},
             "sample_path": None,
             "observed_at": utc_now(),
         }

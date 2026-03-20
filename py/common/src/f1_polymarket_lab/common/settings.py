@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     duckdb_path: Path = Path("data/warehouse/lab.duckdb")
     openf1_username: str | None = None
     openf1_password: str | None = None
+    openf1_max_requests_per_minute: int = 24
+    openf1_max_requests_per_second: int = 2
     next_public_api_base_url: str = "http://127.0.0.1:8000"
 
     @computed_field  # type: ignore[prop-decorator]

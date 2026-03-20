@@ -50,15 +50,21 @@ def upsert_records(
         _fallback_upsert(session, model, payload, primary_key=primary_key)
         return
 
-    statement = pg_insert(table).values(payload)
-    update_values = {
-        column.name: getattr(statement.excluded, column.name)
-        for column in table.columns
-        if column.name not in conflict_keys
-    }
-    session.execute(
-        statement.on_conflict_do_update(
-            index_elements=conflict_keys,
-            set_=update_values,
+    parameter_budget = 60000
+    parameter_count = max(1, len(payload[0]))
+    batch_size = max(1, parameter_budget // parameter_count)
+
+    for index in range(0, len(payload), batch_size):
+        batch = payload[index : index + batch_size]
+        statement = pg_insert(table).values(batch)
+        update_values = {
+            column.name: getattr(statement.excluded, column.name)
+            for column in table.columns
+            if column.name not in conflict_keys
+        }
+        session.execute(
+            statement.on_conflict_do_update(
+                index_elements=conflict_keys,
+                set_=update_values,
+            )
         )
-    )
