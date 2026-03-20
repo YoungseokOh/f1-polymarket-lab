@@ -78,6 +78,16 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli validat
 
 This writes a reusable subset report under `data/reports/validation/<season>/<report-slug>/summary.{json,md}` with per-session F1 counts, Polymarket discovery/mapping summaries, representative market probes, and a research-readiness verdict.
 
+For a fast China sprint-weekend research pass that tests `FP1 -> SQ pole` paper edge, run:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-china-fp1-to-sq-snapshot --meeting-key 1280 --season 2026 --entry-offset-min 10 --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-china-sq-pole-baseline --snapshot-id <SNAPSHOT_ID> --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli report-china-sq-pole-quicktest --snapshot-id <SNAPSHOT_ID> --execute
+```
+
+This quick test writes a feature snapshot to the local lake, persists baseline predictions and metrics, and renders a short research report under `data/reports/research/<season>/<report-slug>/summary.{json,md}`. It is a paper-edge study, not an executable orderbook backtest.
+
 For event-weekend live capture, run:
 
 ```bash

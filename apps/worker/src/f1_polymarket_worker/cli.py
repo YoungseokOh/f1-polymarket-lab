@@ -26,6 +26,11 @@ from f1_polymarket_worker.pipeline import (
     run_data_quality_checks,
     sync_f1_calendar,
 )
+from f1_polymarket_worker.quicktest import (
+    build_china_fp1_to_sq_snapshot,
+    report_china_sq_pole_quicktest,
+    run_china_sq_pole_baseline,
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -313,6 +318,63 @@ def validate_f1_weekend_subset_command(
             season=season,
             report_slug=report_slug,
             validation_mode=validation_mode,
+        )
+    typer.echo(result)
+
+
+@app.command("build-china-fp1-to-sq-snapshot")
+def build_china_fp1_to_sq_snapshot_command(
+    meeting_key: int = typer.Option(1280, "--meeting-key"),
+    season: int = typer.Option(2026, "--season"),
+    entry_offset_min: int = typer.Option(10, "--entry-offset-min"),
+    fidelity: int = typer.Option(60, "--fidelity"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = build_china_fp1_to_sq_snapshot(
+            context,
+            meeting_key=meeting_key,
+            season=season,
+            entry_offset_min=entry_offset_min,
+            fidelity=fidelity,
+        )
+    typer.echo(result)
+
+
+@app.command("run-china-sq-pole-baseline")
+def run_china_sq_pole_baseline_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = run_china_sq_pole_baseline(
+            context,
+            snapshot_id=snapshot_id,
+            min_edge=min_edge,
+        )
+    typer.echo(result)
+
+
+@app.command("report-china-sq-pole-quicktest")
+def report_china_sq_pole_quicktest_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    report_slug: str | None = typer.Option(None, "--report-slug"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = report_china_sq_pole_quicktest(
+            context,
+            snapshot_id=snapshot_id,
+            report_slug=report_slug,
+            min_edge=min_edge,
         )
     typer.echo(result)
 
