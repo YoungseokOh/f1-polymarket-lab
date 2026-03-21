@@ -6,7 +6,13 @@ build-backend = "setuptools.build_meta"
 name = "f1-polymarket-models"
 version = "0.1.0"
 requires-python = ">=3.10,<3.13"
-dependencies = ["f1-polymarket-common"]
+dependencies = [
+  "f1-polymarket-common",
+  "xgboost>=2.1.4",
+  "scikit-learn>=1.6.1",
+  "numpy>=1.26",
+  "polars>=1.0",
+]
 
 [tool.uv.sources]
 f1-polymarket-common = { workspace = true }

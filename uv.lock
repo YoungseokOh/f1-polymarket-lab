@@ -735,10 +735,22 @@ version = "0.1.0"
 source = { editable = "py/models" }
 dependencies = [
     { name = "f1-polymarket-common" },
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "polars" },
+    { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "xgboost" },
 ]
 
 [package.metadata]
-requires-dist = [{ name = "f1-polymarket-common", editable = "py/common" }]
+requires-dist = [
+    { name = "f1-polymarket-common", editable = "py/common" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "polars", specifier = ">=1.0" },
+    { name = "scikit-learn", specifier = ">=1.6.1" },
+    { name = "xgboost", specifier = ">=2.1.4" },
+]
 
 [[package]]
 name = "f1-polymarket-storage"

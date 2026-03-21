@@ -14,6 +14,12 @@ from f1_polymarket_worker.backtest import (
     settle_single_gp,
 )
 from f1_polymarket_worker.demo_ingest import ingest_demo
+from f1_polymarket_worker.gp_registry import (
+    GP_REGISTRY,
+    build_snapshot,
+    generate_report,
+    run_baseline,
+)
 from f1_polymarket_worker.historical import (
     bootstrap_f1db_history,
     sweep_polymarket_historical_poles,
@@ -37,20 +43,6 @@ from f1_polymarket_worker.pipeline import (
     reconcile_mappings,
     run_data_quality_checks,
     sync_f1_calendar,
-)
-from f1_polymarket_worker.quicktest import (
-    build_aus_fp1_to_q_snapshot,
-    build_china_fp1_to_sq_snapshot,
-    build_japan_fp1_to_q_snapshot,
-    build_japan_pre_weekend_snapshot,
-    report_aus_q_pole_quicktest,
-    report_china_sq_pole_quicktest,
-    report_japan_fp1_q_pole_quicktest,
-    report_japan_q_pole_quicktest,
-    run_aus_q_pole_baseline,
-    run_china_sq_pole_baseline,
-    run_japan_fp1_q_pole_baseline,
-    run_japan_q_pole_baseline,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -383,228 +375,84 @@ def validate_f1_weekend_subset_command(
     typer.echo(result)
 
 
-@app.command("build-china-fp1-to-sq-snapshot")
-def build_china_fp1_to_sq_snapshot_command(
-    meeting_key: int = typer.Option(1280, "--meeting-key"),
-    season: int = typer.Option(2026, "--season"),
-    entry_offset_min: int = typer.Option(10, "--entry-offset-min"),
-    fidelity: int = typer.Option(60, "--fidelity"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = build_china_fp1_to_sq_snapshot(
-            context,
-            meeting_key=meeting_key,
-            season=season,
-            entry_offset_min=entry_offset_min,
-            fidelity=fidelity,
-        )
-    typer.echo(result)
 
 
-@app.command("run-china-sq-pole-baseline")
-def run_china_sq_pole_baseline_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = run_china_sq_pole_baseline(
-            context,
-            snapshot_id=snapshot_id,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
+# ---------------------------------------------------------------------------
+# Dynamic GP quicktest commands — auto-registered from GP_REGISTRY
+# ---------------------------------------------------------------------------
+def _register_gp_commands() -> None:
+    """Register build/run/report commands for every GP in the registry."""
+    for gp in GP_REGISTRY:
+        code = gp.short_code.replace("_", "-")
+
+        # -- build --
+        def _make_build(cfg=gp):  # noqa: B006
+            def _cmd(
+                meeting_key: int = typer.Option(cfg.meeting_key, "--meeting-key"),
+                season: int = typer.Option(cfg.season, "--season"),
+                entry_offset_min: int = typer.Option(cfg.entry_offset_min, "--entry-offset-min"),
+                fidelity: int = typer.Option(cfg.fidelity, "--fidelity"),
+                execute: bool = typer.Option(False, "--execute/--plan-only"),
+            ) -> None:
+                settings = get_settings()
+                with db_session(settings.database_url) as session:
+                    context = PipelineContext(db=session, execute=execute)
+                    result = build_snapshot(
+                        context,
+                        cfg,
+                        meeting_key=meeting_key,
+                        season=season,
+                        entry_offset_min=entry_offset_min,
+                        fidelity=fidelity,
+                    )
+                typer.echo(result)
+            return _cmd
+
+        app.command(f"build-{code}-snapshot")(_make_build())
+
+        # -- run baseline --
+        def _make_run(cfg=gp):  # noqa: B006
+            def _cmd(
+                snapshot_id: str = typer.Option(..., "--snapshot-id"),
+                min_edge: float = typer.Option(cfg.min_edge, "--min-edge"),
+                execute: bool = typer.Option(False, "--execute/--plan-only"),
+            ) -> None:
+                settings = get_settings()
+                with db_session(settings.database_url) as session:
+                    context = PipelineContext(db=session, execute=execute)
+                    result = run_baseline(
+                        context, cfg, snapshot_id=snapshot_id, min_edge=min_edge
+                    )
+                typer.echo(result)
+            return _cmd
+
+        app.command(f"run-{code}-baseline")(_make_run())
+
+        # -- report --
+        def _make_report(cfg=gp):  # noqa: B006
+            def _cmd(
+                snapshot_id: str = typer.Option(..., "--snapshot-id"),
+                report_slug: str | None = typer.Option(None, "--report-slug"),
+                min_edge: float = typer.Option(cfg.min_edge, "--min-edge"),
+                execute: bool = typer.Option(False, "--execute/--plan-only"),
+            ) -> None:
+                settings = get_settings()
+                with db_session(settings.database_url) as session:
+                    context = PipelineContext(db=session, execute=execute)
+                    result = generate_report(
+                        context,
+                        cfg,
+                        snapshot_id=snapshot_id,
+                        report_slug=report_slug,
+                        min_edge=min_edge,
+                    )
+                typer.echo(result)
+            return _cmd
+
+        app.command(f"report-{code}-quicktest")(_make_report())
 
 
-@app.command("report-china-sq-pole-quicktest")
-def report_china_sq_pole_quicktest_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    report_slug: str | None = typer.Option(None, "--report-slug"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = report_china_sq_pole_quicktest(
-            context,
-            snapshot_id=snapshot_id,
-            report_slug=report_slug,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("build-aus-fp1-to-q-snapshot")
-def build_aus_fp1_to_q_snapshot_command(
-    meeting_key: int = typer.Option(1279, "--meeting-key"),
-    season: int = typer.Option(2026, "--season"),
-    entry_offset_min: int = typer.Option(10, "--entry-offset-min"),
-    fidelity: int = typer.Option(60, "--fidelity"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = build_aus_fp1_to_q_snapshot(
-            context,
-            meeting_key=meeting_key,
-            season=season,
-            entry_offset_min=entry_offset_min,
-            fidelity=fidelity,
-        )
-    typer.echo(result)
-
-
-@app.command("run-aus-q-pole-baseline")
-def run_aus_q_pole_baseline_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = run_aus_q_pole_baseline(
-            context,
-            snapshot_id=snapshot_id,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("report-aus-q-pole-quicktest")
-def report_aus_q_pole_quicktest_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    report_slug: str | None = typer.Option(None, "--report-slug"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = report_aus_q_pole_quicktest(
-            context,
-            snapshot_id=snapshot_id,
-            report_slug=report_slug,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("build-japan-pre-weekend-snapshot")
-def build_japan_pre_weekend_snapshot_command(
-    meeting_key: int = typer.Option(1281, "--meeting-key"),
-    season: int = typer.Option(2026, "--season"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = build_japan_pre_weekend_snapshot(
-            context,
-            meeting_key=meeting_key,
-            season=season,
-        )
-    typer.echo(result)
-
-
-@app.command("run-japan-q-pole-baseline")
-def run_japan_q_pole_baseline_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = run_japan_q_pole_baseline(
-            context,
-            snapshot_id=snapshot_id,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("report-japan-q-pole-quicktest")
-def report_japan_q_pole_quicktest_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    report_slug: str | None = typer.Option(None, "--report-slug"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = report_japan_q_pole_quicktest(
-            context,
-            snapshot_id=snapshot_id,
-            report_slug=report_slug,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("build-japan-fp1-to-q-snapshot")
-def build_japan_fp1_to_q_snapshot_command(
-    meeting_key: int = typer.Option(1281, "--meeting-key"),
-    season: int = typer.Option(2026, "--season"),
-    entry_offset_min: int = typer.Option(10, "--entry-offset-min"),
-    fidelity: int = typer.Option(60, "--fidelity"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = build_japan_fp1_to_q_snapshot(
-            context,
-            meeting_key=meeting_key,
-            season=season,
-            entry_offset_min=entry_offset_min,
-            fidelity=fidelity,
-        )
-    typer.echo(result)
-
-
-@app.command("run-japan-fp1-q-pole-baseline")
-def run_japan_fp1_q_pole_baseline_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = run_japan_fp1_q_pole_baseline(
-            context,
-            snapshot_id=snapshot_id,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
-
-
-@app.command("report-japan-fp1-q-pole-quicktest")
-def report_japan_fp1_q_pole_quicktest_command(
-    snapshot_id: str = typer.Option(..., "--snapshot-id"),
-    report_slug: str | None = typer.Option(None, "--report-slug"),
-    min_edge: float = typer.Option(0.05, "--min-edge"),
-    execute: bool = typer.Option(False, "--execute/--plan-only"),
-) -> None:
-    settings = get_settings()
-    with db_session(settings.database_url) as session:
-        context = PipelineContext(db=session, execute=execute)
-        result = report_japan_fp1_q_pole_quicktest(
-            context,
-            snapshot_id=snapshot_id,
-            report_slug=report_slug,
-            min_edge=min_edge,
-        )
-    typer.echo(result)
+_register_gp_commands()
 
 
 @app.command("save-backtest-report")
@@ -784,6 +632,107 @@ def run_walk_forward_backtest_command(
             typer.echo(f"Report saved: {report_path}")
         else:
             typer.echo(result)
+
+
+@app.command("train-xgb-walk-forward")
+def train_xgb_walk_forward_command(
+    snapshot_ids: str = typer.Option(
+        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+    ),
+    meeting_keys: str = typer.Option(
+        ..., "--meeting-keys", help="Comma-separated meeting keys",
+    ),
+    stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    min_train_gps: int = typer.Option(
+        2, "--min-train-gps", help="Min training GPs",
+    ),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Train XGBoost walk-forward across GP snapshots."""
+    from f1_polymarket_lab.common import stable_uuid
+    from f1_polymarket_lab.models import build_walk_forward_splits, train_one_split
+    from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
+    from f1_polymarket_lab.storage.repository import upsert_records
+
+    sids = [s.strip() for s in snapshot_ids.split(",")]
+    mkeys = [int(k.strip()) for k in meeting_keys.split(",")]
+    if len(sids) != len(mkeys):
+        typer.echo("Error: snapshot-ids and meeting-keys must have the same count.", err=True)
+        raise typer.Exit(1)
+
+    splits = build_walk_forward_splits(mkeys, min_train=min_train_gps)
+    if not splits:
+        typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
+        raise typer.Exit(1)
+
+    key_to_sid = dict(zip(mkeys, sids, strict=True))
+
+    if not execute:
+        for sp in splits:
+            typer.echo(f"[plan] train on {sp.train_meeting_keys} → test {sp.test_meeting_key}")
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        from f1_polymarket_lab.storage.models import FeatureSnapshot
+
+        all_results = []
+        for sp in splits:
+            train_paths = []
+            for mk in sp.train_meeting_keys:
+                snap = session.get(FeatureSnapshot, key_to_sid[mk])
+                if snap and snap.storage_path:
+                    train_paths.append(snap.storage_path)
+            test_snap = session.get(FeatureSnapshot, key_to_sid[sp.test_meeting_key])
+            if not test_snap or not test_snap.storage_path:
+                typer.echo(f"Skipping test meeting_key={sp.test_meeting_key}: snapshot not found")
+                continue
+            if not train_paths:
+                typer.echo(f"Skipping test meeting_key={sp.test_meeting_key}: no training data")
+                continue
+
+            import polars as pl_module
+
+            train_df = pl_module.concat([pl_module.read_parquet(p) for p in train_paths])
+            test_df = pl_module.read_parquet(test_snap.storage_path)
+
+            model_run_id = stable_uuid("xgb-run", key_to_sid[sp.test_meeting_key], stage)
+            result = train_one_split(
+                train_df, test_df,
+                model_run_id=model_run_id,
+                stage=stage,
+                min_edge=min_edge,
+            )
+
+            run_record = ModelRun(
+                id=result.model_run_id,
+                stage=stage,
+                model_family="xgboost",
+                model_name="xgb_walk_forward",
+                dataset_version=test_snap.feature_version,
+                feature_snapshot_id=test_snap.id,
+                test_start=test_snap.as_of_ts,
+                test_end=test_snap.as_of_ts,
+                config_json=result.config,
+                metrics_json=result.metrics,
+            )
+            upsert_records(session, ModelRun, [run_record], key_columns=["id"])
+
+            pred_records = [ModelPrediction(**p) for p in result.predictions]
+            upsert_records(
+                session, ModelPrediction, pred_records,
+                key_columns=["model_run_id", "market_id"],
+            )
+
+            session.commit()
+            all_results.append(result)
+            typer.echo(
+                f"GP {sp.test_meeting_key}: brier={result.metrics['brier_score']:.4f} "
+                f"log_loss={result.metrics['log_loss']:.4f} bets={result.metrics['bet_count']}"
+            )
+
+        typer.echo(f"Walk-forward training complete: {len(all_results)} folds evaluated.")
 
 
 @app.command("worker")

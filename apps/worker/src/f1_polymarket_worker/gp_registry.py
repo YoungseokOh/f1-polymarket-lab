@@ -177,6 +177,23 @@ GP_REGISTRY: list[GPConfig] = [
             "The universe is limited to Japanese GP FP1 -> Qualifying pole markets.",
         ),
     ),
+    GPConfig(
+        name="Bahrain Grand Prix",
+        short_code="bahrain",
+        meeting_key=1282,
+        season=2026,
+        target_session_code="Q",
+        snapshot_type="fp1_to_q_pole_quicktest",
+        snapshot_dataset="bahrain_fp1_to_q_pole_snapshot",
+        baseline_stage="bahrain_q_pole_quicktest",
+        baseline_names=("market_implied", "fp1_pace", "hybrid"),
+        report_slug="2026-bahrain-grand-prix-q-pole-quicktest",
+        title_suffix="Q Pole Quick Test",
+        notes=(
+            "This is a paper-edge quick test, not an executable orderbook backtest.",
+            "The universe is limited to Bahrain GP FP1 -> Qualifying pole markets.",
+        ),
+    ),
 ]
 
 
