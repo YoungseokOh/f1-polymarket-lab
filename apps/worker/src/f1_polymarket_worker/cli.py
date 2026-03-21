@@ -735,6 +735,230 @@ def train_xgb_walk_forward_command(
         typer.echo(f"Walk-forward training complete: {len(all_results)} folds evaluated.")
 
 
+@app.command("train-lgbm-walk-forward")
+def train_lgbm_walk_forward_command(
+    snapshot_ids: str = typer.Option(
+        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+    ),
+    meeting_keys: str = typer.Option(
+        ..., "--meeting-keys", help="Comma-separated meeting keys",
+    ),
+    stage: str = typer.Option("lgbm_pole_quicktest", "--stage"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    min_train_gps: int = typer.Option(
+        2, "--min-train-gps", help="Min training GPs",
+    ),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Train LightGBM walk-forward across GP snapshots."""
+    from f1_polymarket_lab.common import stable_uuid
+    from f1_polymarket_lab.models import build_walk_forward_splits, train_one_split_lgbm
+    from f1_polymarket_lab.storage.models import FeatureSnapshot, ModelPrediction, ModelRun
+    from f1_polymarket_lab.storage.repository import upsert_records
+
+    sids = [s.strip() for s in snapshot_ids.split(",")]
+    mkeys = [int(k.strip()) for k in meeting_keys.split(",")]
+    if len(sids) != len(mkeys):
+        typer.echo("Error: snapshot-ids and meeting-keys must have the same count.", err=True)
+        raise typer.Exit(1)
+
+    splits = build_walk_forward_splits(mkeys, min_train=min_train_gps)
+    if not splits:
+        typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
+        raise typer.Exit(1)
+
+    key_to_sid = dict(zip(mkeys, sids, strict=True))
+
+    if not execute:
+        for sp in splits:
+            typer.echo(f"[plan] train on {sp.train_meeting_keys} → test {sp.test_meeting_key}")
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        import polars as pl_module
+
+        all_results = []
+        for sp in splits:
+            train_paths = []
+            for mk in sp.train_meeting_keys:
+                snap = session.get(FeatureSnapshot, key_to_sid[mk])
+                if snap and snap.storage_path:
+                    train_paths.append(snap.storage_path)
+            test_snap = session.get(FeatureSnapshot, key_to_sid[sp.test_meeting_key])
+            if not test_snap or not test_snap.storage_path:
+                typer.echo(f"Skipping test meeting_key={sp.test_meeting_key}: snapshot not found")
+                continue
+            if not train_paths:
+                typer.echo(f"Skipping test meeting_key={sp.test_meeting_key}: no training data")
+                continue
+
+            train_df = pl_module.concat([pl_module.read_parquet(p) for p in train_paths])
+            test_df = pl_module.read_parquet(test_snap.storage_path)
+
+            model_run_id = stable_uuid("lgbm-run", key_to_sid[sp.test_meeting_key], stage)
+            result = train_one_split_lgbm(
+                train_df, test_df,
+                model_run_id=model_run_id,
+                stage=stage,
+                min_edge=min_edge,
+            )
+
+            run_record = ModelRun(
+                id=result.model_run_id,
+                stage=stage,
+                model_family="lightgbm",
+                model_name="lgbm_walk_forward",
+                dataset_version=test_snap.feature_version,
+                feature_snapshot_id=test_snap.id,
+                test_start=test_snap.as_of_ts,
+                test_end=test_snap.as_of_ts,
+                config_json=result.config,
+                metrics_json=result.metrics,
+            )
+            upsert_records(session, ModelRun, [run_record], key_columns=["id"])
+
+            pred_records = [ModelPrediction(**p) for p in result.predictions]
+            upsert_records(
+                session, ModelPrediction, pred_records,
+                key_columns=["model_run_id", "market_id"],
+            )
+
+            session.commit()
+            all_results.append(result)
+            typer.echo(
+                f"GP {sp.test_meeting_key}: brier={result.metrics['brier_score']:.4f} "
+                f"log_loss={result.metrics['log_loss']:.4f} bets={result.metrics['bet_count']}"
+            )
+
+        typer.echo(f"LightGBM walk-forward training complete: {len(all_results)} folds evaluated.")
+
+
+@app.command("tune-xgb-optuna")
+def tune_xgb_optuna_command(
+    snapshot_ids: str = typer.Option(
+        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+    ),
+    meeting_keys: str = typer.Option(
+        ..., "--meeting-keys", help="Comma-separated meeting keys",
+    ),
+    stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
+    n_trials: int = typer.Option(50, "--n-trials"),
+    min_train_gps: int = typer.Option(
+        2, "--min-train-gps", help="Min training GPs",
+    ),
+) -> None:
+    """Run Optuna hyperparameter search for XGBoost."""
+    from f1_polymarket_lab.models import tune_xgb
+    from f1_polymarket_lab.storage.models import FeatureSnapshot
+
+    sids = [s.strip() for s in snapshot_ids.split(",")]
+    mkeys = [int(k.strip()) for k in meeting_keys.split(",")]
+    if len(sids) != len(mkeys):
+        typer.echo("Error: snapshot-ids and meeting-keys must have the same count.", err=True)
+        raise typer.Exit(1)
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        import polars as pl_module
+
+        dataframes: dict[int, pl_module.DataFrame] = {}
+        key_to_sid = dict(zip(mkeys, sids, strict=True))
+        for mk in mkeys:
+            snap = session.get(FeatureSnapshot, key_to_sid[mk])
+            if snap and snap.storage_path:
+                dataframes[mk] = pl_module.read_parquet(snap.storage_path)
+
+    result = tune_xgb(
+        dataframes,
+        mkeys,
+        stage=stage,
+        n_trials=n_trials,
+        min_train_gps=min_train_gps,
+    )
+    typer.echo(f"Best log_loss: {result.get('best_log_loss', 'N/A')}")
+    typer.echo(f"Best params: {result.get('best_params', {})}")
+
+
+@app.command("paper-trade")
+def paper_trade_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    bet_size: float = typer.Option(10.0, "--bet-size"),
+    max_daily_loss: float = typer.Option(100.0, "--max-daily-loss"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Run paper trading simulation using model predictions."""
+    from f1_polymarket_lab.storage.models import FeatureSnapshot, ModelPrediction
+
+    from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        from sqlalchemy import select
+
+        preds = session.scalars(
+            select(ModelPrediction).where(
+                ModelPrediction.model_run_id == model_run_id
+            )
+        ).all()
+
+        snap = session.get(FeatureSnapshot, snapshot_id)
+        if not preds:
+            typer.echo("No predictions found for this model run.")
+            raise typer.Exit(1)
+
+        if not execute:
+            typer.echo(f"[plan] Would paper-trade {len(preds)} predictions")
+            return
+
+        import polars as pl_module
+
+        snapshot_df = (
+            pl_module.read_parquet(snap.storage_path) if snap and snap.storage_path else None
+        )
+        price_lookup: dict[str, float] = {}
+        label_lookup: dict[str, bool] = {}
+        if snapshot_df is not None:
+            for row in snapshot_df.to_dicts():
+                mid = row.get("market_id")
+                if mid:
+                    price_lookup[mid] = float(row.get("entry_yes_price", 0.5))
+                    label = row.get("label_yes")
+                    if label is not None:
+                        label_lookup[mid] = bool(int(label))
+
+        engine = PaperTradingEngine(
+            config=PaperTradeConfig(
+                min_edge=min_edge,
+                bet_size=bet_size,
+                max_daily_loss=max_daily_loss,
+            )
+        )
+
+        for pred in preds:
+            market_price = price_lookup.get(pred.market_id or "", 0.5)
+            engine.evaluate_signal(
+                market_id=pred.market_id or "",
+                token_id=pred.token_id,
+                model_prob=pred.probability_yes or 0.5,
+                market_price=market_price,
+            )
+
+        # Settle against known outcomes
+        for mid, outcome in label_lookup.items():
+            engine.settle_position(mid, outcome)
+
+        summary = engine.summary()
+        log_path = settings.data_root / "reports" / "paper_trading" / f"{model_run_id}.json"
+        engine.save_log(log_path)
+
+        typer.echo(f"Paper trading complete: {summary['trades_executed']} trades, "
+                   f"PnL: ${summary['total_pnl']:.2f}")
+        typer.echo(f"Log saved: {log_path}")
+
+
 @app.command("worker")
 def worker() -> None:
     typer.echo("Worker heartbeat loop started. Use the CLI to trigger ingestion jobs.")

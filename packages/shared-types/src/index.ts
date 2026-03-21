@@ -85,3 +85,50 @@ export interface EntityMapping {
   matchedBy: string | null;
   overrideFlag: boolean;
 }
+
+export interface ModelRun {
+  id: string;
+  stage: string;
+  modelFamily: string;
+  modelName: string;
+  datasetVersion: string | null;
+  featureSnapshotId: string | null;
+  configJson: Record<string, unknown> | null;
+  metricsJson: Record<string, unknown> | null;
+  artifactUri: string | null;
+  createdAt: string;
+}
+
+export interface ModelPrediction {
+  id: string;
+  modelRunId: string;
+  marketId: string | null;
+  tokenId: string | null;
+  asOfTs: string;
+  probabilityYes: number | null;
+  probabilityNo: number | null;
+  rawScore: number | null;
+  calibrationVersion: string | null;
+}
+
+export interface BacktestResult {
+  id: string;
+  backtestRunId: string;
+  strategyName: string;
+  stage: string;
+  startAt: string | null;
+  endAt: string | null;
+  metricsJson: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface FeatureSnapshot {
+  id: string;
+  marketId: string | null;
+  sessionId: string | null;
+  asOfTs: string;
+  snapshotType: string;
+  featureVersion: string;
+  storagePath: string | null;
+  rowCount: number | null;
+}

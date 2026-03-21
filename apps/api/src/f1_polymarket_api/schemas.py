@@ -128,3 +128,58 @@ class DataQualityResultResponse(BaseModel):
     status: str
     metrics_json: dict[str, object] | None
     observed_at: datetime
+
+
+class ModelRunResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    stage: str
+    model_family: str
+    model_name: str
+    dataset_version: str | None
+    feature_snapshot_id: str | None
+    config_json: dict[str, object] | None
+    metrics_json: dict[str, object] | None
+    artifact_uri: str | None
+    created_at: datetime
+
+
+class ModelPredictionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    market_id: str | None
+    token_id: str | None
+    as_of_ts: datetime
+    probability_yes: float | None
+    probability_no: float | None
+    raw_score: float | None
+    calibration_version: str | None
+
+
+class BacktestResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    backtest_run_id: str
+    strategy_name: str
+    stage: str
+    start_at: datetime | None
+    end_at: datetime | None
+    metrics_json: dict[str, object] | None
+    created_at: datetime
+
+
+class FeatureSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    market_id: str | None
+    session_id: str | None
+    as_of_ts: datetime
+    snapshot_type: str
+    feature_version: str
+    storage_path: str | None
+    row_count: int | None

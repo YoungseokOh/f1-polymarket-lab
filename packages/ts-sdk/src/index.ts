@@ -1,10 +1,14 @@
 import { getWebEnv } from "@f1/config";
 import type {
   ApiHealth,
+  BacktestResult,
   EntityMapping,
   F1Meeting,
   F1Session,
+  FeatureSnapshot,
   FreshnessRecord,
+  ModelPrediction,
+  ModelRun,
   PolymarketEvent,
   PolymarketMarket,
 } from "@f1/shared-types";
@@ -205,4 +209,125 @@ export const sdk = {
     ),
   mappings: async () =>
     (await apiGet<EntityMappingApi[]>("/api/v1/mappings")).map(mapMapping),
+  modelRuns: async (): Promise<ModelRun[]> => {
+    const records = await apiGet<ModelRunApi[]>("/api/v1/model-runs");
+    return records.map(mapModelRun);
+  },
+  predictions: async (modelRunId?: string): Promise<ModelPrediction[]> => {
+    const path = modelRunId
+      ? `/api/v1/predictions?model_run_id=${encodeURIComponent(modelRunId)}`
+      : "/api/v1/predictions";
+    const records = await apiGet<ModelPredictionApi[]>(path);
+    return records.map(mapModelPrediction);
+  },
+  backtestResults: async (): Promise<BacktestResult[]> => {
+    const records = await apiGet<BacktestResultApi[]>("/api/v1/backtest/results");
+    return records.map(mapBacktestResult);
+  },
+  snapshots: async (): Promise<FeatureSnapshot[]> => {
+    const records = await apiGet<FeatureSnapshotApi[]>("/api/v1/snapshots");
+    return records.map(mapFeatureSnapshot);
+  },
 };
+
+type ModelRunApi = {
+  id: string;
+  stage: string;
+  model_family: string;
+  model_name: string;
+  dataset_version: string | null;
+  feature_snapshot_id: string | null;
+  config_json: Record<string, unknown> | null;
+  metrics_json: Record<string, unknown> | null;
+  artifact_uri: string | null;
+  created_at: string;
+};
+
+type ModelPredictionApi = {
+  id: string;
+  model_run_id: string;
+  market_id: string | null;
+  token_id: string | null;
+  as_of_ts: string;
+  probability_yes: number | null;
+  probability_no: number | null;
+  raw_score: number | null;
+  calibration_version: string | null;
+};
+
+type BacktestResultApi = {
+  id: string;
+  backtest_run_id: string;
+  strategy_name: string;
+  stage: string;
+  start_at: string | null;
+  end_at: string | null;
+  metrics_json: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type FeatureSnapshotApi = {
+  id: string;
+  market_id: string | null;
+  session_id: string | null;
+  as_of_ts: string;
+  snapshot_type: string;
+  feature_version: string;
+  storage_path: string | null;
+  row_count: number | null;
+};
+
+function mapModelRun(record: ModelRunApi): ModelRun {
+  return {
+    id: record.id,
+    stage: record.stage,
+    modelFamily: record.model_family,
+    modelName: record.model_name,
+    datasetVersion: record.dataset_version,
+    featureSnapshotId: record.feature_snapshot_id,
+    configJson: record.config_json,
+    metricsJson: record.metrics_json,
+    artifactUri: record.artifact_uri,
+    createdAt: record.created_at,
+  };
+}
+
+function mapModelPrediction(record: ModelPredictionApi): ModelPrediction {
+  return {
+    id: record.id,
+    modelRunId: record.model_run_id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    asOfTs: record.as_of_ts,
+    probabilityYes: record.probability_yes,
+    probabilityNo: record.probability_no,
+    rawScore: record.raw_score,
+    calibrationVersion: record.calibration_version,
+  };
+}
+
+function mapBacktestResult(record: BacktestResultApi): BacktestResult {
+  return {
+    id: record.id,
+    backtestRunId: record.backtest_run_id,
+    strategyName: record.strategy_name,
+    stage: record.stage,
+    startAt: record.start_at,
+    endAt: record.end_at,
+    metricsJson: record.metrics_json,
+    createdAt: record.created_at,
+  };
+}
+
+function mapFeatureSnapshot(record: FeatureSnapshotApi): FeatureSnapshot {
+  return {
+    id: record.id,
+    marketId: record.market_id,
+    sessionId: record.session_id,
+    asOfTs: record.as_of_ts,
+    snapshotType: record.snapshot_type,
+    featureVersion: record.feature_version,
+    storagePath: record.storage_path,
+    rowCount: record.row_count,
+  };
+}

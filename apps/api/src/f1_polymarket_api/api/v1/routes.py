@@ -2,22 +2,30 @@ from __future__ import annotations
 
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
+    BacktestResultResponse,
     CursorStateResponse,
     DataQualityResultResponse,
     EntityMappingResponse,
     F1MeetingResponse,
     F1SessionResponse,
+    FeatureSnapshotResponse,
     FreshnessResponse,
     IngestionJobRunResponse,
+    ModelPredictionResponse,
+    ModelRunResponse,
     PolymarketEventResponse,
     PolymarketMarketResponse,
 )
 from f1_polymarket_lab.storage.models import (
+    BacktestResult,
     DataQualityResult,
     EntityMappingF1ToPolymarket,
     F1Meeting,
     F1Session,
+    FeatureSnapshot,
     IngestionJobRun,
+    ModelPrediction,
+    ModelRun,
     PolymarketEvent,
     PolymarketMarket,
     SourceCursorState,
@@ -108,3 +116,39 @@ def quality_results(db: Session = Depends(get_db_session)) -> list[DataQualityRe
         select(DataQualityResult).order_by(DataQualityResult.observed_at.desc())
     ).all()
     return [DataQualityResultResponse.model_validate(record) for record in records]
+
+
+@router.get("/model-runs", response_model=list[ModelRunResponse])
+def model_runs(db: Session = Depends(get_db_session)) -> list[ModelRunResponse]:
+    records = db.scalars(
+        select(ModelRun).order_by(ModelRun.created_at.desc())
+    ).all()
+    return [ModelRunResponse.model_validate(record) for record in records]
+
+
+@router.get("/predictions", response_model=list[ModelPredictionResponse])
+def predictions(
+    model_run_id: str | None = None,
+    db: Session = Depends(get_db_session),
+) -> list[ModelPredictionResponse]:
+    stmt = select(ModelPrediction).order_by(ModelPrediction.as_of_ts.desc())
+    if model_run_id:
+        stmt = stmt.where(ModelPrediction.model_run_id == model_run_id)
+    records = db.scalars(stmt.limit(500)).all()
+    return [ModelPredictionResponse.model_validate(record) for record in records]
+
+
+@router.get("/backtest/results", response_model=list[BacktestResultResponse])
+def backtest_results(db: Session = Depends(get_db_session)) -> list[BacktestResultResponse]:
+    records = db.scalars(
+        select(BacktestResult).order_by(BacktestResult.created_at.desc())
+    ).all()
+    return [BacktestResultResponse.model_validate(record) for record in records]
+
+
+@router.get("/snapshots", response_model=list[FeatureSnapshotResponse])
+def snapshots(db: Session = Depends(get_db_session)) -> list[FeatureSnapshotResponse]:
+    records = db.scalars(
+        select(FeatureSnapshot).order_by(FeatureSnapshot.as_of_ts.desc())
+    ).all()
+    return [FeatureSnapshotResponse.model_validate(record) for record in records]

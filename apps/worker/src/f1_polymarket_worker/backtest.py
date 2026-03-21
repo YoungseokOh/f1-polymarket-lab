@@ -42,7 +42,7 @@ from f1_polymarket_worker.pipeline import PipelineContext
 BACKTEST_STAGE = "pole_position_backtest"
 DEFAULT_BET_SIZE = 10.0
 DEFAULT_MIN_EDGE = 0.05
-FEE_RATE = 0.0  # Polymarket charges 0% maker fee, ~2% taker — conservative: 0
+FEE_RATE = 0.02  # Polymarket taker fee ~2%
 
 
 # ---------------------------------------------------------------------------

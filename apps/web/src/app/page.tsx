@@ -13,7 +13,7 @@ function lastFetched(records: Awaited<ReturnType<typeof sdk.freshness>>) {
 }
 
 export default async function HomePage() {
-  const [health, freshness, sessions, markets, mappings] = await Promise.all([
+  const [health, freshness, sessions, markets, mappings, modelRuns, predictions] = await Promise.all([
     sdk.health().catch(() => ({
       service: "api",
       status: "offline",
@@ -23,6 +23,8 @@ export default async function HomePage() {
     sdk.sessions().catch(() => []),
     sdk.markets().catch(() => []),
     sdk.mappings().catch(() => []),
+    sdk.modelRuns().catch(() => []),
+    sdk.predictions().catch(() => []),
   ]);
 
   const practiceSessions = sessions.filter((session) => session.isPractice);
@@ -89,12 +91,27 @@ export default async function HomePage() {
         />
       </section>
 
+      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          label="Model Runs"
+          value={modelRuns.length}
+          hint="training runs"
+        />
+        <StatCard
+          label="Predictions"
+          value={predictions.length}
+          hint="probability forecasts"
+        />
+      </section>
+
       <section className="grid gap-6 lg:grid-cols-2">
         <Panel title="Explorers" eyebrow="Browse">
           <div className="grid gap-3 text-sm">
             <Link href="/sessions">F1 Session Explorer</Link>
             <Link href="/markets">Polymarket Explorer</Link>
             <Link href="/lineage">Lineage & Freshness</Link>
+            <Link href="/predictions">Model Predictions</Link>
+            <Link href="/backtest">Backtest Results</Link>
           </div>
         </Panel>
         <Panel title="Modeling Order" eyebrow="Non-Negotiable">
