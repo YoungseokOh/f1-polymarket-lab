@@ -411,7 +411,7 @@ def test_build_china_fp1_to_sq_snapshot_creates_snapshot(
     def fail_hydrate(*args: object, **kwargs: object) -> None:
         raise AssertionError("hydrate_polymarket_market should not be called when history exists")
 
-    monkeypatch.setattr("f1_polymarket_worker.quicktest.hydrate_polymarket_market", fail_hydrate)
+    monkeypatch.setattr("f1_polymarket_worker.gp_registry.hydrate_polymarket_market", fail_hydrate)
 
     result = build_china_fp1_to_sq_snapshot(
         context,
@@ -438,7 +438,7 @@ def test_run_china_sq_pole_baseline_and_report(
     seed_china_quicktest_fixture(session)
 
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market",
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market",
         lambda *args, **kwargs: None,
     )
 
@@ -834,7 +834,7 @@ def test_build_aus_fp1_to_q_snapshot_creates_snapshot(
     def fail_hydrate(*args: object, **kwargs: object) -> None:
         raise AssertionError("hydrate_polymarket_market should not be called when history exists")
 
-    monkeypatch.setattr("f1_polymarket_worker.quicktest.hydrate_polymarket_market", fail_hydrate)
+    monkeypatch.setattr("f1_polymarket_worker.gp_registry.hydrate_polymarket_market", fail_hydrate)
 
     result = build_aus_fp1_to_q_snapshot(
         context,
@@ -861,7 +861,7 @@ def test_run_aus_q_pole_baseline_and_report(
     seed_aus_quicktest_fixture(session)
 
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market",
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market",
         lambda *args, **kwargs: None,
     )
 
@@ -1241,7 +1241,7 @@ def test_build_japan_pre_weekend_snapshot_creates_snapshot(
     def fail_hydrate(*args: object, **kwargs: object) -> None:
         raise AssertionError("hydrate_polymarket_market should not be called when history exists")
 
-    monkeypatch.setattr("f1_polymarket_worker.quicktest.hydrate_polymarket_market", fail_hydrate)
+    monkeypatch.setattr("f1_polymarket_worker.gp_registry.hydrate_polymarket_market", fail_hydrate)
 
     result = build_japan_pre_weekend_snapshot(
         context,
@@ -1266,7 +1266,7 @@ def test_run_japan_q_pole_baseline_and_report(
     seed_japan_quicktest_fixture(session)
 
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market",
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market",
         lambda *args, **kwargs: None,
     )
 
@@ -1315,7 +1315,7 @@ def test_build_japan_fp1_to_q_snapshot_creates_snapshot(
     session, context = build_context(tmp_path)
     seed_japan_quicktest_fixture(session)
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market", lambda *a, **kw: None
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market", lambda *a, **kw: None
     )
     result = build_japan_fp1_to_q_snapshot(context, meeting_key=1281, season=2026)
     assert result["status"] == "completed"
@@ -1342,7 +1342,7 @@ def test_run_japan_fp1_q_pole_baseline_creates_model_runs(
     session, context = build_context(tmp_path)
     seed_japan_quicktest_fixture(session)
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market", lambda *a, **kw: None
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market", lambda *a, **kw: None
     )
     snapshot_result = build_japan_fp1_to_q_snapshot(context, meeting_key=1281, season=2026)
     snapshot_id = snapshot_result["snapshot_id"]
@@ -1367,7 +1367,7 @@ def test_report_japan_fp1_q_pole_quicktest(
     session, context = build_context(tmp_path)
     seed_japan_quicktest_fixture(session)
     monkeypatch.setattr(
-        "f1_polymarket_worker.quicktest.hydrate_polymarket_market", lambda *a, **kw: None
+        "f1_polymarket_worker.gp_registry.hydrate_polymarket_market", lambda *a, **kw: None
     )
     snapshot_result = build_japan_fp1_to_q_snapshot(context, meeting_key=1281, season=2026)
     snapshot_id = snapshot_result["snapshot_id"]
