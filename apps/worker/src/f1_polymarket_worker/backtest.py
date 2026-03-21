@@ -326,6 +326,19 @@ def settle_backtest(
     }
 
     # Get meeting info for date range
+    if not enriched_rows:
+        finish_job_run(ctx.db, run, status="completed", records_written=0)
+        return {
+            "job_run_id": run.id,
+            "status": "completed",
+            "backtest_run_id": stable_uuid("backtest", snapshot_id, strategy_name, model_name),
+            "snapshot_id": snapshot_id,
+            "strategy_name": strategy_name,
+            "model_name": model_name,
+            "bets_placed": 0,
+            "metrics": _compute_backtest_metrics([]),
+            "settled_rows": [],
+        }
     meeting_key = int(enriched_rows[0]["meeting_key"])
     meeting = ctx.db.scalar(
         select(F1Meeting).where(F1Meeting.meeting_key == meeting_key)
@@ -336,10 +349,16 @@ def settle_backtest(
     order_records: list[dict[str, Any]] = []
     position_records: list[dict[str, Any]] = []
     settled_rows: list[dict[str, Any]] = []
+    skipped_unresolved: int = 0
+    skipped_tiny_price: int = 0
 
     for row in enriched_rows:
         prob = float(row[probability_key])
         entry_price, slippage = _get_executable_entry_price(row)
+
+        if entry_price < 0.005:
+            skipped_tiny_price += 1
+            continue
 
         # Use negRisk-normalized market probability for edge calculation.
         # entry_yes_price is inflated in negRisk batches (all YES prices sum > 1),
@@ -356,7 +375,7 @@ def settle_backtest(
         outcome = _resolve_market_outcome(resolution, row)
 
         if outcome is None:
-            # Cannot settle — skip
+            skipped_unresolved += 1
             continue
 
         # PnL: YES wins → payout $1 per share, so profit = (1 - entry_price) * quantity
@@ -476,6 +495,8 @@ def settle_backtest(
         "bets_placed": len(settled_rows),
         "metrics": metrics,
         "settled_rows": settled_rows,
+        "skipped_unresolved": skipped_unresolved,
+        "skipped_tiny_price": skipped_tiny_price,
     }
 
 
@@ -526,7 +547,8 @@ def _compute_backtest_metrics(
     # Calibration buckets (10% intervals)
     buckets: dict[str, dict[str, Any]] = {}
     for prob, outcome in zip(probs, outcomes, strict=True):
-        bucket_key = f"{int(prob * 10) * 10}-{int(prob * 10) * 10 + 10}%"
+        clamped = max(0.0, min(prob, 0.9999))
+        bucket_key = f"{int(clamped * 10) * 10}-{int(clamped * 10) * 10 + 10}%"
         if bucket_key not in buckets:
             buckets[bucket_key] = {"count": 0, "wins": 0, "avg_prob": 0.0}
         buckets[bucket_key]["count"] += 1

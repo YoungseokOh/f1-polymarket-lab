@@ -41,12 +41,14 @@ from f1_polymarket_worker.pipeline import (
 from f1_polymarket_worker.quicktest import (
     build_aus_fp1_to_q_snapshot,
     build_china_fp1_to_sq_snapshot,
+    build_japan_fp1_to_q_snapshot,
     build_japan_pre_weekend_snapshot,
     report_aus_q_pole_quicktest,
     report_china_sq_pole_quicktest,
     report_japan_q_pole_quicktest,
     run_aus_q_pole_baseline,
     run_china_sq_pole_baseline,
+    run_japan_fp1_q_pole_baseline,
     run_japan_q_pole_baseline,
 )
 
@@ -545,6 +547,92 @@ def report_japan_q_pole_quicktest_command(
             min_edge=min_edge,
         )
     typer.echo(result)
+
+
+@app.command("build-japan-fp1-to-q-snapshot")
+def build_japan_fp1_to_q_snapshot_command(
+    meeting_key: int = typer.Option(1281, "--meeting-key"),
+    season: int = typer.Option(2026, "--season"),
+    entry_offset_min: int = typer.Option(10, "--entry-offset-min"),
+    fidelity: int = typer.Option(60, "--fidelity"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = build_japan_fp1_to_q_snapshot(
+            context,
+            meeting_key=meeting_key,
+            season=season,
+            entry_offset_min=entry_offset_min,
+            fidelity=fidelity,
+        )
+    typer.echo(result)
+
+
+@app.command("run-japan-fp1-q-pole-baseline")
+def run_japan_fp1_q_pole_baseline_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = run_japan_fp1_q_pole_baseline(
+            context,
+            snapshot_id=snapshot_id,
+            min_edge=min_edge,
+        )
+    typer.echo(result)
+
+
+@app.command("save-backtest-report")
+def save_backtest_report_command(
+    snapshot_ids: str = typer.Option(..., "--snapshot-ids", help="Comma-separated snapshot IDs"),
+    meeting_keys: str = typer.Option(..., "--meeting-keys", help="Comma-separated meeting keys"),
+    season: int = typer.Option(2026, "--season"),
+    strategy_name: str = typer.Option("hybrid_flat_bet", "--strategy"),
+    model_name: str = typer.Option("hybrid", "--model"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    bet_size: float = typer.Option(10.0, "--bet-size"),
+    slug: str | None = typer.Option(None, "--slug"),
+    title: str | None = typer.Option(None, "--title"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Run walk-forward backtest and save a report to disk."""
+    sids = [s.strip() for s in snapshot_ids.split(",")]
+    mkeys = [int(k.strip()) for k in meeting_keys.split(",")]
+    if len(sids) != len(mkeys):
+        typer.echo("Error: snapshot-ids and meeting-keys must have the same count.", err=True)
+        raise typer.Exit(1)
+    gp_configs = [
+        {"meeting_key": mk, "season": season, "snapshot_id": sid}
+        for mk, sid in zip(mkeys, sids, strict=True)
+    ]
+    report_slug = slug or f"{season}-season-backtest"
+    report_title = title or f"{season} Season Backtest (R1\u2013R{len(gp_configs)})"
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = run_walk_forward_backtest(
+            context,
+            gp_configs=gp_configs,
+            strategy_name=strategy_name,
+            model_name=model_name,
+            min_edge=min_edge,
+            bet_size=bet_size,
+        )
+        if execute:
+            report_path = save_backtest_report(
+                context,
+                result,
+                slug=report_slug,
+                title=report_title,
+            )
+            typer.echo(f"Report saved: {report_path}")
+        else:
+            typer.echo(result)
 
 
 @app.command("collect-meeting-data")
