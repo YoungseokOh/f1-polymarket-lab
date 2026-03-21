@@ -17,6 +17,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 
+def _has_fastf1() -> bool:
+    try:
+        import fastf1  # noqa: F401
+        return True
+    except ModuleNotFoundError:
+        return False
+
+
 def build_context(tmp_path: Path) -> tuple[Session, PipelineContext]:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
@@ -67,6 +75,10 @@ def test_normalize_float_ignores_non_numeric_interval_values() -> None:
     assert normalize_float(["", None, "3.5", "+1 LAP", "2.1"]) == 2.1
 
 
+@pytest.mark.skipif(
+    not _has_fastf1(),
+    reason="fastf1 not installed",
+)
 def test_sync_f1_calendar_execute_keeps_only_weekend_sessions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

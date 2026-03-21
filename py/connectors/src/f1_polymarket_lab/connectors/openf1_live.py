@@ -7,9 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-import paho.mqtt.client as mqtt
-
 from .openf1 import OpenF1Connector
+
+
+def _mqtt():  # noqa: ANN202
+    try:
+        import paho.mqtt.client as mqtt  # type: ignore[import-untyped]
+    except ModuleNotFoundError as exc:
+        msg = "paho-mqtt is required for OpenF1LiveConnector – pip install paho-mqtt"
+        raise ImportError(msg) from exc
+    return mqtt
 
 
 @dataclass(frozen=True, slots=True)
@@ -40,6 +47,7 @@ class OpenF1LiveConnector:
             username=self.username,
             password=self.password,
         )
+        mqtt = _mqtt()
         client = mqtt.Client()
         client.tls_set()
         client.username_pw_set(self.username or "openf1-live", access_token)
@@ -47,7 +55,7 @@ class OpenF1LiveConnector:
         message_count = 0
 
         def _on_connect(
-            mqtt_client: mqtt.Client,
+            mqtt_client: Any,
             _userdata: Any,
             _flags: Any,
             _reason_code: Any,
@@ -56,7 +64,7 @@ class OpenF1LiveConnector:
             for topic in topics:
                 mqtt_client.subscribe(topic)
 
-        def _on_message(_client: mqtt.Client, _userdata: Any, msg: Any) -> None:
+        def _on_message(_client: Any, _userdata: Any, msg: Any) -> None:
             nonlocal message_count
             payload_text = msg.payload.decode("utf-8")
             try:
