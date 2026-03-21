@@ -25,7 +25,7 @@ from f1_polymarket_lab.storage.models import (
     F1Team,
 )
 from f1_polymarket_lab.storage.repository import upsert_records
-from sqlalchemy import inspect
+from sqlalchemy import inspect, select
 
 from f1_polymarket_worker.lineage import (
     ensure_job_definition,
@@ -34,7 +34,14 @@ from f1_polymarket_worker.lineage import (
     start_job_run,
     upsert_cursor_state,
 )
-from f1_polymarket_worker.pipeline import PipelineContext, parse_dt, persist_fetch, persist_silver
+from f1_polymarket_worker.pipeline import (
+    PipelineContext,
+    hydrate_f1_session,
+    parse_dt,
+    persist_fetch,
+    persist_silver,
+    sync_f1_calendar,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1445,4 +1452,210 @@ def sync_jolpica_history(
         "session_results": results_written,
         "pit_rows": pit_written,
         "lap_rows": lap_written,
+    }
+
+
+# Session codes that carry signal useful for pole-position snapshots.
+_OPENF1_SNAPSHOT_SESSION_CODES = frozenset({"FP1", "Q", "SQ"})
+
+
+def sync_openf1_season_range(
+    ctx: PipelineContext,
+    *,
+    season_start: int = 2023,
+    season_end: int = 2025,
+    force_rehydrate: bool = False,
+) -> dict[str, Any]:
+    """Bulk-sync OpenF1 FP1/Q/SQ sessions for a range of seasons.
+
+    Steps for each season:
+    1. Sync meeting + session catalog via sync_f1_calendar.
+    2. For each F1Session with code in {FP1, Q, SQ} that has no existing
+       session results (or force_rehydrate=True), call hydrate_f1_session
+       to pull laps, drivers, and per-driver results from OpenF1.
+
+    The function is idempotent: sessions that already have result rows are
+    skipped unless force_rehydrate=True.
+    """
+    from sqlalchemy import func as sa_func
+
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="sync-openf1-season-range",
+        source="openf1",
+        dataset="f1_openf1_bulk",
+        description=(
+            "Bulk sync OpenF1 FP1/Q/SQ sessions for a range of seasons. "
+            "Calls sync_f1_calendar then hydrate_f1_session per session."
+        ),
+        schedule_hint="manual",
+    )
+    cursor_key = f"{season_start}:{season_end}"
+    cursor_state = get_cursor_state(
+        ctx.db,
+        source="openf1",
+        dataset="f1_openf1_bulk",
+        cursor_key=cursor_key,
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "season_start": season_start,
+            "season_end": season_end,
+            "force_rehydrate": force_rehydrate,
+        },
+        cursor_before=None if cursor_state is None else cursor_state.cursor_value,
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned"}
+
+    seasons_synced: list[int] = []
+    sessions_hydrated: int = 0
+    sessions_skipped: int = 0
+
+    for season in range(season_start, season_end + 1):
+        # Step 1: ensure meeting + session catalog exists.
+        sync_f1_calendar(ctx, season=season)
+        seasons_synced.append(season)
+
+        # Step 2: find FP1/Q/SQ sessions for this season.
+        session_keys: list[int] = list(
+            ctx.db.scalars(
+                select(F1Session.session_key)
+                .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+                .where(
+                    F1Meeting.season == season,
+                    F1Session.source == "openf1",
+                    F1Session.session_code.in_(tuple(_OPENF1_SNAPSHOT_SESSION_CODES)),
+                    F1Session.session_key.isnot(None),
+                )
+            ).all()
+        )
+
+        # Find session keys that already have results to skip.
+        hydrated_session_ids: set[str] = set()
+        if not force_rehydrate and session_keys:
+            result_counts = ctx.db.execute(
+                select(F1SessionResult.session_id, sa_func.count())
+                .join(F1Session, F1Session.id == F1SessionResult.session_id)
+                .where(
+                    F1Session.session_key.in_(session_keys),
+                )
+                .group_by(F1SessionResult.session_id)
+            ).all()
+            hydrated_session_ids = {row[0] for row in result_counts if row[1] > 0}
+
+        for session_key in session_keys:
+            session_id = f"session:{session_key}"
+            if session_id in hydrated_session_ids:
+                sessions_skipped += 1
+                continue
+
+            hydrate_f1_session(ctx, session_key=session_key)
+            sessions_hydrated += 1
+
+    cursor_after = {
+        "season_start": season_start,
+        "season_end": season_end,
+        "sessions_hydrated": sessions_hydrated,
+        "sessions_skipped": sessions_skipped,
+        "synced_at": utc_now().isoformat(),
+    }
+    upsert_cursor_state(
+        ctx.db,
+        source="openf1",
+        dataset="f1_openf1_bulk",
+        cursor_key=cursor_key,
+        cursor_value=cursor_after,
+    )
+    finish_job_run(
+        ctx.db,
+        run,
+        status="completed",
+        cursor_after=cursor_after,
+        records_written=sessions_hydrated,
+    )
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "seasons_synced": seasons_synced,
+        "sessions_hydrated": sessions_hydrated,
+        "sessions_skipped": sessions_skipped,
+    }
+
+
+def sweep_polymarket_historical_poles(
+    ctx: PipelineContext,
+    *,
+    max_pages: int = 300,
+    batch_size: int = 100,
+    fidelity: int = 60,
+) -> dict[str, Any]:
+    """Sweep Polymarket closed markets for F1 Q/SQ pole position history.
+
+    Step 1: sync_polymarket_catalog with closed=True to discover historical
+    F1 pole markets (slug pattern: f1-*-grand-prix-*pole-position* or
+    f1-*-sprint-qualifying*).
+
+    Step 2: hydrate_polymarket_f1_history to fill price history, trades,
+    and resolution data for all discovered F1 markets.
+
+    max_pages controls how far back to sweep (each page = ~100 markets).
+    Use max_pages=300 to reach roughly 3 years of history.
+    """
+    from f1_polymarket_worker.orchestration import hydrate_polymarket_f1_history
+    from f1_polymarket_worker.pipeline import sync_polymarket_catalog
+
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="sweep-polymarket-historical-poles",
+        source="polymarket",
+        dataset="historical_poles",
+        description=(
+            "Sweep closed Polymarket F1 pole markets and hydrate price/resolution history. "
+            "Calls sync_polymarket_catalog(closed=True) then hydrate_polymarket_f1_history."
+        ),
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "max_pages": max_pages,
+            "batch_size": batch_size,
+            "fidelity": fidelity,
+        },
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned"}
+
+    catalog_result = sync_polymarket_catalog(
+        ctx,
+        closed=True,
+        max_pages=max_pages,
+        batch_size=batch_size,
+    )
+    hydrate_result = hydrate_polymarket_f1_history(ctx, fidelity=fidelity)
+
+    total_written = int(catalog_result.get("markets", 0)) + int(
+        hydrate_result.get("records_written", 0)
+    )
+    finish_job_run(
+        ctx.db,
+        run,
+        status="completed",
+        records_written=total_written,
+    )
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "catalog_markets_discovered": catalog_result.get("markets", 0),
+        "catalog_events_discovered": catalog_result.get("events", 0),
+        "markets_hydrated": hydrate_result.get("markets_hydrated", 0),
+        "records_written": hydrate_result.get("records_written", 0),
     }

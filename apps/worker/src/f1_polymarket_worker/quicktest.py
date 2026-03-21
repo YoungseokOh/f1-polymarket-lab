@@ -51,7 +51,7 @@ CHINA_BASELINE_NAMES = ("market_implied", "fp1_pace", "hybrid")
 CHINA_REPORT_SLUG = "2026-chinese-grand-prix-sq-pole-quicktest"
 CHINA_MIN_EDGE = 0.05
 
-AUS_DEFAULT_MEETING_KEY = 1273
+AUS_DEFAULT_MEETING_KEY = 1279
 AUS_DEFAULT_SEASON = 2026
 AUS_SNAPSHOT_TYPE = "fp1_to_q_pole_quicktest"
 AUS_SNAPSHOT_DATASET = "aus_fp1_to_q_pole_snapshot"
@@ -59,6 +59,15 @@ AUS_BASELINE_STAGE = "aus_q_pole_quicktest"
 AUS_BASELINE_NAMES = ("market_implied", "fp1_pace", "hybrid")
 AUS_REPORT_SLUG = "2026-australian-grand-prix-q-pole-quicktest"
 AUS_MIN_EDGE = 0.05
+
+JAPAN_DEFAULT_MEETING_KEY = 1281
+JAPAN_DEFAULT_SEASON = 2026
+JAPAN_SNAPSHOT_TYPE = "pre_weekend_q_pole_quicktest"
+JAPAN_SNAPSHOT_DATASET = "japan_pre_weekend_q_pole_snapshot"
+JAPAN_BASELINE_STAGE = "japan_q_pole_quicktest"
+JAPAN_BASELINE_NAMES = ("market_implied", "form_pace", "hybrid")
+JAPAN_REPORT_SLUG = "2026-japanese-grand-prix-q-pole-quicktest"
+JAPAN_MIN_EDGE = 0.05
 
 EPSILON = 1e-6
 
@@ -1298,6 +1307,578 @@ def report_china_sq_pole_quicktest(
     }
 
 
+# ---------------------------------------------------------------------------
+# Japanese Grand Prix — Pre-Weekend Q Pole Prediction (no FP1 data)
+# Uses historical form from AUS+China as pace signal instead of FP1.
+# ---------------------------------------------------------------------------
+
+
+def build_japan_pre_weekend_snapshot(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int = JAPAN_DEFAULT_MEETING_KEY,
+    season: int = JAPAN_DEFAULT_SEASON,
+) -> dict[str, Any]:
+    """Build a pre-weekend snapshot for Japan GP Q pole prediction.
+
+    Since FP1 has not occurred yet, this uses historical form data
+    (AUS FP1 position + China FP1 position average) as the pace signal.
+    """
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="build-japan-pre-weekend-snapshot",
+        source="derived",
+        dataset=JAPAN_SNAPSHOT_DATASET,
+        description="Build Japan GP pre-weekend Q pole snapshot from historical form.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={"meeting_key": meeting_key, "season": season},
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned"}
+
+    ensure_default_feature_registry(ctx)
+
+    meeting = ctx.db.scalar(
+        select(F1Meeting).where(
+            F1Meeting.meeting_key == meeting_key, F1Meeting.season == season
+        )
+    )
+    if meeting is None:
+        raise ValueError(f"meeting_key={meeting_key} not found for season={season}")
+
+    q_session = ctx.db.scalar(
+        select(F1Session).where(
+            F1Session.meeting_id == meeting.id,
+            F1Session.session_code == "Q",
+        )
+    )
+    if q_session is None:
+        raise ValueError(f"No Q session found for meeting_key={meeting_key}")
+
+    # Use the FP1 session to load form/pace data (in pre-weekend mode this
+    # stores pre-computed historical averages rather than live FP1 results).
+    fp1_session = ctx.db.scalar(
+        select(F1Session).where(
+            F1Session.meeting_id == meeting.id,
+            F1Session.session_code == "FP1",
+        )
+    )
+    if fp1_session is None:
+        raise ValueError(f"No FP1 session found for meeting_key={meeting_key}")
+
+    drivers = list(ctx.db.scalars(select(F1Driver)).all())
+    driver_map = _build_driver_map(drivers)
+
+    q_markets = _load_q_driver_pole_markets(ctx, q_session=q_session)
+
+    yes_tokens = _load_yes_tokens(ctx, market_ids=[m.id for m in q_markets])
+    price_history = _load_price_history(
+        ctx,
+        market_ids=[m.id for m in q_markets],
+        token_ids=[t.id for t in yes_tokens.values()],
+    )
+    trades = _load_trades(ctx, market_ids=[m.id for m in q_markets])
+
+    q_start = _require_utc(q_session.date_start_utc)
+    # Use a generous entry window for pre-weekend: 7 days before Q
+    entry_floor = q_start - timedelta(days=7)
+
+    # Load form data from FP1 session (pre-computed historical averages)
+    form_results = list(
+        ctx.db.scalars(
+            select(F1SessionResult).where(
+                F1SessionResult.session_id == fp1_session.id,
+            )
+        ).all()
+    )
+    form_by_driver: dict[str, F1SessionResult] = {}
+    for fr in form_results:
+        if fr.driver_id is not None:
+            form_by_driver[fr.driver_id] = fr
+
+    # Determine Q winner for labels (if Q results exist)
+    q_results = list(
+        ctx.db.scalars(
+            select(F1SessionResult).where(F1SessionResult.session_id == q_session.id)
+        ).all()
+    )
+    q_winner_driver_id = next(
+        (row.driver_id for row in q_results if row.driver_id is not None and row.position == 1),
+        None,
+    )
+
+    rows: list[dict[str, Any]] = []
+    exclusion_reasons: CounterLike = CounterLike()
+
+    for market in q_markets:
+        token = yes_tokens.get(market.id)
+        if token is None:
+            exclusion_reasons.increment("missing_yes_token")
+            continue
+        driver = _match_market_driver(market=market, drivers=drivers, driver_map=driver_map)
+        if driver is None:
+            exclusion_reasons.increment("missing_driver_match")
+            continue
+        form_result = form_by_driver.get(driver.id)
+        if form_result is None:
+            exclusion_reasons.increment("missing_form_result")
+            continue
+        entry = _select_entry_price_point(
+            rows=price_history.get(market.id, []),
+            window_start=entry_floor,
+            window_end=q_start,
+        )
+        if entry is None:
+            exclusion_reasons.increment("missing_pre_q_price_history")
+            continue
+
+        form_gap = form_result.gap_to_leader_seconds or 0.0
+        pre_entry_trades = [
+            trade
+            for trade in trades.get(market.id, [])
+            if _require_utc(trade.trade_timestamp_utc) <= _require_utc(entry.observed_at_utc)
+        ]
+        last_trade_ts = (
+            None
+            if not pre_entry_trades
+            else max(_require_utc(trade.trade_timestamp_utc) for trade in pre_entry_trades)
+        )
+        last_trade_age_seconds = (
+            None
+            if last_trade_ts is None
+            else (_require_utc(entry.observed_at_utc) - last_trade_ts).total_seconds()
+        )
+        rows.append(
+            {
+                "row_id": stable_uuid(JAPAN_SNAPSHOT_TYPE, market.id),
+                "meeting_key": meeting.meeting_key,
+                "meeting_id": meeting.id,
+                "meeting_name": meeting.meeting_name,
+                "event_id": market.event_id,
+                "market_id": market.id,
+                "market_slug": market.slug,
+                "market_question": market.question,
+                "market_taxonomy": market.taxonomy,
+                "token_id": token.id,
+                "driver_id": driver.id,
+                "driver_name": (
+                    driver.full_name
+                    or driver.broadcast_name
+                    or driver.last_name
+                    or driver.id
+                ),
+                "driver_last_name": driver.last_name,
+                "team_id": driver.team_id,
+                "q_session_id": q_session.id,
+                "q_start_utc": q_start,
+                "entry_window_start_utc": entry_floor,
+                "entry_observed_at_utc": _require_utc(entry.observed_at_utc),
+                "entry_selection_rule": _entry_selection_rule(
+                    observed_at=_require_utc(entry.observed_at_utc),
+                    window_start=entry_floor,
+                    window_end=q_start,
+                    fallback_label="fallback_last_before_q_start",
+                ),
+                "entry_yes_price": entry.price,
+                "entry_midpoint": entry.midpoint,
+                "entry_best_bid": entry.best_bid,
+                "entry_best_ask": entry.best_ask,
+                "entry_spread": _coalesce_spread(entry.best_bid, entry.best_ask),
+                "trade_count_pre_entry": len(pre_entry_trades),
+                "last_trade_age_seconds": last_trade_age_seconds,
+                "fp1_position": form_result.position,
+                "fp1_result_time_seconds": form_result.result_time_seconds,
+                "fp1_gap_to_leader_seconds": form_gap,
+                "fp1_teammate_gap_seconds": None,
+                "fp1_team_best_gap_to_leader_seconds": None,
+                "fp1_lap_count": form_result.number_of_laps or 0,
+                "fp1_stint_count": 0,
+                "label_yes": 1 if q_winner_driver_id == driver.id else 0,
+            }
+        )
+
+    if not rows:
+        error_message = (
+            "Could not build Japan GP pre-weekend snapshot; "
+            f"exclusions={dict(sorted(exclusion_reasons.counts.items()))}"
+        )
+        finish_job_run(ctx.db, run, status="failed", records_written=0, error_message=error_message)
+        raise ValueError(error_message)
+
+    enriched_rows = _enrich_snapshot_probabilities(rows)
+
+    snapshot_id = stable_uuid(JAPAN_SNAPSHOT_TYPE, meeting_key, season, "v1")
+    silver_object = ctx.lake.write_silver_object(
+        JAPAN_SNAPSHOT_DATASET,
+        enriched_rows,
+        partition={"season": str(meeting.season), "meeting_key": str(meeting.meeting_key)},
+    )
+    if silver_object is None:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message="silver snapshot write returned no object",
+        )
+        raise ValueError("silver snapshot write returned no object")
+    record_lake_object_manifest(
+        ctx.db,
+        object_ref=silver_object,
+        job_run_id=run.id,
+        metadata_json={"snapshot_type": JAPAN_SNAPSHOT_TYPE, "meeting_key": meeting_key},
+    )
+
+    version = silver_object.checksum[:16]
+    dataset_version_id = stable_uuid("dataset-version", JAPAN_SNAPSHOT_DATASET, version)
+    upsert_records(
+        ctx.db,
+        DatasetVersionManifest,
+        [
+            {
+                "id": dataset_version_id,
+                "dataset_name": JAPAN_SNAPSHOT_DATASET,
+                "storage_tier": silver_object.storage_tier,
+                "version": version,
+                "manifest_json": {
+                    "snapshot_id": snapshot_id,
+                    "meeting_key": meeting_key,
+                    "row_count": len(enriched_rows),
+                    "object_path": str(silver_object.path),
+                    "checksum": silver_object.checksum,
+                },
+                "created_at": utc_now(),
+            }
+        ],
+        conflict_columns=["dataset_name", "version"],
+    )
+    upsert_records(
+        ctx.db,
+        FeatureSnapshot,
+        [
+            {
+                "id": snapshot_id,
+                "market_id": None,
+                "session_id": q_session.id,
+                "as_of_ts": entry_floor,
+                "snapshot_type": JAPAN_SNAPSHOT_TYPE,
+                "feature_version": "v1",
+                "storage_path": str(silver_object.path),
+                "source_cutoffs": {
+                    "meeting_key": meeting.meeting_key,
+                    "meeting_name": meeting.meeting_name,
+                    "approach": "pre_weekend_form",
+                    "q_start_utc": q_start.isoformat(),
+                    "exclusion_reasons": dict(sorted(exclusion_reasons.counts.items())),
+                },
+                "row_count": len(enriched_rows),
+            }
+        ],
+    )
+    upsert_records(
+        ctx.db,
+        SnapshotRunManifest,
+        [
+            {
+                "id": stable_uuid("snapshot-run", snapshot_id, run.id),
+                "feature_snapshot_id": snapshot_id,
+                "run_name": "build-japan-pre-weekend-snapshot",
+                "source_cutoffs": {
+                    "meeting_key": meeting_key,
+                    "approach": "pre_weekend_form",
+                    "exclusion_reasons": dict(sorted(exclusion_reasons.counts.items())),
+                },
+                "dataset_version_id": dataset_version_id,
+                "created_at": utc_now(),
+            }
+        ],
+    )
+
+    finish_job_run(ctx.db, run, status="completed", records_written=len(enriched_rows))
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "snapshot_id": snapshot_id,
+        "row_count": len(enriched_rows),
+    }
+
+
+def run_japan_q_pole_baseline(
+    ctx: PipelineContext,
+    *,
+    snapshot_id: str,
+    min_edge: float = JAPAN_MIN_EDGE,
+) -> dict[str, Any]:
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="run-japan-q-pole-baseline",
+        source="derived",
+        dataset="model_predictions",
+        description="Run Japanese GP pre-weekend Q pole baseline models.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={"snapshot_id": snapshot_id, "min_edge": min_edge},
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned", "snapshot_id": snapshot_id}
+
+    snapshot = ctx.db.get(FeatureSnapshot, snapshot_id)
+    if snapshot is None or snapshot.storage_path is None:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"snapshot_id={snapshot_id} not found",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} not found")
+
+    rows = pl.read_parquet(snapshot.storage_path).to_dicts()
+    if not rows:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"snapshot_id={snapshot_id} contains no rows",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} contains no rows")
+
+    enriched_rows = _enrich_snapshot_probabilities(rows)
+    model_run_records: list[dict[str, Any]] = []
+    prediction_records: list[dict[str, Any]] = []
+    metrics_summary: dict[str, dict[str, Any]] = {}
+
+    for baseline_name, probability_key, raw_score_key in (
+        ("market_implied", "market_implied_probability", "market_signal"),
+        ("form_pace", "fp1_pace_probability", "fp1_pace_signal"),
+        ("hybrid", "hybrid_probability", "hybrid_signal"),
+    ):
+        model_run_id = stable_uuid("model-run", snapshot_id, baseline_name)
+        metrics = _evaluate_probability_rows(
+            rows=enriched_rows,
+            probability_key=probability_key,
+            price_key="entry_yes_price",
+            min_edge=min_edge,
+        )
+        metrics_summary[baseline_name] = metrics
+        model_run_records.append(
+            {
+                "id": model_run_id,
+                "stage": JAPAN_BASELINE_STAGE,
+                "model_family": "baseline",
+                "model_name": baseline_name,
+                "dataset_version": snapshot.feature_version,
+                "feature_snapshot_id": snapshot.id,
+                "test_start": snapshot.as_of_ts,
+                "test_end": snapshot.as_of_ts,
+                "config_json": {
+                    "snapshot_type": snapshot.snapshot_type,
+                    "min_edge": min_edge,
+                    "probability_key": probability_key,
+                },
+                "metrics_json": metrics,
+                "artifact_uri": snapshot.storage_path,
+                "created_at": utc_now(),
+            }
+        )
+        for row in enriched_rows:
+            probability_yes = float(row[probability_key])
+            prediction_records.append(
+                {
+                    "id": stable_uuid("prediction", model_run_id, row["market_id"]),
+                    "model_run_id": model_run_id,
+                    "market_id": row["market_id"],
+                    "token_id": row["token_id"],
+                    "as_of_ts": row["entry_observed_at_utc"],
+                    "probability_yes": probability_yes,
+                    "probability_no": 1.0 - probability_yes,
+                    "raw_score": float(row[raw_score_key]),
+                    "calibration_version": "none",
+                    "explanation_json": {
+                        "driver_name": row["driver_name"],
+                        "event_id": row["event_id"],
+                        "entry_yes_price": row["entry_yes_price"],
+                        "label_yes": row["label_yes"],
+                    },
+                }
+            )
+
+    upsert_records(ctx.db, ModelRun, model_run_records)
+    upsert_records(ctx.db, ModelPrediction, prediction_records)
+    finish_job_run(ctx.db, run, status="completed", records_written=len(prediction_records))
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "snapshot_id": snapshot_id,
+        "model_runs": [record["id"] for record in model_run_records],
+        "metrics_summary": metrics_summary,
+    }
+
+
+def report_japan_q_pole_quicktest(
+    ctx: PipelineContext,
+    *,
+    snapshot_id: str,
+    report_slug: str | None = None,
+    min_edge: float = JAPAN_MIN_EDGE,
+) -> dict[str, Any]:
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="report-japan-q-pole-quicktest",
+        source="derived",
+        dataset="research_report",
+        description="Write a Japanese GP pre-weekend Q pole quick-test report.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "snapshot_id": snapshot_id,
+            "report_slug": report_slug,
+            "min_edge": min_edge,
+        },
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned", "snapshot_id": snapshot_id}
+
+    snapshot = ctx.db.get(FeatureSnapshot, snapshot_id)
+    if snapshot is None or snapshot.storage_path is None:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"snapshot_id={snapshot_id} not found",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} not found")
+
+    rows = pl.read_parquet(snapshot.storage_path).to_dicts()
+    if not rows:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"snapshot_id={snapshot_id} contains no rows",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} contains no rows")
+
+    meeting_key = int(rows[0]["meeting_key"])
+    meeting = ctx.db.scalar(select(F1Meeting).where(F1Meeting.meeting_key == meeting_key))
+    if meeting is None:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"meeting_key={meeting_key} not found",
+        )
+        raise ValueError(f"meeting_key={meeting_key} not found")
+
+    model_runs = ctx.db.scalars(
+        select(ModelRun).where(
+            ModelRun.feature_snapshot_id == snapshot_id,
+            ModelRun.stage == JAPAN_BASELINE_STAGE,
+        ).order_by(ModelRun.model_name.asc())
+    ).all()
+    if not model_runs:
+        finish_job_run(
+            ctx.db, run, status="failed", records_written=0,
+            error_message=f"no model runs found for snapshot_id={snapshot_id}",
+        )
+        raise ValueError(f"no model runs found for snapshot_id={snapshot_id}")
+
+    predictions = ctx.db.scalars(
+        select(ModelPrediction).where(
+            ModelPrediction.model_run_id.in_([mr.id for mr in model_runs])
+        )
+    ).all()
+    predictions_by_model: dict[str, list[ModelPrediction]] = defaultdict(list)
+    for prediction in predictions:
+        predictions_by_model[prediction.model_run_id].append(prediction)
+
+    baselines = {
+        mr.model_name: {"model_run_id": mr.id, "metrics": mr.metrics_json or {}}
+        for mr in model_runs
+    }
+    hybrid_run = next((r for r in model_runs if r.model_name == "hybrid"), None)
+    hybrid_predictions = [] if hybrid_run is None else predictions_by_model.get(hybrid_run.id, [])
+    hybrid_prediction_by_market = {
+        r.market_id: r for r in hybrid_predictions if r.market_id
+    }
+
+    ranked_hybrid = sorted(
+        [
+            {
+                "market_id": row["market_id"],
+                "driver_name": row["driver_name"],
+                "entry_yes_price": row["entry_yes_price"],
+                "label_yes": row["label_yes"],
+                "hybrid_probability": hybrid_prediction_by_market[row["market_id"]].probability_yes,
+                "paper_edge": hybrid_prediction_by_market[row["market_id"]].probability_yes
+                - float(row["entry_yes_price"]),
+            }
+            for row in rows
+            if row["market_id"] in hybrid_prediction_by_market
+        ],
+        key=lambda item: item["hybrid_probability"],
+        reverse=True,
+    )
+    selected_bets = [row for row in ranked_hybrid if row["paper_edge"] >= min_edge]
+
+    report = {
+        "generated_at": utc_now().isoformat(),
+        "snapshot_id": snapshot_id,
+        "snapshot_type": snapshot.snapshot_type,
+        "meeting": {
+            "meeting_key": meeting.meeting_key,
+            "meeting_name": meeting.meeting_name,
+            "season": meeting.season,
+        },
+        "row_count": len(rows),
+        "market_count": len({row["market_id"] for row in rows}),
+        "driver_count": len({row["driver_id"] for row in rows}),
+        "source_cutoffs": snapshot.source_cutoffs,
+        "min_edge": min_edge,
+        "baselines": baselines,
+        "top_hybrid_predictions": ranked_hybrid[:5],
+        "selected_yes_bets": selected_bets[:10],
+        "notes": [
+            "This is a PRE-WEEKEND prediction — no FP1 data available yet.",
+            "Form signal is derived from AUS + China GP historical pace.",
+            "The universe is limited to Japanese GP Qualifying pole markets.",
+        ],
+    }
+
+    slug = report_slug or str(
+        slugify(f"{meeting.season}-{meeting.meeting_name}-q-pole-quicktest")
+    )
+    report_dir = _quicktest_report_dir(
+        root=ctx.settings.data_root,
+        season=meeting.season,
+        slug=slug,
+    )
+    ensure_dir(report_dir)
+    (report_dir / "summary.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (report_dir / "summary.md").write_text(
+        _render_quicktest_markdown(report, title_suffix="Q Pole Pre-Weekend Quick Test"),
+        encoding="utf-8",
+    )
+
+    finish_job_run(ctx.db, run, status="completed", records_written=len(rows))
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "snapshot_id": snapshot_id,
+        "report_dir": str(report_dir),
+        "baseline_count": len(model_runs),
+        "selected_bets": len(selected_bets),
+    }
+
+
 class CounterLike:
     def __init__(self) -> None:
         self.counts: dict[str, int] = defaultdict(int)
@@ -1638,6 +2219,7 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
         hybrid_probs = _softmax(hybrid_signals)
 
         for index, row in enumerate(group_rows):
+            row["market_normalized_prob"] = market_probs[index]
             row["market_signal"] = market_signals[index]
             row["market_implied_probability"] = market_probs[index]
             row["fp1_pace_signal"] = fp1_signals[index]
