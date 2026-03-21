@@ -20,5 +20,6 @@ build/
 *.egg-info/
 *.tsbuildinfo
 *.sqlite3
+*.bak
 data/*
 !data/.gitkeep

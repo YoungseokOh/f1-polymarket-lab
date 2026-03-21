@@ -24,6 +24,13 @@ Use this skill for storage and ingestion changes.
 6. When schema changes, update SQLAlchemy models, Alembic, docs, and tests together.
 7. Preserve Polymarket official API and documented websocket usage only; do not scrape the DOM.
 
+## Polymarket market discovery
+
+- **주 이벤트 마켓**(레이스 우승자, 폴 포지션 등 고유동성)은 Gamma API의 `/markets` 또는 `/events` 엔드포인트로는 조회되지 않을 수 있다.
+- 항상 `https://polymarket.com/sports/f1/props` 웹페이지를 직접 조회하여 열린 마켓 전체를 먼저 파악하라.
+- 이벤트 슬러그 패턴 예시: `f1-japanese-grand-prix-winner-2026-03-29`, `f1-japanese-grand-prix-driver-pole-position-2026-03-28`
+- 슬러그를 확인한 뒤 Gamma API `GET /markets?slug=<slug>` 또는 `GET /events?slug=<slug>`로 토큰 ID와 가격을 조회한다.
+
 ## Validation
 
 - `uv run ruff check .`

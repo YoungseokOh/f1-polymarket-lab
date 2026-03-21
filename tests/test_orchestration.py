@@ -705,25 +705,25 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
     """Seed a 2026 Australian GP standard weekend (FP1/FP2/FP3/Q/R) for validation tests."""
     meeting = F1Meeting(
         id="meeting-aus-2026",
-        meeting_key=1273,
+        meeting_key=1279,
         season=2026,
         round_number=1,
         meeting_name="Australian Grand Prix",
         country_name="Australia",
         location="Melbourne",
-        start_date_utc=datetime(2026, 3, 13, 1, 0, tzinfo=timezone.utc),
-        end_date_utc=datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc),
+        start_date_utc=datetime(2026, 3, 6, 1, 0, tzinfo=timezone.utc),
+        end_date_utc=datetime(2026, 3, 8, 8, 0, tzinfo=timezone.utc),
         raw_payload={"meeting_name": "Australian Grand Prix"},
     )
     session.add(meeting)
 
     # Standard weekend: FP1 Friday, FP2 Friday, FP3 Saturday, Q Saturday, R Sunday
     session_rows = [
-        ("session-aus-fp1", 11220, "Practice 1", "Practice", "FP1", datetime(2026, 3, 13, 1, 30)),
-        ("session-aus-fp2", 11221, "Practice 2", "Practice", "FP2", datetime(2026, 3, 13, 5, 0)),
-        ("session-aus-fp3", 11222, "Practice 3", "Practice", "FP3", datetime(2026, 3, 14, 2, 30)),
-        ("session-aus-q", 11223, "Qualifying", "Qualifying", "Q", datetime(2026, 3, 14, 6, 0)),
-        ("session-aus-r", 11224, "Race", "Race", "R", datetime(2026, 3, 15, 6, 0)),
+        ("session-aus-fp1", 11227, "Practice 1", "Practice", "FP1", datetime(2026, 3, 6, 1, 30)),
+        ("session-aus-fp2", 11228, "Practice 2", "Practice", "FP2", datetime(2026, 3, 6, 5, 0)),
+        ("session-aus-fp3", 11229, "Practice 3", "Practice", "FP3", datetime(2026, 3, 7, 2, 30)),
+        ("session-aus-q", 11230, "Qualifying", "Qualifying", "Q", datetime(2026, 3, 7, 5, 0)),
+        ("session-aus-r", 11234, "Race", "Race", "R", datetime(2026, 3, 8, 4, 0)),
     ]
     # Smoke-mode heavy sessions for standard weekend: Q and R only (no SQ)
     heavy_telemetry_codes = {"Q", "R"}
@@ -786,7 +786,7 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
         (
             "event-aus-fp1",
             "market-aus-fp1",
-            "f1-australian-grand-prix-practice-1-fastest-lap-2026-03-13",
+            "f1-australian-grand-prix-practice-1-fastest-lap-2026-03-06",
             "Australian Grand Prix: Practice 1 Fastest Lap",
             "Australian Grand Prix: Practice 1 Fastest Lap",
             "driver_fastest_lap_practice",
@@ -797,7 +797,7 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
         (
             "event-aus-fp2",
             "market-aus-fp2",
-            "f1-australian-grand-prix-practice-2-fastest-lap-2026-03-13",
+            "f1-australian-grand-prix-practice-2-fastest-lap-2026-03-06",
             "Australian Grand Prix: Practice 2 Fastest Lap",
             "Australian Grand Prix: Practice 2 Fastest Lap",
             "driver_fastest_lap_practice",
@@ -808,7 +808,7 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
         (
             "event-aus-fp3",
             "market-aus-fp3",
-            "f1-australian-grand-prix-practice-3-fastest-lap-2026-03-14",
+            "f1-australian-grand-prix-practice-3-fastest-lap-2026-03-07",
             "Australian Grand Prix: Practice 3 Fastest Lap",
             "Australian Grand Prix: Practice 3 Fastest Lap",
             "driver_fastest_lap_practice",
@@ -819,7 +819,7 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
         (
             "event-aus-q",
             "market-aus-q",
-            "f1-australian-grand-prix-driver-pole-position-2026-03-14",
+            "f1-australian-grand-prix-driver-pole-position-2026-03-07",
             "Australian Grand Prix: Driver Pole Position",
             "Australian Grand Prix: Driver Pole Position",
             "driver_pole_position",
@@ -841,7 +841,7 @@ def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
         (
             "event-aus-r-winner",
             "market-aus-r-winner",
-            "f1-australian-grand-prix-winner-2026-03-15",
+            "f1-australian-grand-prix-winner-2026-03-08",
             "Australian Grand Prix: Winner",
             "Australian Grand Prix: Winner",
             "race_winner",
@@ -1066,11 +1066,11 @@ def test_validate_f1_weekend_subset_standard_weekend_australia(
 
         # Heavy hydration only applies to Q and R for standard weekend (no SQ)
         assert heavy_calls == {
-            11220: False,  # FP1 — not heavy
-            11221: False,  # FP2 — not heavy
-            11222: False,  # FP3 — not heavy
-            11223: True,   # Q  — heavy
-            11224: True,   # R  — heavy
+            11227: False,  # FP1 — not heavy
+            11228: False,  # FP2 — not heavy
+            11229: False,  # FP3 — not heavy
+            11230: True,   # Q  — heavy
+            11234: True,   # R  — heavy
         }
 
         # Report files written
@@ -1095,7 +1095,7 @@ def test_validate_f1_weekend_subset_standard_weekend_australia(
         assert report["research_readiness"]["analysis_joinability"] == "ready"
 
         # Q session should have exactly 1 mapping (pole position)
-        assert report["mapping_summary"]["11223"]["mapping_count"] == 1
+        assert report["mapping_summary"]["11230"]["mapping_count"] == 1
 
         # All three probes must be present: pole (Q), race H2H (R), race outcome (R)
         assert {probe["probe_key"] for probe in report["market_probes"]} == {

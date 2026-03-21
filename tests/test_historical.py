@@ -13,13 +13,16 @@ from f1_polymarket_lab.storage.models import (
     F1SessionResult,
     F1StartingGrid,
 )
+from f1_polymarket_lab.storage.repository import upsert_records
 from f1_polymarket_worker.historical import (
     bootstrap_f1db_history,
     historical_meeting_id,
     historical_meeting_key,
     historical_session_id,
     historical_session_key,
+    sweep_polymarket_historical_poles,
     sync_jolpica_history,
+    sync_openf1_season_range,
 )
 from f1_polymarket_worker.orchestration import backfill_f1_history_all
 from f1_polymarket_worker.pipeline import PipelineContext
@@ -523,3 +526,161 @@ def test_backfill_f1_history_all_splits_historical_and_openf1_ranges(
         assert result["records_written"] == 21
     finally:
         session.close()
+
+
+# ---------------------------------------------------------------------------
+# sync_openf1_season_range
+# ---------------------------------------------------------------------------
+
+
+class TestSyncOpenF1SeasonRange:
+    def test_plan_only_returns_planned(self, tmp_path: Path) -> None:
+        session, context = build_context(tmp_path, execute=False)
+        result = sync_openf1_season_range(context, season_start=2023, season_end=2023)
+        assert result["status"] == "planned"
+
+    def test_executes_with_mocked_connectors(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session, context = build_context(tmp_path)
+
+        def fake_sync_f1_calendar(ctx: object, *, season: int) -> dict:
+            upsert_records(context.db, F1Meeting, [{
+                "id": f"meeting:fake-{season}",
+                "source": "openf1",
+                "meeting_key": season * 100 + 1,
+                "season": season,
+                "round_number": 1,
+                "meeting_name": f"Test GP {season}",
+            }])
+            upsert_records(context.db, F1Session, [{
+                "id": f"session:{season * 1000 + 1}",
+                "source": "openf1",
+                "session_key": season * 1000 + 1,
+                "meeting_id": f"meeting:fake-{season}",
+                "session_name": "Practice 1",
+                "session_type": "Practice",
+                "session_code": "FP1",
+                "is_practice": True,
+            }])
+            context.db.flush()
+            return {"status": "completed", "meetings": 1, "sessions": 1}
+
+        hydrate_calls: list[int] = []
+
+        def fake_hydrate_f1_session(ctx: object, *, session_key: int) -> dict:
+            hydrate_calls.append(session_key)
+            return {"status": "completed", "session_key": session_key}
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.historical.sync_f1_calendar",
+            fake_sync_f1_calendar,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.historical.hydrate_f1_session",
+            fake_hydrate_f1_session,
+        )
+
+        result = sync_openf1_season_range(
+            context, season_start=2023, season_end=2023
+        )
+        assert result["status"] == "completed"
+        assert 2023 in result["seasons_synced"]
+        assert result["sessions_hydrated"] >= 1
+        assert len(hydrate_calls) >= 1
+
+    def test_skips_already_hydrated_sessions(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session, context = build_context(tmp_path)
+
+        meeting = F1Meeting(
+            id="meeting:test-2024",
+            source="openf1",
+            meeting_key=202401,
+            season=2024,
+            round_number=1,
+            meeting_name="Test GP 2024",
+        )
+        fp1 = F1Session(
+            id="session:20241001",
+            source="openf1",
+            session_key=20241001,
+            meeting_id=meeting.id,
+            session_name="Practice 1",
+            session_type="Practice",
+            session_code="FP1",
+            is_practice=True,
+        )
+        result_row = F1SessionResult(
+            id="result:test-fp1-d1",
+            session_id=fp1.id,
+            driver_id="driver:1",
+            position=1,
+            raw_payload={},
+        )
+        session.add_all([meeting, fp1, result_row])
+        session.commit()
+
+        def fake_sync_calendar(ctx: object, *, season: int) -> dict:
+            return {"status": "completed"}
+
+        hydrate_calls: list[int] = []
+
+        def fake_hydrate(ctx: object, *, session_key: int) -> dict:
+            hydrate_calls.append(session_key)
+            return {"status": "completed"}
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.historical.sync_f1_calendar",
+            fake_sync_calendar,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.historical.hydrate_f1_session",
+            fake_hydrate,
+        )
+
+        result = sync_openf1_season_range(
+            context, season_start=2024, season_end=2024
+        )
+        assert result["status"] == "completed"
+        assert result["sessions_skipped"] >= 1
+        assert 20241001 not in hydrate_calls
+
+
+# ---------------------------------------------------------------------------
+# sweep_polymarket_historical_poles
+# ---------------------------------------------------------------------------
+
+
+class TestSweepPolymarketHistoricalPoles:
+    def test_plan_only_returns_planned(self, tmp_path: Path) -> None:
+        session, context = build_context(tmp_path, execute=False)
+        result = sweep_polymarket_historical_poles(context)
+        assert result["status"] == "planned"
+
+    def test_executes_with_mocked_pipelines(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        session, context = build_context(tmp_path)
+
+        def fake_sync_catalog(ctx: object, **kwargs: object) -> dict:
+            return {"markets": 5, "events": 2, "tokens": 10}
+
+        def fake_hydrate_history(ctx: object, **kwargs: object) -> dict:
+            return {"markets_hydrated": 3, "records_written": 150}
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.pipeline.sync_polymarket_catalog",
+            fake_sync_catalog,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.orchestration.hydrate_polymarket_f1_history",
+            fake_hydrate_history,
+        )
+
+        result = sweep_polymarket_historical_poles(context)
+        assert result["status"] == "completed"
+        assert result["catalog_markets_discovered"] == 5
+        assert result["markets_hydrated"] == 3
+        assert result["records_written"] == 150

@@ -21,3 +21,8 @@ Use this skill for analytical writing and report generation.
 - Separate observed facts from inference.
 - Do not imply signal where data coverage is thin.
 - Keep recommendations aligned with the project’s non-goals: no automated live trading claims.
+## Polymarket 시장 조회
+
+- 레이스별 오픈 마켓 전체 목록은 **`https://polymarket.com/sports/f1/props`** 에서 먼저 확인하라.
+- Gamma API 단독 스캔은 주요 고유동성 마켓을 누락할 수 있다.
+- 베팅 분석 시 negRisk 배치 구조 때문에 각 마켓 YES 가격 합이 100%를 초과할 수 있음에 유의한다.
