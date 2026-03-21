@@ -73,6 +73,7 @@ JAPAN_FP1_SNAPSHOT_TYPE = "japan_fp1_to_q_pole_quicktest"
 JAPAN_FP1_SNAPSHOT_DATASET = "japan_fp1_to_q_pole_snapshot"
 JAPAN_FP1_BASELINE_STAGE = "japan_fp1_q_pole_quicktest"
 JAPAN_FP1_BASELINE_NAMES = ("market_implied", "fp1_pace", "hybrid")
+JAPAN_FP1_REPORT_SLUG = "2026-japanese-grand-prix-fp1-q-pole-quicktest"
 JAPAN_FP1_MIN_EDGE = 0.05
 
 EPSILON = 1e-6
@@ -2050,6 +2051,183 @@ def run_japan_fp1_q_pole_baseline(
         "snapshot_id": snapshot_id,
         "model_runs": [record["id"] for record in model_run_records],
         "metrics_summary": metrics_summary,
+    }
+
+
+def report_japan_fp1_q_pole_quicktest(
+    ctx: PipelineContext,
+    *,
+    snapshot_id: str,
+    report_slug: str | None = None,
+    min_edge: float = JAPAN_FP1_MIN_EDGE,
+) -> dict[str, Any]:
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="report-japan-fp1-q-pole-quicktest",
+        source="derived",
+        dataset="research_report",
+        description="Write a Japanese GP FP1-to-Q pole quick-test research report.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "snapshot_id": snapshot_id,
+            "report_slug": report_slug,
+            "min_edge": min_edge,
+        },
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {"job_run_id": run.id, "status": "planned", "snapshot_id": snapshot_id}
+
+    snapshot = ctx.db.get(FeatureSnapshot, snapshot_id)
+    if snapshot is None or snapshot.storage_path is None:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message=f"snapshot_id={snapshot_id} not found",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} not found")
+
+    rows = pl.read_parquet(snapshot.storage_path).to_dicts()
+    if not rows:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message=f"snapshot_id={snapshot_id} contains no rows",
+        )
+        raise ValueError(f"snapshot_id={snapshot_id} contains no rows")
+
+    meeting_key = int(rows[0]["meeting_key"])
+    meeting = ctx.db.scalar(select(F1Meeting).where(F1Meeting.meeting_key == meeting_key))
+    if meeting is None:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message=f"meeting_key={meeting_key} not found",
+        )
+        raise ValueError(f"meeting_key={meeting_key} not found")
+
+    model_runs = ctx.db.scalars(
+        select(ModelRun)
+        .where(
+            ModelRun.feature_snapshot_id == snapshot_id,
+            ModelRun.stage == JAPAN_FP1_BASELINE_STAGE,
+        )
+        .order_by(ModelRun.model_name.asc())
+    ).all()
+    if not model_runs:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message=f"no model runs found for snapshot_id={snapshot_id}",
+        )
+        raise ValueError(f"no model runs found for snapshot_id={snapshot_id}")
+
+    predictions = ctx.db.scalars(
+        select(ModelPrediction).where(
+            ModelPrediction.model_run_id.in_([model_run.id for model_run in model_runs])
+        )
+    ).all()
+    predictions_by_model: dict[str, list[ModelPrediction]] = defaultdict(list)
+    for prediction in predictions:
+        predictions_by_model[prediction.model_run_id].append(prediction)
+
+    baselines = {
+        model_run.model_name: {
+            "model_run_id": model_run.id,
+            "metrics": model_run.metrics_json or {},
+        }
+        for model_run in model_runs
+    }
+    hybrid_run = next((run_row for run_row in model_runs if run_row.model_name == "hybrid"), None)
+    hybrid_predictions = [] if hybrid_run is None else predictions_by_model.get(hybrid_run.id, [])
+    hybrid_prediction_by_market = {
+        row.market_id: row for row in hybrid_predictions if row.market_id
+    }
+
+    ranked_hybrid = sorted(
+        [
+            {
+                "market_id": row["market_id"],
+                "driver_name": row["driver_name"],
+                "entry_yes_price": row["entry_yes_price"],
+                "label_yes": row["label_yes"],
+                "hybrid_probability": hybrid_prediction_by_market[row["market_id"]].probability_yes,
+                "paper_edge": hybrid_prediction_by_market[row["market_id"]].probability_yes
+                - float(row["entry_yes_price"]),
+            }
+            for row in rows
+            if row["market_id"] in hybrid_prediction_by_market
+        ],
+        key=lambda item: item["hybrid_probability"],
+        reverse=True,
+    )
+    selected_bets = [row for row in ranked_hybrid if row["paper_edge"] >= min_edge]
+
+    report = {
+        "generated_at": utc_now().isoformat(),
+        "snapshot_id": snapshot_id,
+        "snapshot_type": snapshot.snapshot_type,
+        "meeting": {
+            "meeting_key": meeting.meeting_key,
+            "meeting_name": meeting.meeting_name,
+            "season": meeting.season,
+        },
+        "row_count": len(rows),
+        "market_count": len({row["market_id"] for row in rows}),
+        "driver_count": len({row["driver_id"] for row in rows}),
+        "source_cutoffs": snapshot.source_cutoffs,
+        "min_edge": min_edge,
+        "baselines": baselines,
+        "top_hybrid_predictions": ranked_hybrid[:5],
+        "selected_yes_bets": selected_bets[:10],
+        "notes": [
+            "This is a paper-edge quick test, not an executable orderbook backtest.",
+            "The universe is limited to Japanese GP FP1 -> Qualifying pole markets.",
+        ],
+    }
+
+    slug = report_slug or JAPAN_FP1_REPORT_SLUG
+    report_dir = _quicktest_report_dir(
+        root=ctx.settings.data_root,
+        season=meeting.season,
+        slug=slug,
+    )
+    ensure_dir(report_dir)
+    (report_dir / "summary.json").write_text(
+        json.dumps(report, indent=2, sort_keys=True, default=str),
+        encoding="utf-8",
+    )
+    (report_dir / "summary.md").write_text(
+        _render_quicktest_markdown(report, title_suffix="FP1-to-Q Pole Quick Test"),
+        encoding="utf-8",
+    )
+
+    finish_job_run(
+        ctx.db,
+        run,
+        status="completed",
+        records_written=len(rows),
+    )
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "snapshot_id": snapshot_id,
+        "report_dir": str(report_dir),
+        "baseline_count": len(model_runs),
+        "selected_bets": len(selected_bets),
     }
 
 

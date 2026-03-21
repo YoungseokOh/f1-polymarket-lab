@@ -45,6 +45,7 @@ from f1_polymarket_worker.quicktest import (
     build_japan_pre_weekend_snapshot,
     report_aus_q_pole_quicktest,
     report_china_sq_pole_quicktest,
+    report_japan_fp1_q_pole_quicktest,
     report_japan_q_pole_quicktest,
     run_aus_q_pole_baseline,
     run_china_sq_pole_baseline,
@@ -582,6 +583,25 @@ def run_japan_fp1_q_pole_baseline_command(
         result = run_japan_fp1_q_pole_baseline(
             context,
             snapshot_id=snapshot_id,
+            min_edge=min_edge,
+        )
+    typer.echo(result)
+
+
+@app.command("report-japan-fp1-q-pole-quicktest")
+def report_japan_fp1_q_pole_quicktest_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    report_slug: str | None = typer.Option(None, "--report-slug"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = report_japan_fp1_q_pole_quicktest(
+            context,
+            snapshot_id=snapshot_id,
+            report_slug=report_slug,
             min_edge=min_edge,
         )
     typer.echo(result)

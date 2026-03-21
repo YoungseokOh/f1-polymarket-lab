@@ -33,6 +33,7 @@ from f1_polymarket_worker.quicktest import (
     build_japan_pre_weekend_snapshot,
     report_aus_q_pole_quicktest,
     report_china_sq_pole_quicktest,
+    report_japan_fp1_q_pole_quicktest,
     report_japan_q_pole_quicktest,
     run_aus_q_pole_baseline,
     run_china_sq_pole_baseline,
@@ -1358,3 +1359,32 @@ def test_run_japan_fp1_q_pole_baseline_creates_model_runs(
     assert len(model_runs) == 3
     assert len(predictions) == 66
     assert {row.model_name for row in model_runs} == {"market_implied", "fp1_pace", "hybrid"}
+
+
+def test_report_japan_fp1_q_pole_quicktest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_japan_quicktest_fixture(session)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.quicktest.hydrate_polymarket_market", lambda *a, **kw: None
+    )
+    snapshot_result = build_japan_fp1_to_q_snapshot(context, meeting_key=1281, season=2026)
+    snapshot_id = snapshot_result["snapshot_id"]
+    run_japan_fp1_q_pole_baseline(context, snapshot_id=snapshot_id, min_edge=0.05)
+
+    report_result = report_japan_fp1_q_pole_quicktest(
+        context, snapshot_id=snapshot_id, min_edge=0.05
+    )
+    assert report_result["status"] == "completed"
+    report_dir = (
+        tmp_path / "reports" / "research" / "2026"
+        / "2026-japanese-grand-prix-fp1-q-pole-quicktest"
+    )
+    report_json = report_dir / "summary.json"
+    assert report_json.exists()
+    report = json.loads(report_json.read_text(encoding="utf-8"))
+    assert report["snapshot_id"] == snapshot_id
+    assert report["market_count"] == 22
+    assert set(report["baselines"]) == {"market_implied", "fp1_pace", "hybrid"}
+
