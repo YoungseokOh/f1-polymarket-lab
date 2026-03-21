@@ -701,6 +701,418 @@ def test_validate_f1_weekend_subset_fails_on_invalid_q_taxonomy(
     assert any("invalid mapped taxonomies" in item for item in report["failures"])
 
 
+def seed_australia_standard_weekend_fixture(session: Session) -> dict[str, Any]:
+    """Seed a 2026 Australian GP standard weekend (FP1/FP2/FP3/Q/R) for validation tests."""
+    meeting = F1Meeting(
+        id="meeting-aus-2026",
+        meeting_key=1273,
+        season=2026,
+        round_number=1,
+        meeting_name="Australian Grand Prix",
+        country_name="Australia",
+        location="Melbourne",
+        start_date_utc=datetime(2026, 3, 13, 1, 0, tzinfo=timezone.utc),
+        end_date_utc=datetime(2026, 3, 15, 8, 0, tzinfo=timezone.utc),
+        raw_payload={"meeting_name": "Australian Grand Prix"},
+    )
+    session.add(meeting)
+
+    # Standard weekend: FP1 Friday, FP2 Friday, FP3 Saturday, Q Saturday, R Sunday
+    session_rows = [
+        ("session-aus-fp1", 11220, "Practice 1", "Practice", "FP1", datetime(2026, 3, 13, 1, 30)),
+        ("session-aus-fp2", 11221, "Practice 2", "Practice", "FP2", datetime(2026, 3, 13, 5, 0)),
+        ("session-aus-fp3", 11222, "Practice 3", "Practice", "FP3", datetime(2026, 3, 14, 2, 30)),
+        ("session-aus-q", 11223, "Qualifying", "Qualifying", "Q", datetime(2026, 3, 14, 6, 0)),
+        ("session-aus-r", 11224, "Race", "Race", "R", datetime(2026, 3, 15, 6, 0)),
+    ]
+    # Smoke-mode heavy sessions for standard weekend: Q and R only (no SQ)
+    heavy_telemetry_codes = {"Q", "R"}
+    sessions_by_code: dict[str, F1Session] = {}
+    for session_id, session_key, name, session_type, code, start_naive in session_rows:
+        start_at = start_naive.replace(tzinfo=timezone.utc)
+        end_at = start_at.replace(hour=start_at.hour + 1)
+        row = F1Session(
+            id=session_id,
+            meeting_id=meeting.id,
+            session_key=session_key,
+            session_name=name,
+            session_type=session_type,
+            session_code=code,
+            date_start_utc=start_at,
+            date_end_utc=end_at,
+            raw_payload={"meeting_name": "Australian Grand Prix", "gmt_offset": "+11:00"},
+        )
+        sessions_by_code[code] = row
+        session.add(row)
+        session.add(
+            F1SessionResult(
+                id=f"aus-result-{code}",
+                session_id=session_id,
+                driver_id="driver-1",
+                position=1,
+                result_time_seconds=90.0,
+                result_time_kind="best_lap" if code in {"FP1", "FP2", "FP3", "Q"} else "total_time",
+                gap_to_leader_status="leader",
+                raw_payload={"session_code": code},
+            )
+        )
+        session.add(
+            F1Lap(
+                id=f"aus-lap-{code}",
+                session_id=session_id,
+                driver_id="driver-1",
+                lap_number=1,
+                lap_duration_seconds=90.0,
+                raw_payload={"session_code": code},
+            )
+        )
+        if code in heavy_telemetry_codes:
+            session.add(
+                F1TelemetryIndex(
+                    id=f"aus-telemetry-{code}",
+                    session_id=session_id,
+                    driver_id="driver-1",
+                    dataset_name="car_data",
+                    storage_path=f"bronze/aus/{code}/car_data.json",
+                    sample_count=10,
+                    started_at_utc=start_at,
+                    ended_at_utc=end_at,
+                    raw_payload={"session_code": code},
+                )
+            )
+
+    # Markets: practice sessions get candidates only; Q and R get full mappings
+    market_defs = [
+        (
+            "event-aus-fp1",
+            "market-aus-fp1",
+            "f1-australian-grand-prix-practice-1-fastest-lap-2026-03-13",
+            "Australian Grand Prix: Practice 1 Fastest Lap",
+            "Australian Grand Prix: Practice 1 Fastest Lap",
+            "driver_fastest_lap_practice",
+            "FP1",
+            "FP1",
+            False,
+        ),
+        (
+            "event-aus-fp2",
+            "market-aus-fp2",
+            "f1-australian-grand-prix-practice-2-fastest-lap-2026-03-13",
+            "Australian Grand Prix: Practice 2 Fastest Lap",
+            "Australian Grand Prix: Practice 2 Fastest Lap",
+            "driver_fastest_lap_practice",
+            "FP2",
+            "FP2",
+            False,
+        ),
+        (
+            "event-aus-fp3",
+            "market-aus-fp3",
+            "f1-australian-grand-prix-practice-3-fastest-lap-2026-03-14",
+            "Australian Grand Prix: Practice 3 Fastest Lap",
+            "Australian Grand Prix: Practice 3 Fastest Lap",
+            "driver_fastest_lap_practice",
+            "FP3",
+            "FP3",
+            False,
+        ),
+        (
+            "event-aus-q",
+            "market-aus-q",
+            "f1-australian-grand-prix-driver-pole-position-2026-03-14",
+            "Australian Grand Prix: Driver Pole Position",
+            "Australian Grand Prix: Driver Pole Position",
+            "driver_pole_position",
+            "Q",
+            "Q",
+            True,
+        ),
+        (
+            "event-aus-r-h2h",
+            "market-aus-r-h2h",
+            "f1-australian-grand-prix-head-to-head-matchups",
+            "Australian Grand Prix: Head-to-Head",
+            "Norris vs Piastri",
+            "head_to_head_session",
+            "R",
+            "R",
+            True,
+        ),
+        (
+            "event-aus-r-winner",
+            "market-aus-r-winner",
+            "f1-australian-grand-prix-winner-2026-03-15",
+            "Australian Grand Prix: Winner",
+            "Australian Grand Prix: Winner",
+            "race_winner",
+            "R",
+            "R",
+            True,
+        ),
+    ]
+
+    for index, (
+        event_id,
+        market_id,
+        slug,
+        title,
+        question,
+        taxonomy,
+        session_code,
+        target_session_code,
+        create_mapping,
+    ) in enumerate(market_defs):
+        event_start = sessions_by_code[session_code].date_start_utc
+        event = PolymarketEvent(
+            id=event_id,
+            slug=slug,
+            ticker=slug,
+            title=title,
+            description=f"{title} Formula 1 market",
+            start_at_utc=event_start,
+            end_at_utc=event_start,
+            active=True,
+            closed=False,
+            archived=False,
+            raw_payload={"title": title, "slug": slug},
+        )
+        market = PolymarketMarket(
+            id=market_id,
+            event_id=event_id,
+            question=question,
+            slug=slug,
+            condition_id=f"condition-{market_id}",
+            question_id=f"question-{market_id}",
+            taxonomy=taxonomy,
+            taxonomy_confidence=0.95,
+            target_session_code=target_session_code,
+            description=title,
+            start_at_utc=event_start,
+            end_at_utc=event_start,
+            active=True,
+            closed=False,
+            archived=False,
+            enable_order_book=True,
+            clob_token_ids=[f"token-{market_id}-yes", f"token-{market_id}-no"],
+            raw_payload={"question": question, "slug": slug},
+        )
+        session.add(event)
+        session.add(market)
+        session.add(
+            PolymarketToken(
+                id=f"token-{market_id}-yes",
+                market_id=market_id,
+                outcome="Yes",
+                outcome_index=0,
+                latest_price=0.55,
+                raw_payload={"market_id": market_id},
+            )
+        )
+        session.add(
+            MappingCandidate(
+                id=f"candidate-{market_id}",
+                f1_meeting_id=meeting.id,
+                f1_session_id=sessions_by_code[session_code].id,
+                polymarket_event_id=event_id,
+                polymarket_market_id=market_id,
+                candidate_type=taxonomy,
+                confidence=0.95 - (index * 0.01),
+                matched_by="test_fixture",
+                rationale_json={"market_id": market_id},
+                status="candidate",
+            )
+        )
+        if create_mapping:
+            session.add(
+                EntityMappingF1ToPolymarket(
+                    id=f"mapping-{market_id}",
+                    f1_meeting_id=meeting.id,
+                    f1_session_id=sessions_by_code[session_code].id,
+                    polymarket_event_id=event_id,
+                    polymarket_market_id=market_id,
+                    mapping_type=taxonomy,
+                    confidence=0.95 - (index * 0.01),
+                    matched_by="test_fixture",
+                    notes="fixture",
+                    override_flag=False,
+                )
+            )
+
+    session.commit()
+    return {"meeting": meeting, "sessions_by_code": sessions_by_code}
+
+
+def test_validate_f1_weekend_subset_standard_weekend_australia(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """validate_f1_weekend_subset handles a standard (FP1/FP2/FP3/Q/R) weekend correctly.
+
+    Validates that:
+    - REGULAR_WEEKEND_SESSION_PATTERN is accepted without failures
+    - Only Q and R sessions receive heavy telemetry hydration (no SQ in standard weekend)
+    - All three market probes (pole, race_head_to_head, race_outcome) are selected from Q/R
+    - The validation report is written to the correct path
+    """
+    session, context = build_context(tmp_path)
+    fixture = seed_australia_standard_weekend_fixture(session)
+    heavy_calls: dict[int, bool] = {}
+
+    def fake_sync_f1_calendar(_ctx: PipelineContext, season: int) -> dict[str, Any]:
+        assert season == 2026
+        return {"status": "completed", "season": season}
+
+    def fake_hydrate_f1_session(
+        _ctx: PipelineContext,
+        *,
+        session_key: int,
+        include_extended: bool,
+        include_heavy: bool,
+    ) -> dict[str, Any]:
+        assert include_extended is True
+        heavy_calls[session_key] = include_heavy
+        return {"status": "completed", "session_key": session_key, "records_written": 3}
+
+    def fake_discover_session_polymarket(
+        _ctx: PipelineContext,
+        *,
+        session_key: int,
+        batch_size: int = 100,
+        max_pages: int = 5,
+        search_fallback: bool = True,
+    ) -> dict[str, Any]:
+        return {"status": "completed", "session_key": session_key}
+
+    def fake_reconcile_mappings(_ctx: PipelineContext) -> dict[str, Any]:
+        return {"status": "completed", "candidate_rows": 0, "mapping_rows": 0}
+
+    def fake_run_data_quality_checks(_ctx: PipelineContext) -> dict[str, Any]:
+        return {"job_run_id": "dq-aus-1", "status": "completed"}
+
+    def fake_hydrate_polymarket_market(
+        _ctx: PipelineContext,
+        *,
+        market_id: str,
+        fidelity: int = 60,
+    ) -> dict[str, Any]:
+        market = session.get(PolymarketMarket, market_id)
+        assert market is not None, f"probe market {market_id} not found in fixture"
+        observed_at = utc_now()
+        session.add(
+            PolymarketPriceHistory(
+                id=f"aus-price-{market_id}",
+                market_id=market_id,
+                token_id=f"token-{market_id}-yes",
+                observed_at_utc=observed_at,
+                price=0.55,
+                midpoint=0.56,
+                best_bid=0.54,
+                best_ask=0.57,
+                raw_payload={"market_id": market_id},
+            )
+        )
+        session.add(
+            PolymarketTrade(
+                id=f"aus-trade-{market_id}",
+                market_id=market_id,
+                token_id=f"token-{market_id}-yes",
+                condition_id=f"condition-{market_id}",
+                trade_timestamp_utc=observed_at,
+                side="buy",
+                price=0.55,
+                size=10.0,
+                raw_payload={"market_id": market_id},
+            )
+        )
+        session.commit()
+        return {"status": "completed", "market_id": market_id, "fidelity": fidelity}
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.sync_f1_calendar",
+        fake_sync_f1_calendar,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.ensure_default_feature_registry",
+        lambda _ctx: None,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.hydrate_f1_session",
+        fake_hydrate_f1_session,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.discover_session_polymarket",
+        fake_discover_session_polymarket,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.reconcile_mappings",
+        fake_reconcile_mappings,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.run_data_quality_checks",
+        fake_run_data_quality_checks,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.orchestration.hydrate_polymarket_market",
+        fake_hydrate_polymarket_market,
+    )
+
+    try:
+        result = validate_f1_weekend_subset(context, meeting_key=fixture["meeting"].meeting_key)
+        session.commit()
+
+        # Top-level result
+        assert result["status"] == "completed"
+        assert result["market_probes"] == 3
+        assert result["sessions"] == 5
+
+        # Heavy hydration only applies to Q and R for standard weekend (no SQ)
+        assert heavy_calls == {
+            11220: False,  # FP1 — not heavy
+            11221: False,  # FP2 — not heavy
+            11222: False,  # FP3 — not heavy
+            11223: True,   # Q  — heavy
+            11224: True,   # R  — heavy
+        }
+
+        # Report files written
+        report_dir = tmp_path / "reports" / "validation" / "2026" / "2026-australian-grand-prix"
+        report_json = report_dir / "summary.json"
+        report_md = report_dir / "summary.md"
+        assert report_json.exists()
+        assert report_md.exists()
+
+        report = json.loads(report_json.read_text(encoding="utf-8"))
+        assert report["overall_status"] == "completed"
+        assert report["validation_mode"] == "smoke"
+
+        # Standard weekend has Q and R as heavy sessions (no SQ)
+        assert report["heavy_session_codes"] == ["Q", "R"]
+        assert set(report["session_pattern"]) == {"FP1", "FP2", "FP3", "Q", "R"}
+
+        # Research readiness
+        assert report["research_readiness"]["f1_subset_data"] == "ready"
+        assert report["research_readiness"]["session_market_mapping"] == "ready"
+        assert report["research_readiness"]["market_history_probe"] == "ready"
+        assert report["research_readiness"]["analysis_joinability"] == "ready"
+
+        # Q session should have exactly 1 mapping (pole position)
+        assert report["mapping_summary"]["11223"]["mapping_count"] == 1
+
+        # All three probes must be present: pole (Q), race H2H (R), race outcome (R)
+        assert {probe["probe_key"] for probe in report["market_probes"]} == {
+            "pole",
+            "race_head_to_head",
+            "race_outcome",
+        }
+        # Pole probe must come from Q session (no SQ in standard weekend)
+        pole_probe = next(p for p in report["market_probes"] if p["probe_key"] == "pole")
+        assert pole_probe["session_code"] == "Q"
+
+        assert report["failures"] == []
+        assert report["warnings"] == []
+    finally:
+        session.close()
+
+
 def test_sync_polymarket_f1_catalog_filters_to_f1_events(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
