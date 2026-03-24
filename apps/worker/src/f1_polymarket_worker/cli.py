@@ -1341,6 +1341,67 @@ def settle_paper_trade_session_command(
         typer.echo(f"Settled {n} positions. PnL: ${total_pnl:.2f}, wins: {wins}/{n}")
 
 
+@app.command("h2h-signals")
+def h2h_signals_command(
+    meeting_key: int = typer.Option(..., "--meeting-key", help="OpenF1 meeting_key"),
+    session_code: str = typer.Option("R", "--session-code", help="Target session (usually R)"),
+    circuit_key: int = typer.Option(..., "--circuit-key", help="OpenF1 circuit_key"),
+    circuit_name: str = typer.Option(..., "--circuit-name", help="circuit_short_name"),
+    min_edge: float = typer.Option(0.05, "--min-edge", help="Minimum abs(edge) to show"),
+    teammate_only: bool = typer.Option(False, "--teammate-only/--all", help="Teammate H2H only"),
+) -> None:
+    """Compute H2H market signals using driver affinity scores.
+
+    Example (Japan GP 2026):
+        uv run python -m f1_polymarket_worker.cli h2h-signals \\
+            --meeting-key 1281 --circuit-key 39 --circuit-name Suzuka
+    """
+    from f1_polymarket_lab.features.h2h import compute_h2h_signals
+
+    settings = get_settings()
+    with db_session(settings.database_url) as db:
+        signals = compute_h2h_signals(
+            db,
+            meeting_key=meeting_key,
+            session_code=session_code,
+            circuit_key=circuit_key,
+            circuit_short_name=circuit_name,
+            min_edge=min_edge,
+        )
+
+    if teammate_only:
+        signals = [s for s in signals if s["is_teammate_h2h"]]
+
+    # Remove mirrored duplicates (keep each matchup once, the BUY side or higher edge)
+    seen: set[frozenset[str]] = set()
+    deduped = []
+    for s in sorted(signals, key=lambda r: -abs(r["edge"])):
+        pair = frozenset([s["token_driver"], s["other_driver"]])
+        if pair not in seen:
+            seen.add(pair)
+            deduped.append(s)
+
+    typer.echo(
+        f"\nH2H Signals — meeting={meeting_key} session={session_code} "
+        f"circuit={circuit_name} ({len(deduped)} markets)\n"
+    )
+    typer.echo(f"  {'Matchup':<30} {'TM':>3} {'Mkt':>6} {'Mod':>6} {'Edge':>7}  Signal")
+    typer.echo("  " + "-" * 62)
+    for s in deduped:
+        tm = "✓" if s["is_teammate_h2h"] else " "
+        signal_str = s["signal"].upper()
+        flag = " ★" if s["is_teammate_h2h"] and abs(s["edge"]) >= 0.10 else ""
+        typer.echo(
+            f"  {s['token_driver']+' > '+s['other_driver']:<30} {tm:>3} "
+            f"{s['token_price']:>6.3f} {s['model_prob']:>6.3f} "
+            f"{s['edge']:>+7.3f}  {signal_str}{flag}"
+        )
+
+    teammate_signals = [s for s in deduped if s["is_teammate_h2h"]]
+    buys = [s for s in deduped if s["signal"] == "buy"]
+    typer.echo(f"\n  Total buy signals: {len(buys)}  |  Teammate H2H: {len(teammate_signals)}")
+
+
 @app.command("worker")
 def worker() -> None:
     typer.echo("Worker heartbeat loop started. Use the CLI to trigger ingestion jobs.")
