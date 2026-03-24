@@ -1,6 +1,6 @@
 # f1-polymarket-lab
 
-Research platform for Formula 1 prediction-market data ingestion, feature snapshots, modeling, backtesting, and analyst-facing exploration.
+Research platform for Formula 1 prediction-market data ingestion, feature engineering, modeling, backtesting, and paper trading.
 
 ## Quick start
 
@@ -21,14 +21,20 @@ Override the demo backfill scope if needed:
 make ingest-demo DEMO_WEEKENDS=2 DEMO_MARKET_BATCHES=3
 ```
 
-## Current slice
+## Stack
 
-- Phase 0: monorepo, tooling, local infra, CI, base docs.
-- Thin Phase 1: OpenF1 and Polymarket connectors, Bronze/Silver persistence, normalized schema, API browsing endpoints, and a seeded local dashboard.
+- **Ingestion:** OpenF1, F1DB (Jolpica), Polymarket REST + WebSocket
+- **Storage:** SQLite (local) / PostgreSQL (prod), Alembic migrations, Bronze/Silver data lake
+- **Features:** Snapshot-based feature registry with walk-forward splits
+- **Models:** XGBoost / LightGBM with Optuna tuning and isotonic calibration
+- **Backtesting:** Walk-forward backtest engine with PnL and calibration metrics
+- **Paper trading:** Signal engine that evaluates YES/NO edges against live Polymarket prices
+- **API:** FastAPI with typed Pydantic schemas
+- **Dashboard:** Next.js with TypeScript SDK and shared UI components
 
 ## Collection workflow
 
-For the F1-focused ingestion path, use the staged commands below:
+For the F1-focused ingestion path:
 
 ```bash
 make backfill-f1-history-all
@@ -37,62 +43,53 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli reconci
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
 ```
 
-If you want the historical layers separately, run:
+For a post-session weekend update (≥45 min after session end):
 
 ```bash
-make bootstrap-f1db-history
-make sync-jolpica-history
-make backfill-f1-history
-make sync-polymarket-f1-catalog
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli discover-session-polymarket --session-key <SESSION_KEY> --execute
-make hydrate-polymarket-f1-history
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli reconcile-mappings
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
-```
-
-`backfill-f1-history-all` treats `1950-2022` as `F1DB + Jolpica` history and `2023+` as `OpenF1` canonical history. The current pre-2023 scope is results, qualifying, sprint, laps, pit stops, and schedule metadata; richer telemetry stays on the `2023+ OpenF1` path.
-
-For `2023+`, the modern OpenF1 backfill now keeps race-weekend sessions only: `FP1/FP2/FP3/Q/SQ/S/R`. Pre-season testing days are excluded from the normalized session catalog, and `backfill-f1-history` defaults to `--heavy-mode weekend`, which means all retained weekend sessions collect heavy `car_data` and `location`.
-
-F1 timing normalization keeps source display values and typed semantics separately. `f1_intervals` now records explicit `laps_behind` states for values like `+1 LAP`, and `f1_session_results` stores generic `result_time_*` fields plus explicit `dnf/dns/dsq` instead of overloading everything into `fastest_lap_seconds`.
-
-`sync-polymarket-f1-catalog` uses F1 tags first and then public search plus slug hydration to cover historical F1 markets that are missing current tag metadata. The practical historical Polymarket sweep starts at `2022`.
-
-For a free post-session weekend workflow, wait until a target session is at least 45 minutes past end time, then run:
-
-```bash
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli hydrate-f1-session --session-key <SESSION_KEY> --extended --include-heavy --execute
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli discover-session-polymarket --session-key <SESSION_KEY> --execute
+SESSION=<SESSION_KEY>
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli hydrate-f1-session --session-key $SESSION --extended --include-heavy --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli discover-session-polymarket --session-key $SESSION --execute
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli hydrate-polymarket-f1-history --execute
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli reconcile-mappings
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
 ```
 
-For a focused sprint-weekend validation pass such as the `2026 Chinese Grand Prix`, run:
+For a weekend validation pass:
 
 ```bash
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli validate-f1-weekend-subset --meeting-key 1280 --season 2026 --validation-mode smoke --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli validate-f1-weekend-subset --meeting-key <MEETING_KEY> --season <SEASON> --execute
 ```
 
-`validate-f1-weekend-subset` now defaults to `--validation-mode smoke`, which only runs heavy OpenF1 hydration for `Q/SQ/R`. Use `--validation-mode full` if you want heavy telemetry for every retained weekend session. OpenF1 free-tier throttling is also configurable through `.env` via `OPENF1_MAX_REQUESTS_PER_MINUTE` and `OPENF1_MAX_REQUESTS_PER_SECOND`; the repo defaults are conservative (`24/min`, `2/sec`) so validation runs are less likely to stall on rate-limit retries.
+`--validation-mode smoke` (default) runs heavy OpenF1 hydration for Q/SQ/R only. Use `--validation-mode full` for all sessions.
 
-This writes a reusable subset report under `data/reports/validation/<season>/<report-slug>/summary.{json,md}` with per-session F1 counts, Polymarket discovery/mapping summaries, representative market probes, and a research-readiness verdict.
-
-For a fast China sprint-weekend research pass that tests `FP1 -> SQ pole` paper edge, run:
-
-```bash
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-china-fp1-to-sq-snapshot --meeting-key 1280 --season 2026 --entry-offset-min 10 --execute
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-china-sq-pole-baseline --snapshot-id <SNAPSHOT_ID> --execute
-uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli report-china-sq-pole-quicktest --snapshot-id <SNAPSHOT_ID> --execute
-```
-
-This quick test writes a feature snapshot to the local lake, persists baseline predictions and metrics, and renders a short research report under `data/reports/research/<season>/<report-slug>/summary.{json,md}`. It is a paper-edge study, not an executable orderbook backtest.
-
-For event-weekend live capture, run:
+For live event capture:
 
 ```bash
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli capture-live-weekend --session-key <SESSION_KEY> --execute
 ```
+
+## GP paper trading workflow
+
+After FP1 ends, build a snapshot and run paper trade signals:
+
+```bash
+make db-upgrade
+uv run python -m f1_polymarket_worker.cli run-<gp-code>-fp1-paper-trade --execute
+```
+
+## Worker package layout
+
+| Module | Purpose |
+|---|---|
+| `pipeline/` | Core ETL context, F1 sync, Polymarket sync, mappings, DQ |
+| `orchestration.py` | Re-export shim (see sub-modules below) |
+| `market_discovery.py` | Polymarket catalog sync and session discovery scoring |
+| `f1_backfill.py` | Multi-season F1 history and Polymarket history backfill |
+| `weekend_ops.py` | Weekend validation reports and live capture |
+| `historical.py` | Jolpica and OpenF1 season-range historical backfill |
+| `gp_registry.py` | GP configurations, pre-weekend snapshots, baseline models |
+| `backtest.py` | Walk-forward backtest engine |
+| `paper_trading.py` | Paper trading signal engine and position tracking |
 
 ## Agent setup
 

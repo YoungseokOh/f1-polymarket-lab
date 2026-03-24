@@ -1,6 +1,6 @@
 COMPOSE_FILE := infra/compose/local.yml
-DEMO_SEASON ?= 2024
-DEMO_WEEKENDS ?= 1
+DEMO_SEASON ?= 2026
+DEMO_WEEKENDS ?= 3
 DEMO_MARKET_BATCHES ?= 1
 SESSION_KEY ?=
 
@@ -74,7 +74,7 @@ test:
 
 typecheck:
 	pnpm typecheck
-	uv run mypy apps py tests
+	uv run mypy apps py py/tests
 
 format:
 	pnpm format

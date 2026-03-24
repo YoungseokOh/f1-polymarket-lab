@@ -682,7 +682,7 @@ requires-dist = [
 [[package]]
 name = "f1-polymarket-lab-root"
 version = "0.1.0"
-source = { editable = "." }
+source = { virtual = "." }
 
 [package.dev-dependencies]
 dev = [

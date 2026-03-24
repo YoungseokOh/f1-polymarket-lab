@@ -68,7 +68,7 @@ jobs:
         run: uv sync --group dev
 
       - name: Python tests
-        run: uv run pytest tests/ -q
+        run: uv run pytest py/tests/ -q
 
       - name: JS tests
         run: pnpm test
