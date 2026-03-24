@@ -20,6 +20,7 @@ from typing import Any
 
 import polars as pl
 from f1_polymarket_lab.common import ensure_dir, stable_uuid, utc_now
+from f1_polymarket_lab.features.driver_profile import enrich_rows_with_driver_profiles
 from f1_polymarket_lab.storage.models import (
     DatasetVersionManifest,
     EntityMappingF1ToPolymarket,
@@ -1234,6 +1235,14 @@ def _build_fp1_snapshot(
         finish_job_run(ctx.db, run, status="failed", records_written=0, error_message=error_message)
         raise ValueError(error_message)
 
+    # Enrich with driver sector profiles and track affinity
+    rows = enrich_rows_with_driver_profiles(
+        rows,
+        db=ctx.db,
+        circuit_key=getattr(meeting, "circuit_key", None),
+        circuit_short_name=getattr(meeting, "circuit_short_name", None),
+    )
+
     snapshot_id = stable_uuid(config.snapshot_type, meeting_key, season, entry_offset_min, "v1")
     silver_object = ctx.lake.write_silver_object(
         config.snapshot_dataset,
@@ -1526,6 +1535,12 @@ def _build_pre_weekend_snapshot(
         finish_job_run(ctx.db, run, status="failed", records_written=0, error_message=error_message)
         raise ValueError(error_message)
 
+    rows = enrich_rows_with_driver_profiles(
+        rows,
+        db=ctx.db,
+        circuit_key=getattr(meeting, "circuit_key", None),
+        circuit_short_name=getattr(meeting, "circuit_short_name", None),
+    )
     enriched_rows = _enrich_snapshot_probabilities(rows)
 
     snapshot_id = stable_uuid(config.snapshot_type, meeting_key, season, "v1")

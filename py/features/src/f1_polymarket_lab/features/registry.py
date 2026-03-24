@@ -193,6 +193,57 @@ def default_feature_registry() -> list[FeatureDefinition]:
             data_type="float",
             description="Seconds since the last trade before entry observation.",
         ),
+        # -- Driver sector strength profile features --
+        FeatureDefinition(
+            feature_name="driver_s1_strength",
+            feature_group="driver_profile",
+            data_type="float",
+            description="Driver S1 pace strength z-score over recent sessions (positive = faster).",
+        ),
+        FeatureDefinition(
+            feature_name="driver_s2_strength",
+            feature_group="driver_profile",
+            data_type="float",
+            description="Driver S2 pace strength z-score over recent sessions (positive = faster).",
+        ),
+        FeatureDefinition(
+            feature_name="driver_s3_strength",
+            feature_group="driver_profile",
+            data_type="float",
+            description="Driver S3 pace strength z-score over recent sessions (positive = faster).",
+        ),
+        FeatureDefinition(
+            feature_name="driver_profile_sessions",
+            feature_group="driver_profile",
+            data_type="int",
+            description="Number of sessions used to compute the driver sector profile.",
+        ),
+        # -- Track sector weight features --
+        FeatureDefinition(
+            feature_name="track_s1_fraction",
+            feature_group="track_profile",
+            data_type="float",
+            description="Fraction of lap time in S1 at this circuit (from historical Q laps).",
+        ),
+        FeatureDefinition(
+            feature_name="track_s2_fraction",
+            feature_group="track_profile",
+            data_type="float",
+            description="Fraction of lap time in S2 at this circuit (from historical Q laps).",
+        ),
+        FeatureDefinition(
+            feature_name="track_s3_fraction",
+            feature_group="track_profile",
+            data_type="float",
+            description="Fraction of lap time in S3 at this circuit (from historical Q laps).",
+        ),
+        # -- Driver-track affinity --
+        FeatureDefinition(
+            feature_name="driver_track_affinity",
+            feature_group="driver_profile",
+            data_type="float",
+            description="Weighted combination of driver sector strengths × track sector fractions.",
+        ),
         # -- Derived probability features --
         FeatureDefinition(
             feature_name="market_normalized_prob",
