@@ -152,6 +152,7 @@ def compute_track_sector_weights(
     Falls back to equal weights (0.333, 0.333, 0.333) if insufficient data.
     """
     _s = "l.sector_1_seconds + l.sector_2_seconds + l.sector_3_seconds"
+    session_codes_sql = ", ".join(f"'{c}'" for c in session_codes)
     query = text(f"""
         SELECT
             AVG(l.sector_1_seconds / ({_s})) AS s1_frac,
@@ -161,7 +162,7 @@ def compute_track_sector_weights(
         FROM f1_laps l
         JOIN f1_sessions s ON s.id = l.session_id
         JOIN f1_meetings m ON m.id = s.meeting_id
-        WHERE s.session_code IN :session_codes
+        WHERE s.session_code IN ({session_codes_sql})
           AND m.circuit_short_name = :circuit
           AND m.season >= :min_season
           AND l.sector_1_seconds > 5
@@ -172,7 +173,6 @@ def compute_track_sector_weights(
     row = db.execute(
         query,
         {
-            "session_codes": tuple(session_codes),
             "circuit": circuit_short_name,
             "min_season": min_season,
         },
