@@ -43,13 +43,15 @@ def compute_driver_sector_profiles(
     session_codes: tuple[str, ...] = ("Q", "FP3"),
     min_season: int = 2023,
     n_sessions: int = 12,
+    decay: float = 0.85,
 ) -> dict[str, dict[str, float]]:
     """Return per-driver sector strength profiles.
 
     Result schema: {driver_id: {s1_strength, s2_strength, s3_strength, n_sessions}}
 
-    Strength values are z-scores (positive = faster than peers).
-    Averaged across the last *n_sessions* sessions where the driver has data.
+    Strength values are exponentially-decayed weighted z-scores (positive = faster than peers).
+    Sessions are weighted by *decay*^rank where rank=0 is the most recent session.
+    The most recent sessions therefore dominate; older data fades exponentially.
     If *circuit_key* is provided, sessions at that circuit get 2× weight.
     """
     session_codes_sql = ", ".join(f"'{c}'" for c in session_codes)
@@ -95,45 +97,46 @@ def compute_driver_sector_profiles(
         reverse=True,
     )
 
-    # Accumulate driver z-scores across sessions (most recent n_sessions)
-    driver_s1: dict[str, list[float]] = defaultdict(list)
-    driver_s2: dict[str, list[float]] = defaultdict(list)
-    driver_s3: dict[str, list[float]] = defaultdict(list)
+    # Accumulate driver z-scores with exponential recency decay.
+    # For each driver, sessions are processed most-recent-first.
+    # Weight for the k-th session (0-indexed) = decay^k × circuit_boost.
+    driver_s1_wsum: dict[str, float] = defaultdict(float)
+    driver_s2_wsum: dict[str, float] = defaultdict(float)
+    driver_s3_wsum: dict[str, float] = defaultdict(float)
+    driver_wtot: dict[str, float] = defaultdict(float)
     seen_sessions_per_driver: dict[str, int] = defaultdict(int)
 
     for sid in sorted_sessions:
         session_rows = sessions[sid]
         circuit = (session_meta[sid][1] or "").lower()
+        same_circuit = bool(circuit_key and circuit and _circuit_matches(circuit_key, circuit))
+        circuit_boost = 2.0 if same_circuit else 1.0
 
         s1_zscores = _zscore_within_session([(d, s1) for d, s1, _, _ in session_rows])
         s2_zscores = _zscore_within_session([(d, s2) for d, _, s2, _ in session_rows])
         s3_zscores = _zscore_within_session([(d, s3) for d, _, _, s3 in session_rows])
 
         for driver_id in s1_zscores:
-            if seen_sessions_per_driver[driver_id] >= n_sessions:
+            rank = seen_sessions_per_driver[driver_id]
+            if rank >= n_sessions:
                 continue
-            # 2× weight for same circuit (if specified)
-            same_circuit = bool(circuit_key and circuit and _circuit_matches(circuit_key, circuit))
-            weight = 2.0 if same_circuit else 1.0
-            for _ in range(int(weight)):
-                if s1_zscores.get(driver_id) is not None:
-                    driver_s1[driver_id].append(s1_zscores[driver_id])
-                if s2_zscores.get(driver_id) is not None:
-                    driver_s2[driver_id].append(s2_zscores[driver_id])
-                if s3_zscores.get(driver_id) is not None:
-                    driver_s3[driver_id].append(s3_zscores[driver_id])
+            w = (decay**rank) * circuit_boost
+            driver_s1_wsum[driver_id] += s1_zscores[driver_id] * w
+            if s2_zscores.get(driver_id) is not None:
+                driver_s2_wsum[driver_id] += s2_zscores[driver_id] * w
+            if s3_zscores.get(driver_id) is not None:
+                driver_s3_wsum[driver_id] += s3_zscores[driver_id] * w
+            driver_wtot[driver_id] += w
             seen_sessions_per_driver[driver_id] += 1
 
     result: dict[str, dict[str, float]] = {}
-    all_drivers = set(driver_s1) | set(driver_s2) | set(driver_s3)
+    all_drivers = set(driver_s1_wsum) | set(driver_s2_wsum) | set(driver_s3_wsum)
     for driver_id in all_drivers:
-        s1_vals = driver_s1.get(driver_id, [])
-        s2_vals = driver_s2.get(driver_id, [])
-        s3_vals = driver_s3.get(driver_id, [])
+        wtot = driver_wtot.get(driver_id, 0.0)
         result[driver_id] = {
-            "s1_strength": sum(s1_vals) / len(s1_vals) if s1_vals else 0.0,
-            "s2_strength": sum(s2_vals) / len(s2_vals) if s2_vals else 0.0,
-            "s3_strength": sum(s3_vals) / len(s3_vals) if s3_vals else 0.0,
+            "s1_strength": driver_s1_wsum[driver_id] / wtot if wtot else 0.0,
+            "s2_strength": driver_s2_wsum[driver_id] / wtot if wtot else 0.0,
+            "s3_strength": driver_s3_wsum[driver_id] / wtot if wtot else 0.0,
             "n_sessions": seen_sessions_per_driver.get(driver_id, 0),
         }
     return result
