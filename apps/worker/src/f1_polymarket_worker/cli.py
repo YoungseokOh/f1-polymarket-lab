@@ -467,6 +467,7 @@ def _register_gp_commands() -> None:
                 min_edge: float = typer.Option(cfg.min_edge, "--min-edge"),
                 bet_size: float = typer.Option(10.0, "--bet-size"),
                 max_daily_loss: float = typer.Option(100.0, "--max-daily-loss"),
+                refresh_prices: bool = typer.Option(True, "--refresh-prices/--no-refresh-prices"),
                 execute: bool = typer.Option(False, "--execute/--plan-only"),
             ) -> None:
                 """One-shot pipeline: build snapshot → run baselines → paper trade."""
@@ -480,6 +481,43 @@ def _register_gp_commands() -> None:
                 settings = get_settings()
                 with db_session(settings.database_url) as session:
                     context = PipelineContext(db=session, execute=execute)
+
+                    # Step 0: refresh prices for mapped markets
+                    if refresh_prices:
+                        from f1_polymarket_lab.storage.models import (  # noqa: PLC0415
+                            EntityMappingF1ToPolymarket,
+                            F1Meeting,
+                            F1Session,
+                        )
+                        from sqlalchemy import select  # noqa: PLC0415
+
+                        meeting = session.scalar(
+                            select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key)
+                        )
+                        if meeting:
+                            sessions_for_meeting = session.scalars(
+                                select(F1Session).where(F1Session.meeting_id == meeting.id)
+                            ).all()
+                            session_ids = [s.id for s in sessions_for_meeting]
+                            mappings = session.scalars(
+                                select(EntityMappingF1ToPolymarket).where(
+                                    EntityMappingF1ToPolymarket.f1_session_id.in_(session_ids)
+                                )
+                            ).all()
+                            market_ids = [
+                                m.polymarket_market_id
+                                for m in mappings
+                                if m.polymarket_market_id
+                            ]
+                            typer.echo(
+                                f"[0/3] Refreshing prices for {len(market_ids)} markets..."
+                            )
+                            for mid in market_ids:
+                                try:
+                                    hydrate_polymarket_market(context, market_id=mid, fidelity=60)
+                                except Exception as exc:
+                                    typer.echo(f"  Warning: failed to hydrate {mid}: {exc}")
+                            session.commit()
 
                     # Step 1: build snapshot if not provided
                     if snapshot_id is None:
@@ -1120,6 +1158,187 @@ def paper_trade_command(
                    f"PnL: ${summary['total_pnl']:.2f}")
         typer.echo(f"Session ID: {pt_session_id}")
         typer.echo(f"Log saved: {log_path}")
+
+
+@app.command("settle-paper-trade-session")
+def settle_paper_trade_session_command(
+    gp_slug: str = typer.Option(..., "--gp-slug", help="GP slug (e.g. japan_fp1)"),
+    pt_session_id: str | None = typer.Option(
+        None,
+        "--pt-session-id",
+        help="Specific paper trade session ID; omit to use latest for gp-slug.",
+    ),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Settle open paper trade positions against actual race/qualifying results.
+
+    Run AFTER hydrating the target session (Q for pole, R for race winner) results.
+    """
+    from datetime import timezone  # noqa: PLC0415
+
+    import polars as pl_module
+    from f1_polymarket_lab.storage.models import (  # noqa: PLC0415
+        F1Meeting,
+        F1Session,
+        F1SessionResult,
+        FeatureSnapshot,
+        PaperTradePosition,
+        PaperTradeSession,
+    )
+    from sqlalchemy import select  # noqa: PLC0415
+
+    from f1_polymarket_worker.gp_registry import GP_REGISTRY  # noqa: PLC0415
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        # Find GP config
+        cfg = next((g for g in GP_REGISTRY if g.short_code == gp_slug), None)
+        if cfg is None:
+            typer.echo(
+                f"Unknown gp_slug: {gp_slug}. Known: {[g.short_code for g in GP_REGISTRY]}"
+            )
+            raise typer.Exit(1)
+
+        # Find paper trade session
+        if pt_session_id:
+            pt_session = session.get(PaperTradeSession, pt_session_id)
+        else:
+            pt_session = session.scalar(
+                select(PaperTradeSession)
+                .where(PaperTradeSession.gp_slug == gp_slug)
+                .order_by(PaperTradeSession.started_at.desc())
+            )
+        if pt_session is None:
+            typer.echo(f"No paper trade session found for gp_slug={gp_slug}")
+            raise typer.Exit(1)
+        typer.echo(f"Paper trade session: {pt_session.id} (status={pt_session.status})")
+
+        # Load snapshot to get market_id → driver_id mapping
+        snap = (
+            session.get(FeatureSnapshot, pt_session.snapshot_id)
+            if pt_session.snapshot_id
+            else None
+        )
+        if snap is None or not snap.storage_path:
+            typer.echo("No snapshot found for this session; cannot settle.")
+            raise typer.Exit(1)
+        snapshot_df = pl_module.read_parquet(snap.storage_path)
+        market_to_driver: dict[str, str] = {}
+        for row in snapshot_df.to_dicts():
+            mid = row.get("market_id")
+            did = row.get("driver_id")
+            if mid and did:
+                market_to_driver[str(mid)] = str(did)
+
+        # Find the target session (Q for pole, R for race winner)
+        meeting = session.scalar(
+            select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key)
+        )
+        if meeting is None:
+            typer.echo(f"Meeting {cfg.meeting_key} not found in DB.")
+            raise typer.Exit(1)
+        target_session = session.scalar(
+            select(F1Session)
+            .where(
+                F1Session.meeting_id == meeting.id,
+                F1Session.session_code == cfg.target_session_code,
+            )
+        )
+        if target_session is None:
+            typer.echo(
+                f"Target session ({cfg.target_session_code}) not found "
+                f"for meeting {cfg.meeting_key}."
+            )
+            raise typer.Exit(1)
+
+        # Get winner (position == 1) from F1SessionResult
+        winner_result = session.scalar(
+            select(F1SessionResult)
+            .where(
+                F1SessionResult.session_id == target_session.id,
+                F1SessionResult.position == 1,
+            )
+        )
+        if winner_result is None:
+            typer.echo(
+                f"No position-1 result found for session {target_session.id} "
+                f"({cfg.target_session_code})."
+            )
+            typer.echo("Run `hydrate-f1-session --session-key <KEY> --extended --execute` first.")
+            raise typer.Exit(1)
+        winner_driver_id = winner_result.driver_id
+        typer.echo(f"Winner (position=1): driver_id={winner_driver_id}")
+
+        # Load open positions
+        open_positions = session.scalars(
+            select(PaperTradePosition)
+            .where(
+                PaperTradePosition.session_id == pt_session.id,
+                PaperTradePosition.status == "open",
+            )
+        ).all()
+        typer.echo(f"Open positions to settle: {len(open_positions)}")
+
+        if not execute:
+            for pos in open_positions:
+                driver_id = market_to_driver.get(pos.market_id or "")
+                outcome_yes = driver_id == winner_driver_id
+                typer.echo(
+                    f"  [plan] market={pos.market_id} driver={driver_id} "
+                    f"outcome_yes={outcome_yes} side={pos.side}"
+                )
+            return
+
+        # Settle positions
+        from datetime import datetime  # noqa: PLC0415
+
+        now = datetime.now(tz=timezone.utc)
+        total_pnl = 0.0
+        wins = 0
+        for pos in open_positions:
+            driver_id = market_to_driver.get(pos.market_id or "")
+            outcome_yes = driver_id == winner_driver_id
+
+            if pos.side == "buy_no":
+                pnl = (
+                    pos.quantity * (1.0 - pos.entry_price)
+                    if not outcome_yes
+                    else -pos.quantity * pos.entry_price
+                )
+            else:
+                pnl = (
+                    pos.quantity * (1.0 - pos.entry_price)
+                    if outcome_yes
+                    else -pos.quantity * pos.entry_price
+                )
+            pnl -= pos.quantity * (pt_session.config_json or {}).get("fee_rate", 0.02)
+
+            pos.status = "settled"
+            pos.exit_price = 1.0 if outcome_yes else 0.0
+            pos.exit_time = now
+            pos.realized_pnl = pnl
+            total_pnl += pnl
+            if pnl > 0:
+                wins += 1
+
+        pt_session.status = "settled"
+        pt_session.finished_at = now
+        # Update summary
+        existing = dict(pt_session.summary_json or {})
+        existing.update(
+            {
+                "settled_positions": len(open_positions),
+                "win_count": wins,
+                "loss_count": len(open_positions) - wins,
+                "win_rate": wins / len(open_positions) if open_positions else None,
+                "total_pnl": total_pnl,
+            }
+        )
+        pt_session.summary_json = existing
+        session.commit()
+
+        n = len(open_positions)
+        typer.echo(f"Settled {n} positions. PnL: ${total_pnl:.2f}, wins: {wins}/{n}")
 
 
 @app.command("worker")

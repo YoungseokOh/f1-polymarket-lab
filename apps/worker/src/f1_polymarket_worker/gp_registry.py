@@ -178,6 +178,23 @@ GP_REGISTRY: list[GPConfig] = [
         ),
     ),
     GPConfig(
+        name="Japanese Grand Prix",
+        short_code="japan_q_race",
+        meeting_key=1281,
+        season=2026,
+        target_session_code="R",
+        snapshot_type="japan_q_to_race_winner_snapshot",
+        snapshot_dataset="japan_q_to_race_winner_snapshot",
+        baseline_stage="japan_q_race_winner_quicktest",
+        baseline_names=("market_implied", "fp1_pace", "hybrid"),
+        report_slug="2026-japanese-grand-prix-q-race-winner-quicktest",
+        title_suffix="Q-to-Race Winner Quick Test",
+        notes=(
+            "Paper-edge study for race winner prediction using Q pace as primary signal.",
+            "Universe is limited to Japanese GP race winner markets.",
+        ),
+    ),
+    GPConfig(
         name="Bahrain Grand Prix",
         short_code="bahrain",
         meeting_key=1282,
@@ -616,7 +633,7 @@ def _fp1_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
     )
     zscore_by_feature = {
         feature_name: _zscore_map(rows, feature_name)
-        for feature_name, _sign in sign_specs
+        for feature_name, _ in sign_specs
     }
     signals: list[float] = []
     for row in rows:
