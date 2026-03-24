@@ -179,6 +179,23 @@ GP_REGISTRY: list[GPConfig] = [
     ),
     GPConfig(
         name="Japanese Grand Prix",
+        short_code="japan_fp3",
+        meeting_key=1281,
+        season=2026,
+        target_session_code="Q",
+        snapshot_type="japan_fp3_to_q_pole_quicktest",
+        snapshot_dataset="japan_fp3_to_q_pole_snapshot",
+        baseline_stage="japan_fp3_q_pole_quicktest",
+        baseline_names=("market_implied", "fp3_pace", "hybrid"),
+        report_slug="2026-japanese-grand-prix-fp3-q-pole-quicktest",
+        title_suffix="FP3-to-Q Pole Quick Test",
+        notes=(
+            "Uses FP3 pace (most recent before qualifying) as primary signal.",
+            "The universe is limited to Japanese GP FP3 -> Qualifying pole markets.",
+        ),
+    ),
+    GPConfig(
+        name="Japanese Grand Prix",
         short_code="japan_q_race",
         meeting_key=1281,
         season=2026,
@@ -330,8 +347,8 @@ def _load_sessions(
     meeting_key: int,
     season: int,
     target_session_code: str,
-) -> tuple[F1Meeting, F1Session, F1Session]:
-    """Load the meeting, FP1 session, and target session (Q or SQ)."""
+) -> tuple[F1Meeting, F1Session, F1Session | None, F1Session | None, F1Session]:
+    """Load the meeting, FP1/FP2/FP3 sessions, and target session."""
     meeting = ctx.db.scalar(select(F1Meeting).where(F1Meeting.meeting_key == meeting_key))
     if meeting is None:
         raise ValueError(f"meeting_key={meeting_key} not found")
@@ -342,14 +359,18 @@ def _load_sessions(
     sessions = ctx.db.scalars(
         select(F1Session).where(F1Session.meeting_id == meeting.id)
     ).all()
-    sessions_by_code = {row.session_code: row for row in sessions if row.session_code is not None}
+    sessions_by_code = {
+        row.session_code: row for row in sessions if row.session_code is not None
+    }
     fp1_session = sessions_by_code.get("FP1")
+    fp2_session = sessions_by_code.get("FP2")
+    fp3_session = sessions_by_code.get("FP3")
     target_session = sessions_by_code.get(target_session_code)
     if fp1_session is None or target_session is None:
         raise ValueError(
             f"meeting_key={meeting_key} must contain FP1 and {target_session_code} sessions"
         )
-    return meeting, fp1_session, target_session
+    return meeting, fp1_session, fp2_session, fp3_session, target_session
 
 
 def _load_driver_pole_markets(
@@ -594,7 +615,7 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
     enriched: list[dict[str, Any]] = []
     for group_rows in grouped.values():
         market_probs = _normalized_market_probabilities(group_rows)
-        fp1_signals = _fp1_pace_signals(group_rows)
+        fp1_signals = _practice_pace_signals(group_rows)
         fp1_probs = _softmax(fp1_signals)
         market_signals = [math.log(max(prob, EPSILON)) for prob in market_probs]
         hybrid_signals = [
@@ -630,6 +651,39 @@ def _fp1_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
         ("fp1_teammate_gap_seconds", -1.0),
         ("fp1_lap_count", 1.0),
         ("fp1_stint_count", 1.0),
+    )
+    zscore_by_feature = {
+        feature_name: _zscore_map(rows, feature_name)
+        for feature_name, _ in sign_specs
+    }
+    signals: list[float] = []
+    for row in rows:
+        contributions: list[float] = []
+        row_id = str(row["row_id"])
+        for feature_name, sign in sign_specs:
+            zscore = zscore_by_feature[feature_name].get(row_id)
+            if zscore is None:
+                continue
+            contributions.append(sign * zscore)
+        signals.append(sum(contributions) / len(contributions) if contributions else 0.0)
+    return signals
+
+
+def _practice_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
+    """Multi-session pace signal using the latest available FP session (FP3 > FP2 > FP1)."""
+    if any(row.get("fp3_position") is not None for row in rows):
+        prefix = "fp3"
+    elif any(row.get("fp2_position") is not None for row in rows):
+        prefix = "fp2"
+    else:
+        prefix = "fp1"
+
+    sign_specs = (
+        (f"{prefix}_position", -1.0),
+        (f"{prefix}_gap_to_leader_seconds", -1.0),
+        (f"{prefix}_teammate_gap_seconds", -1.0),
+        (f"{prefix}_lap_count", 1.0),
+        (f"{prefix}_stint_count", 1.0),
     )
     zscore_by_feature = {
         feature_name: _zscore_map(rows, feature_name)
@@ -886,7 +940,7 @@ def _build_fp1_snapshot(
     fidelity: int,
 ) -> dict[str, Any]:
     """Standard FP1→target session snapshot builder."""
-    meeting, fp1_session, target_session = _load_sessions(
+    meeting, fp1_session, fp2_session, fp3_session, target_session = _load_sessions(
         ctx, meeting_key=meeting_key, season=season, target_session_code=config.target_session_code
     )
     markets = _load_driver_pole_markets(
@@ -919,6 +973,44 @@ def _build_fp1_snapshot(
         ctx.db.scalars(select(F1Stint).where(F1Stint.session_id == fp1_session.id)).all()
     )
 
+    # FP2 and FP3 data (optional)
+    fp2_results = (
+        list(ctx.db.scalars(
+            select(F1SessionResult).where(F1SessionResult.session_id == fp2_session.id)
+        ).all())
+        if fp2_session else []
+    )
+    fp2_laps = (
+        list(ctx.db.scalars(
+            select(F1Lap).where(F1Lap.session_id == fp2_session.id)
+        ).all())
+        if fp2_session else []
+    )
+    fp2_stints = (
+        list(ctx.db.scalars(
+            select(F1Stint).where(F1Stint.session_id == fp2_session.id)
+        ).all())
+        if fp2_session else []
+    )
+    fp3_results = (
+        list(ctx.db.scalars(
+            select(F1SessionResult).where(F1SessionResult.session_id == fp3_session.id)
+        ).all())
+        if fp3_session else []
+    )
+    fp3_laps = (
+        list(ctx.db.scalars(
+            select(F1Lap).where(F1Lap.session_id == fp3_session.id)
+        ).all())
+        if fp3_session else []
+    )
+    fp3_stints = (
+        list(ctx.db.scalars(
+            select(F1Stint).where(F1Stint.session_id == fp3_session.id)
+        ).all())
+        if fp3_session else []
+    )
+
     results_by_driver = {r.driver_id: r for r in fp1_results if r.driver_id is not None}
     winner_driver_id = next(
         (r.driver_id for r in target_results if r.driver_id is not None and r.position == 1),
@@ -935,6 +1027,34 @@ def _build_fp1_snapshot(
 
     driver_map = _build_driver_map(drivers)
     team_best_gap = _team_best_gap_to_leader(drivers=drivers, fp1_results=fp1_results)
+
+    fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
+    fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
+    fp2_team_best_gap = (
+        _team_best_gap_to_leader(drivers=drivers, fp1_results=fp2_results)
+        if fp2_results else {}
+    )
+    fp3_team_best_gap = (
+        _team_best_gap_to_leader(drivers=drivers, fp1_results=fp3_results)
+        if fp3_results else {}
+    )
+
+    fp2_lap_count_by_driver = _CounterLike()
+    for lap in fp2_laps:
+        if lap.driver_id is not None:
+            fp2_lap_count_by_driver.increment(lap.driver_id)
+    fp3_lap_count_by_driver = _CounterLike()
+    for lap in fp3_laps:
+        if lap.driver_id is not None:
+            fp3_lap_count_by_driver.increment(lap.driver_id)
+    fp2_stint_count_by_driver = _CounterLike()
+    for stint in fp2_stints:
+        if stint.driver_id is not None:
+            fp2_stint_count_by_driver.add_distinct(stint.driver_id, stint.stint_number)
+    fp3_stint_count_by_driver = _CounterLike()
+    for stint in fp3_stints:
+        if stint.driver_id is not None:
+            fp3_stint_count_by_driver.add_distinct(stint.driver_id, stint.stint_number)
 
     entry_floor = _require_utc(fp1_session.date_end_utc) + timedelta(minutes=entry_offset_min)
     target_start = _require_utc(target_session.date_start_utc)
@@ -972,6 +1092,34 @@ def _build_fp1_snapshot(
         teammate_gap = (
             None if driver_gap is None or team_gap is None else driver_gap - team_gap
         )
+
+        # FP2 intermediate values
+        _fp2_r = fp2_results_by_driver.get(driver.id) if fp2_results else None
+        _fp2_gap = _result_gap_seconds(_fp2_r) if _fp2_r is not None else None
+        _fp2_tg = fp2_team_best_gap.get(driver.team_id or "") if fp2_results else None
+        _fp2_teammate = (
+            (_fp2_gap - _fp2_tg)
+            if _fp2_gap is not None and _fp2_tg is not None
+            else None
+        )
+
+        # FP3 intermediate values
+        _fp3_r = fp3_results_by_driver.get(driver.id) if fp3_results else None
+        _fp3_gap = _result_gap_seconds(_fp3_r) if _fp3_r is not None else None
+        _fp3_tg = fp3_team_best_gap.get(driver.team_id or "") if fp3_results else None
+        _fp3_teammate = (
+            (_fp3_gap - _fp3_tg)
+            if _fp3_gap is not None and _fp3_tg is not None
+            else None
+        )
+
+        # Best-practice aggregates
+        _all_gaps = [g for g in [driver_gap, _fp2_gap, _fp3_gap] if g is not None]
+        _fp1_pos = fp1_result.position
+        _fp2_pos = _fp2_r.position if _fp2_r is not None else None
+        _fp3_pos = _fp3_r.position if _fp3_r is not None else None
+        _all_positions = [p for p in [_fp1_pos, _fp2_pos, _fp3_pos] if p is not None]
+
         pre_entry_trades = [
             trade
             for trade in trades.get(market.id, [])
@@ -1034,6 +1182,46 @@ def _build_fp1_snapshot(
                 "fp1_stint_count": len(
                     stint_count_by_driver.distinct_counts.get(driver.id, set())
                 ),
+                # FP2 features
+                "fp2_position": _fp2_pos,
+                "fp2_result_time_seconds": (
+                    _fp2_r.result_time_seconds if _fp2_r is not None else None
+                ),
+                "fp2_gap_to_leader_seconds": _fp2_gap,
+                "fp2_teammate_gap_seconds": _fp2_teammate,
+                "fp2_team_best_gap_to_leader_seconds": _fp2_tg,
+                "fp2_lap_count": (
+                    fp2_lap_count_by_driver.counts.get(driver.id, 0)
+                    if fp2_results else None
+                ),
+                "fp2_stint_count": (
+                    len(fp2_stint_count_by_driver.distinct_counts.get(driver.id, set()))
+                    if fp2_results else None
+                ),
+                # FP3 features
+                "fp3_position": _fp3_pos,
+                "fp3_result_time_seconds": (
+                    _fp3_r.result_time_seconds if _fp3_r is not None else None
+                ),
+                "fp3_gap_to_leader_seconds": _fp3_gap,
+                "fp3_teammate_gap_seconds": _fp3_teammate,
+                "fp3_team_best_gap_to_leader_seconds": _fp3_tg,
+                "fp3_lap_count": (
+                    fp3_lap_count_by_driver.counts.get(driver.id, 0)
+                    if fp3_results else None
+                ),
+                "fp3_stint_count": (
+                    len(fp3_stint_count_by_driver.distinct_counts.get(driver.id, set()))
+                    if fp3_results else None
+                ),
+                # Best practice features (best across all available FP sessions)
+                "best_practice_gap_to_leader_seconds": (
+                    min(_all_gaps) if _all_gaps else None
+                ),
+                "best_practice_position": (
+                    min(_all_positions) if _all_positions else None
+                ),
+                "latest_fp_number": 3 if fp3_results else (2 if fp2_results else 1),
                 "label_yes": 1 if winner_driver_id == driver.id else 0,
             }
         )

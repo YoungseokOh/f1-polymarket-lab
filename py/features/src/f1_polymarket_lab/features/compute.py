@@ -19,6 +19,22 @@ PACE_COLS = [
     "fp1_stint_count",
     "fp1_result_time_seconds",
     "fp1_team_best_gap_to_leader_seconds",
+    "fp2_position",
+    "fp2_gap_to_leader_seconds",
+    "fp2_teammate_gap_seconds",
+    "fp2_lap_count",
+    "fp2_stint_count",
+    "fp2_result_time_seconds",
+    "fp2_team_best_gap_to_leader_seconds",
+    "fp3_position",
+    "fp3_gap_to_leader_seconds",
+    "fp3_teammate_gap_seconds",
+    "fp3_lap_count",
+    "fp3_stint_count",
+    "fp3_result_time_seconds",
+    "fp3_team_best_gap_to_leader_seconds",
+    "best_practice_position",
+    "best_practice_gap_to_leader_seconds",
 ]
 
 MARKET_COLS = [
@@ -68,21 +84,31 @@ def interaction_features(df: pl.DataFrame) -> pl.DataFrame:
     """Create pace × market interaction features."""
     interactions = []
 
-    if "fp1_position" in df.columns and "entry_yes_price" in df.columns:
+    # Use latest available FP gap for interaction features
+    _gap_candidates = [
+        "fp3_gap_to_leader_seconds",
+        "fp2_gap_to_leader_seconds",
+        "fp1_gap_to_leader_seconds",
+    ]
+    _pos_candidates = ["fp3_position", "fp2_position", "fp1_position"]
+    best_gap_col = next((c for c in _gap_candidates if c in df.columns), None)
+    best_pos_col = next((c for c in _pos_candidates if c in df.columns), None)
+
+    if best_pos_col and "entry_yes_price" in df.columns:
         interactions.append(
-            (pl.col("fp1_position").cast(pl.Float64) * pl.col("entry_yes_price"))
+            (pl.col(best_pos_col).cast(pl.Float64) * pl.col("entry_yes_price"))
             .alias("pace_x_price")
         )
 
-    if "fp1_gap_to_leader_seconds" in df.columns and "entry_spread" in df.columns:
+    if best_gap_col and "entry_spread" in df.columns:
         interactions.append(
-            (pl.col("fp1_gap_to_leader_seconds") * pl.col("entry_spread"))
+            (pl.col(best_gap_col) * pl.col("entry_spread"))
             .alias("gap_x_spread")
         )
 
-    if "fp1_position" in df.columns and "entry_spread" in df.columns:
+    if best_pos_col and "entry_spread" in df.columns:
         interactions.append(
-            (pl.col("fp1_position").cast(pl.Float64) * pl.col("entry_spread"))
+            (pl.col(best_pos_col).cast(pl.Float64) * pl.col("entry_spread"))
             .alias("position_x_spread")
         )
 
@@ -101,7 +127,16 @@ def rolling_cross_gp_features(df: pl.DataFrame, window: int = 3) -> pl.DataFrame
         return df
 
     new_cols = []
-    for col in ("fp1_position", "fp1_gap_to_leader_seconds"):
+    for col in (
+        "fp1_position",
+        "fp1_gap_to_leader_seconds",
+        "fp2_position",
+        "fp2_gap_to_leader_seconds",
+        "fp3_position",
+        "fp3_gap_to_leader_seconds",
+        "best_practice_position",
+        "best_practice_gap_to_leader_seconds",
+    ):
         if col not in df.columns:
             continue
         alias = f"rolling_{window}gp_{col}"
@@ -137,7 +172,14 @@ def compute_features(
     if log:
         df = log_transform(
             df,
-            ["fp1_gap_to_leader_seconds", "last_trade_age_seconds", "trade_count_pre_entry"],
+            [
+                "fp1_gap_to_leader_seconds",
+                "fp2_gap_to_leader_seconds",
+                "fp3_gap_to_leader_seconds",
+                "best_practice_gap_to_leader_seconds",
+                "last_trade_age_seconds",
+                "trade_count_pre_entry",
+            ],
         )
     if interactions:
         df = interaction_features(df)

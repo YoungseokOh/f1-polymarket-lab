@@ -57,6 +57,111 @@ def default_feature_registry() -> list[FeatureDefinition]:
             data_type="float",
             description="Best lap time achieved in FP1 in seconds.",
         ),
+        # -- FP2 pace features --
+        FeatureDefinition(
+            feature_name="fp2_position",
+            feature_group="session_pace",
+            data_type="int",
+            description="Driver finishing position in FP2.",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_gap_to_leader_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Gap to the FP2 session leader in seconds.",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_teammate_gap_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Intra-team gap: driver time minus teammate best time in FP2.",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_team_best_gap_to_leader_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Best team gap to FP2 leader (team-level signal).",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_lap_count",
+            feature_group="session_pace",
+            data_type="int",
+            description="Number of laps completed in FP2.",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_stint_count",
+            feature_group="session_pace",
+            data_type="int",
+            description="Number of distinct stints (pit-stop separated) in FP2.",
+        ),
+        FeatureDefinition(
+            feature_name="fp2_result_time_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Best lap time achieved in FP2 in seconds.",
+        ),
+        # -- FP3 pace features --
+        FeatureDefinition(
+            feature_name="fp3_position",
+            feature_group="session_pace",
+            data_type="int",
+            description="Driver finishing position in FP3.",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_gap_to_leader_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Gap to the FP3 session leader in seconds.",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_teammate_gap_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Intra-team gap: driver time minus teammate best time in FP3.",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_team_best_gap_to_leader_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Best team gap to FP3 leader (team-level signal).",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_lap_count",
+            feature_group="session_pace",
+            data_type="int",
+            description="Number of laps completed in FP3.",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_stint_count",
+            feature_group="session_pace",
+            data_type="int",
+            description="Number of distinct stints (pit-stop separated) in FP3.",
+        ),
+        FeatureDefinition(
+            feature_name="fp3_result_time_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Best lap time achieved in FP3 in seconds.",
+        ),
+        # -- Best-practice derived features --
+        FeatureDefinition(
+            feature_name="best_practice_position",
+            feature_group="session_pace",
+            data_type="int",
+            description="Best position across all available practice sessions (FP1/FP2/FP3).",
+        ),
+        FeatureDefinition(
+            feature_name="best_practice_gap_to_leader_seconds",
+            feature_group="session_pace",
+            data_type="float",
+            description="Minimum gap to leader across all available practice sessions.",
+        ),
+        FeatureDefinition(
+            feature_name="latest_fp_number",
+            feature_group="session_pace",
+            data_type="int",
+            description="Highest practice session number with data available (1, 2, or 3).",
+        ),
         # -- Market microstructure features --
         FeatureDefinition(
             feature_name="entry_yes_price",
@@ -99,12 +204,15 @@ def default_feature_registry() -> list[FeatureDefinition]:
             feature_name="fp1_pace_probability",
             feature_group="derived_probability",
             data_type="float",
-            description="FP1 pace-based probability via z-score softmax.",
+            description=(
+                "Practice pace-based probability via z-score softmax"
+                " (uses latest available FP session)."
+            ),
         ),
         FeatureDefinition(
             feature_name="hybrid_probability",
             feature_group="derived_probability",
             data_type="float",
-            description="Equal-weight blend of market and FP1 pace probabilities.",
+            description="Equal-weight blend of market and latest-practice pace probabilities.",
         ),
     ]
