@@ -313,7 +313,23 @@ def _merge_with_existing(
 ) -> dict[str, Any]:
     existing = ctx.db.get(model, record["id"])
     if existing is None:
-        return record
+        # For F1Team, fall back to name-based lookup to avoid UNIQUE constraint
+        # violations when different sources use different IDs for the same team.
+        if model is F1Team and record.get("team_name"):
+            existing = ctx.db.scalar(
+                select(F1Team).where(F1Team.team_name == record["team_name"])
+            )
+            if existing is not None:
+                record = {**record, "id": existing.id}
+        # For F1Driver, fall back to broadcast_name-based lookup similarly.
+        elif model is F1Driver and record.get("broadcast_name"):
+            existing = ctx.db.scalar(
+                select(F1Driver).where(F1Driver.broadcast_name == record["broadcast_name"])
+            )
+            if existing is not None:
+                record = {**record, "id": existing.id}
+        if existing is None:
+            return record
 
     merged = {column.name: getattr(existing, column.name) for column in inspect(model).columns}
     for key, value in record.items():
