@@ -6,22 +6,118 @@
 
 :root {
   color-scheme: dark;
+  --f1-red: #e10600;
+  --f1-red-dark: #b30500;
+  --f1-dark: #15151e;
+  --f1-surface: #1e1e2e;
+  --f1-surface-elevated: #262637;
+  --f1-border: rgba(255, 255, 255, 0.08);
+  --f1-text-primary: #f0f0f5;
+  --f1-text-secondary: #9ca3af;
+  --f1-text-muted: #6b7280;
+  --race-green: #00d747;
+  --race-yellow: #ffd600;
+  --race-red: #e10600;
 }
 
 body {
-  @apply min-h-screen bg-slate-950 text-slate-100;
+  @apply min-h-screen text-slate-100 antialiased;
+  font-feature-settings: "ss01", "ss02";
+  background-color: var(--f1-dark);
   background-image: radial-gradient(
-      circle at top left,
-      rgba(56, 189, 248, 0.2),
-      transparent 28%
+      ellipse at 0% 0%,
+      rgba(225, 6, 0, 0.06),
+      transparent 50%
     ),
     radial-gradient(
-      circle at top right,
-      rgba(249, 115, 22, 0.18),
-      transparent 24%
-    ), linear-gradient(180deg, rgba(15, 23, 42, 1) 0%, rgba(2, 6, 23, 1) 100%);
+      ellipse at 100% 100%,
+      rgba(30, 30, 46, 0.8),
+      transparent 60%
+    );
 }
 
 a {
-  @apply text-cyan-300 transition hover:text-cyan-200;
+  @apply text-red-400 transition hover:text-red-300;
+}
+
+/* F1-style wide-tracking section labels */
+.f1-eyebrow {
+  @apply text-[10px] font-bold uppercase tracking-[0.35em];
+  color: var(--f1-red);
+}
+
+/* Monospace numbers for data-heavy values */
+.f1-mono {
+  font-variant-numeric: tabular-nums;
+  font-family: "Space Grotesk", ui-monospace, monospace;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+}
+
+/* Loading splash animations */
+@keyframes f1-pulse-glow {
+  0%,
+  100% {
+    opacity: 0.4;
+    filter: blur(40px);
+  }
+  50% {
+    opacity: 1;
+    filter: blur(60px);
+  }
+}
+
+@keyframes f1-line-sweep {
+  0% {
+    transform: scaleX(0);
+    transform-origin: left;
+  }
+  50% {
+    transform: scaleX(1);
+    transform-origin: left;
+  }
+  50.01% {
+    transform-origin: right;
+  }
+  100% {
+    transform: scaleX(0);
+    transform-origin: right;
+  }
+}
+
+@keyframes f1-fade-up {
+  0% {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-f1-glow {
+  animation: f1-pulse-glow 2s ease-in-out infinite;
+}
+
+.animate-f1-sweep {
+  animation: f1-line-sweep 1.8s ease-in-out infinite;
+}
+
+.animate-f1-fade-up {
+  animation: f1-fade-up 0.5s ease-out forwards;
 }

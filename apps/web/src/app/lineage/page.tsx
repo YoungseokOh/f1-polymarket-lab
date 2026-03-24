@@ -1,30 +1,52 @@
 import { sdk } from "@f1/ts-sdk";
-import { Panel } from "@f1/ui";
+import { StatCard } from "@f1/ui";
+import { LineageTableSection } from "../_components/lineage-table-section";
+
+export const revalidate = 300;
 
 export default async function LineagePage() {
-  const freshness = await sdk.freshness().catch(() => []);
+  const [freshness, mappings] = await Promise.all([
+    sdk.freshness().catch(() => []),
+    sdk.mappings().catch(() => []),
+  ]);
+
+  const totalRecords = freshness.reduce((s, r) => s + r.recordsFetched, 0);
+  const okSources = freshness.filter((r) => r.status === "ok").length;
+  const mappedMarkets = mappings.filter((m) => m.polymarketMarketId).length;
 
   return (
-    <main className="mx-auto max-w-6xl px-6 py-10">
-      <Panel title="Data Lineage & Freshness" eyebrow="Bronze / Silver">
-        <div className="space-y-4">
-          {freshness.map((record) => (
-            <div
-              key={`${record.source}:${record.dataset}`}
-              className="rounded-2xl border border-white/10 bg-white/[0.03] p-4"
-            >
-              <p className="text-sm font-medium text-white">
-                {record.source} / {record.dataset}
-              </p>
-              <p className="mt-1 text-sm text-slate-300">
-                status={record.status} records={record.recordsFetched}{" "}
-                lastFetchAt=
-                {record.lastFetchAt ?? "n/a"}
-              </p>
-            </div>
-          ))}
-        </div>
-      </Panel>
-    </main>
+    <div className="flex flex-col gap-6 p-6">
+      <div>
+        <h1 className="text-xl font-bold text-white">Lineage</h1>
+        <p className="mt-1 text-sm text-[#6b7280]">
+          Data freshness, connector health, and entity mapping lineage
+        </p>
+      </div>
+
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          label="Data Sources"
+          value={freshness.length}
+          hint="connector datasets"
+        />
+        <StatCard label="Healthy" value={okSources} hint="status = ok" />
+        <StatCard
+          label="Total Records"
+          value={totalRecords.toLocaleString()}
+          hint="fetched rows"
+        />
+        <StatCard
+          label="Entity Mappings"
+          value={mappings.length}
+          hint="F1 ↔ Polymarket links"
+        />
+      </section>
+
+      <LineageTableSection
+        freshness={freshness}
+        mappings={mappings}
+        mappedMarkets={mappedMarkets}
+      />
+    </div>
   );
 }

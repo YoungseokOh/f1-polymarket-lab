@@ -451,6 +451,158 @@ def _register_gp_commands() -> None:
 
         app.command(f"report-{code}-quicktest")(_make_report())
 
+        # -- paper trade (build + baseline + paper trade in one shot) --
+        def _make_paper_trade(cfg=gp):  # noqa: B006
+            def _cmd(
+                snapshot_id: str | None = typer.Option(
+                    None,
+                    "--snapshot-id",
+                    help="Use existing snapshot; omit to build fresh from FP1 data.",
+                ),
+                baseline: str = typer.Option(
+                    "hybrid",
+                    "--baseline",
+                    help="Which baseline to trade: market_implied | fp1_pace | hybrid",
+                ),
+                min_edge: float = typer.Option(cfg.min_edge, "--min-edge"),
+                bet_size: float = typer.Option(10.0, "--bet-size"),
+                max_daily_loss: float = typer.Option(100.0, "--max-daily-loss"),
+                execute: bool = typer.Option(False, "--execute/--plan-only"),
+            ) -> None:
+                """One-shot pipeline: build snapshot → run baselines → paper trade."""
+                import polars as pl_module
+
+                from f1_polymarket_worker.paper_trading import (  # noqa: PLC0415
+                    PaperTradeConfig,
+                    PaperTradingEngine,
+                )
+
+                settings = get_settings()
+                with db_session(settings.database_url) as session:
+                    context = PipelineContext(db=session, execute=execute)
+
+                    # Step 1: build snapshot if not provided
+                    if snapshot_id is None:
+                        typer.echo(f"[1/3] Building {cfg.short_code} snapshot...")
+                        snap_result = build_snapshot(
+                            context,
+                            cfg,
+                            meeting_key=cfg.meeting_key,
+                            season=cfg.season,
+                            entry_offset_min=cfg.entry_offset_min,
+                            fidelity=cfg.fidelity,
+                        )
+                        used_snapshot_id = snap_result.get("snapshot_id")
+                        if not used_snapshot_id:
+                            typer.echo(f"Snapshot build result: {snap_result}")
+                            raise typer.Exit(1)
+                        typer.echo(f"  snapshot_id={used_snapshot_id}")
+                    else:
+                        used_snapshot_id = snapshot_id
+                        typer.echo(f"[1/3] Using existing snapshot_id={used_snapshot_id}")
+
+                    # Step 2: run baselines
+                    typer.echo(f"[2/3] Running baselines for {cfg.short_code}...")
+                    baseline_result = run_baseline(
+                        context, cfg, snapshot_id=used_snapshot_id, min_edge=min_edge
+                    )
+                    model_run_ids: list[str] = baseline_result.get("model_runs", [])
+                    if not model_run_ids:
+                        typer.echo(f"Baseline result: {baseline_result}")
+                        raise typer.Exit(1)
+
+                    # Pick the requested baseline by name
+                    baseline_idx = {"market_implied": 0, "fp1_pace": 1, "hybrid": 2}.get(
+                        baseline, 2
+                    )
+                    used_model_run_id = model_run_ids[min(baseline_idx, len(model_run_ids) - 1)]
+                    typer.echo(f"  baseline={baseline}, model_run_id={used_model_run_id}")
+
+                    if not execute:
+                        typer.echo(
+                            f"[plan] Would paper-trade with model_run_id={used_model_run_id}"
+                        )
+                        return
+
+                    # Step 3: paper trade
+                    typer.echo("[3/3] Running paper trade...")
+                    from f1_polymarket_lab.storage.models import FeatureSnapshot, ModelPrediction
+                    from sqlalchemy import select
+
+                    preds = session.scalars(
+                        select(ModelPrediction).where(
+                            ModelPrediction.model_run_id == used_model_run_id
+                        )
+                    ).all()
+                    snap = session.get(FeatureSnapshot, used_snapshot_id)
+
+                    if not preds:
+                        typer.echo("No predictions found for this model run.")
+                        raise typer.Exit(1)
+
+                    snapshot_df = (
+                        pl_module.read_parquet(snap.storage_path)
+                        if snap and snap.storage_path
+                        else None
+                    )
+                    price_lookup: dict[str, float] = {}
+                    label_lookup: dict[str, bool] = {}
+                    if snapshot_df is not None:
+                        for row in snapshot_df.to_dicts():
+                            mid = row.get("market_id")
+                            if mid:
+                                price_lookup[mid] = float(row.get("entry_yes_price", 0.5))
+                                label = row.get("label_yes")
+                                if label is not None:
+                                    label_lookup[mid] = bool(int(label))
+
+                    engine = PaperTradingEngine(
+                        config=PaperTradeConfig(
+                            min_edge=min_edge,
+                            bet_size=bet_size,
+                            max_daily_loss=max_daily_loss,
+                        )
+                    )
+                    for pred in preds:
+                        market_price = price_lookup.get(pred.market_id or "", 0.5)
+                        engine.evaluate_signal(
+                            market_id=pred.market_id or "",
+                            token_id=pred.token_id,
+                            model_prob=pred.probability_yes or 0.5,
+                            market_price=market_price,
+                        )
+                    for mid, outcome in label_lookup.items():
+                        engine.settle_position(mid, outcome)
+
+                    summary = engine.summary()
+                    log_path = (
+                        settings.data_root
+                        / "reports"
+                        / "paper_trading"
+                        / f"{cfg.short_code}_{used_model_run_id}.json"
+                    )
+                    engine.save_log(log_path)
+                    pt_session_id = engine.persist(
+                        session,
+                        gp_slug=cfg.short_code,
+                        snapshot_id=used_snapshot_id,
+                        model_run_id=used_model_run_id,
+                        log_path=log_path,
+                    )
+                    session.commit()
+
+                    typer.echo(
+                        f"Paper trading complete: {summary['trades_executed']} trades, "
+                        f"PnL: ${summary['total_pnl']:.2f}, "
+                        f"win rate: {summary.get('win_rate') or 0:.1%}"
+                    )
+                    typer.echo(f"  Session ID: {pt_session_id}")
+                    typer.echo(f"  Log: {log_path}")
+
+            return _cmd
+
+        app.command(f"run-{code}-paper-trade")(_make_paper_trade())
+
 
 _register_gp_commands()
 
@@ -884,6 +1036,7 @@ def tune_xgb_optuna_command(
 def paper_trade_command(
     snapshot_id: str = typer.Option(..., "--snapshot-id"),
     model_run_id: str = typer.Option(..., "--model-run-id"),
+    gp_slug: str = typer.Option("unknown", "--gp-slug"),
     min_edge: float = typer.Option(0.05, "--min-edge"),
     bet_size: float = typer.Option(10.0, "--bet-size"),
     max_daily_loss: float = typer.Option(100.0, "--max-daily-loss"),
@@ -954,8 +1107,18 @@ def paper_trade_command(
         log_path = settings.data_root / "reports" / "paper_trading" / f"{model_run_id}.json"
         engine.save_log(log_path)
 
+        pt_session_id = engine.persist(
+            session,
+            gp_slug=gp_slug,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+            log_path=log_path,
+        )
+        session.commit()
+
         typer.echo(f"Paper trading complete: {summary['trades_executed']} trades, "
                    f"PnL: ${summary['total_pnl']:.2f}")
+        typer.echo(f"Session ID: {pt_session_id}")
         typer.echo(f"Log saved: {log_path}")
 
 

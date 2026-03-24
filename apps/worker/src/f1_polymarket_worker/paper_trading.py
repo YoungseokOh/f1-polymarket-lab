@@ -10,7 +10,10 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
 
 
 @dataclass(slots=True)
@@ -81,10 +84,25 @@ class PaperTradingEngine:
     ) -> dict[str, Any]:
         """Evaluate a model prediction as a trading signal.
 
+        Checks both YES and NO edges. If model_prob > market_price + min_edge,
+        buys YES. If market_price > model_prob + min_edge, buys NO (the market
+        is over-pricing YES, so NO is cheap).
+
         Returns a signal dict describing the action taken (or reason for skip).
         """
         ts = timestamp or datetime.now(tz=timezone.utc)
-        edge = model_prob - market_price
+        edge_yes = model_prob - market_price      # positive → YES is cheap
+        edge_no = market_price - model_prob        # positive → NO is cheap
+
+        # Pick the side with the larger edge (only if it clears min_edge)
+        if edge_yes >= edge_no:
+            side = "buy_yes"
+            edge = edge_yes
+            entry_price = market_price             # cost of YES token
+        else:
+            side = "buy_no"
+            edge = edge_no
+            entry_price = 1.0 - market_price      # cost of NO token
 
         signal: dict[str, Any] = {
             "timestamp": ts.isoformat(),
@@ -93,6 +111,7 @@ class PaperTradingEngine:
             "model_prob": model_prob,
             "market_price": market_price,
             "edge": edge,
+            "side": side,
             "action": "skip",
             "reason": "",
         }
@@ -115,13 +134,11 @@ class PaperTradingEngine:
                 self.signals.append(signal)
                 return signal
 
-        # Execute paper trade
-        entry_price = market_price
         fees = self.config.bet_size * self.config.fee_rate
         position = PaperPosition(
             market_id=market_id,
             token_id=token_id,
-            side="buy_yes",
+            side=side,
             quantity=self.config.bet_size,
             entry_price=entry_price,
             entry_time=ts,
@@ -131,7 +148,7 @@ class PaperTradingEngine:
         )
         self.positions.append(position)
 
-        signal["action"] = "buy_yes"
+        signal["action"] = side
         signal["quantity"] = self.config.bet_size
         signal["entry_price"] = entry_price
         signal["fees"] = fees
@@ -153,10 +170,19 @@ class PaperTradingEngine:
             if pos.market_id != market_id:
                 continue
 
-            if outcome_yes:
-                pnl = pos.quantity * (1.0 - pos.entry_price)
+            if pos.side == "buy_no":
+                # entry_price = 1 - market_price (cost of NO token)
+                # NO wins when outcome_yes=False
+                if not outcome_yes:
+                    pnl = pos.quantity * (1.0 - pos.entry_price)
+                else:
+                    pnl = -pos.quantity * pos.entry_price
             else:
-                pnl = -pos.quantity * pos.entry_price
+                # buy_yes: entry_price = market_price
+                if outcome_yes:
+                    pnl = pos.quantity * (1.0 - pos.entry_price)
+                else:
+                    pnl = -pos.quantity * pos.entry_price
 
             fees = pos.quantity * self.config.fee_rate
             pnl -= fees
@@ -221,3 +247,65 @@ class PaperTradingEngine:
 
         path.write_text(json.dumps(log, indent=2, default=str), encoding="utf-8")
         return path
+
+    def persist(
+        self,
+        db: Session,
+        *,
+        gp_slug: str,
+        snapshot_id: str | None = None,
+        model_run_id: str | None = None,
+        log_path: Path | None = None,
+    ) -> str:
+        """Persist this session and all positions to the database.
+
+        Returns the paper_trade_session id.
+        """
+        import uuid
+
+        from f1_polymarket_lab.storage.models import PaperTradePosition, PaperTradeSession
+
+        now = datetime.now(tz=timezone.utc)
+        session_id = str(uuid.uuid4())
+
+        pt_session = PaperTradeSession(
+            id=session_id,
+            gp_slug=gp_slug,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+            status="settled" if all(p.status == "settled" for p in self.positions) else "open",
+            config_json={
+                "min_edge": self.config.min_edge,
+                "bet_size": self.config.bet_size,
+                "max_daily_loss": self.config.max_daily_loss,
+                "fee_rate": self.config.fee_rate,
+                "max_open_positions": self.config.max_open_positions,
+            },
+            summary_json=self.summary(),
+            log_path=str(log_path) if log_path else None,
+            started_at=now,
+            finished_at=now,
+        )
+        db.add(pt_session)
+
+        for pos in self.positions:
+            db.add(
+                PaperTradePosition(
+                    session_id=session_id,
+                    market_id=pos.market_id,
+                    token_id=pos.token_id,
+                    side=pos.side,
+                    quantity=pos.quantity,
+                    entry_price=pos.entry_price,
+                    entry_time=pos.entry_time,
+                    model_prob=pos.model_prob,
+                    market_prob=pos.market_prob,
+                    edge=pos.edge,
+                    status=pos.status,
+                    exit_price=pos.exit_price,
+                    exit_time=pos.exit_time,
+                    realized_pnl=pos.realized_pnl,
+                )
+            )
+
+        return session_id

@@ -1184,11 +1184,33 @@ def _build_pre_weekend_snapshot(
     q_start = _require_utc(q_session.date_start_utc)
     entry_floor = q_start - timedelta(days=7)
 
+    # Try FP1 results first; if unavailable (pre-weekend), fall back to the
+    # most recent qualifying results from prior meetings in the same season.
     form_results = list(
         ctx.db.scalars(
             select(F1SessionResult).where(F1SessionResult.session_id == fp1_session.id)
         ).all()
     )
+    if not form_results:
+        # Fall back to the most recent prior-season Q session with results
+        prior_q_session = ctx.db.scalar(
+            select(F1Session)
+            .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+            .where(
+                F1Meeting.season == season,
+                F1Session.session_code.in_(["Q", "SQ"]),
+                F1Session.date_start_utc < fp1_session.date_start_utc,
+            )
+            .order_by(F1Session.date_start_utc.desc())
+        )
+        if prior_q_session is not None:
+            form_results = list(
+                ctx.db.scalars(
+                    select(F1SessionResult).where(
+                        F1SessionResult.session_id == prior_q_session.id
+                    )
+                ).all()
+            )
     form_by_driver: dict[str, F1SessionResult] = {}
     for fr in form_results:
         if fr.driver_id is not None:

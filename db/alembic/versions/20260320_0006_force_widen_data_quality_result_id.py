@@ -11,14 +11,18 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute(
-        "ALTER TABLE data_quality_results "
-        "ALTER COLUMN id TYPE VARCHAR(128)"
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            "ALTER TABLE data_quality_results "
+            "ALTER COLUMN id TYPE VARCHAR(128)"
+        )
 
 
 def downgrade() -> None:
-    op.execute(
-        "ALTER TABLE data_quality_results "
-        "ALTER COLUMN id TYPE VARCHAR(36)"
-    )
+    bind = op.get_bind()
+    if bind.dialect.name == "postgresql":
+        op.execute(
+            "ALTER TABLE data_quality_results "
+            "ALTER COLUMN id TYPE VARCHAR(36)"
+        )

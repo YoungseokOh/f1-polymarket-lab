@@ -1,19 +1,61 @@
 import Link from "next/link";
 
+import type { PolymarketMarket } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
+import { DashboardActions } from "./_components/dashboard-actions";
+import { SessionTimeline } from "./_components/session-timeline";
+import { StatusIndicator } from "./_components/status-indicator";
 
-function lastFetched(records: Awaited<ReturnType<typeof sdk.freshness>>) {
-  const values = records
-    .map((record) => record.lastFetchAt)
-    .filter((value): value is string => Boolean(value))
-    .sort();
+export const revalidate = 300;
 
-  return values.at(-1) ?? "not fetched yet";
+const TAXONOMY_LABELS: Record<string, string> = {
+  head_to_head_session: "Head-to-Head",
+  head_to_head_practice: "Head-to-Head (Practice)",
+  driver_pole_position: "Pole Position",
+  constructor_pole_position: "Constructor Pole",
+  race_winner: "Race Winner",
+  sprint_winner: "Sprint Winner",
+  qualifying_winner: "Qualifying Winner",
+  driver_podium: "Podium",
+  constructor_scores_first: "Constructor First",
+  constructor_fastest_lap_practice: "Constructor FL",
+  driver_fastest_lap_practice: "Driver FL",
+  drivers_champion: "Drivers Champion",
+  constructors_champion: "Constructors Champion",
+  red_flag: "Red Flag",
+  safety_car: "Safety Car",
+  other: "Other",
+};
+
+function formatPrice(v: number | null) {
+  if (v == null) return "—";
+  return `${(v * 100).toFixed(1)}¢`;
+}
+
+function groupByTaxonomy(markets: PolymarketMarket[]) {
+  const groups = new Map<string, PolymarketMarket[]>();
+  for (const m of markets) {
+    const key = m.taxonomy ?? "other";
+    const list = groups.get(key) ?? [];
+    list.push(m);
+    groups.set(key, list);
+  }
+  return groups;
 }
 
 export default async function HomePage() {
-  const [health, freshness, sessions, markets, mappings, modelRuns, predictions] = await Promise.all([
+  const [
+    health,
+    freshness,
+    sessions,
+    meetings,
+    markets,
+    mappings,
+    modelRuns,
+    predictions,
+    backtestResults,
+  ] = await Promise.all([
     sdk.health().catch(() => ({
       service: "api",
       status: "offline",
@@ -21,81 +63,131 @@ export default async function HomePage() {
     })),
     sdk.freshness().catch(() => []),
     sdk.sessions().catch(() => []),
+    sdk.meetings().catch(() => []),
     sdk.markets().catch(() => []),
     sdk.mappings().catch(() => []),
     sdk.modelRuns().catch(() => []),
     sdk.predictions().catch(() => []),
+    sdk.backtestResults().catch(() => []),
   ]);
 
-  const practiceSessions = sessions.filter((session) => session.isPractice);
-  const mappedMarkets = mappings.filter(
-    (mapping) => mapping.polymarketMarketId,
+  const now = new Date();
+  const sorted = [...meetings].sort((a, b) =>
+    (a.startDateUtc ?? "").localeCompare(b.startDateUtc ?? ""),
+  );
+  const upcoming = sorted.filter(
+    (m) => m.startDateUtc && new Date(m.endDateUtc ?? m.startDateUtc) >= now,
+  );
+  const currentGP = upcoming[0] ?? sorted.at(-1);
+
+  const gpSessions = currentGP
+    ? sessions.filter((s) => s.meetingId === currentGP.id)
+    : [];
+  const completedCodes = gpSessions
+    .filter((s) => s.dateEndUtc && new Date(s.dateEndUtc) < now)
+    .map((s) => s.sessionCode ?? "")
+    .filter(Boolean);
+  const activeSession = gpSessions.find(
+    (s) =>
+      s.dateStartUtc &&
+      new Date(s.dateStartUtc) <= now &&
+      (!s.dateEndUtc || new Date(s.dateEndUtc) > now),
   );
 
+  const activeMarkets = markets.filter((m) => m.active && !m.closed);
+  const mappedCount = mappings.filter((m) => m.polymarketMarketId).length;
+  const marketGroups = groupByTaxonomy(activeMarkets);
+
+  const lastFetch = freshness
+    .map((r) => r.lastFetchAt)
+    .filter((v): v is string => Boolean(v))
+    .sort()
+    .at(-1);
+
   return (
-    <main className="mx-auto flex min-h-screen max-w-7xl flex-col gap-8 px-6 py-10">
-      <header className="grid gap-6 lg:grid-cols-[1.3fr_0.7fr]">
-        <div className="rounded-[2rem] border border-white/10 bg-slate-900/70 p-8 shadow-2xl shadow-black/30">
-          <p className="text-xs uppercase tracking-[0.45em] text-cyan-300/80">
-            Research Platform
-          </p>
-          <h1 className="mt-4 max-w-3xl text-5xl font-semibold leading-tight text-white">
-            Build leakage-safe F1 prediction intuition before serious models.
-          </h1>
-          <p className="mt-4 max-w-2xl text-lg text-slate-300">
-            Bronze-to-Gold storage, canonical F1 and Polymarket entities,
-            realistic execution logic, and a dashboard designed for
-            practice-session markets first.
-          </p>
-          <div className="mt-8 flex flex-wrap gap-3">
-            <Badge tone={health.status === "ok" ? "good" : "warn"}>
-              {health.status}
-            </Badge>
-            <Badge>{practiceSessions.length} practice sessions loaded</Badge>
-            <Badge>{markets.length} markets in demo slice</Badge>
+    <div className="flex flex-col gap-6 p-6">
+      {/* Hero — GP Weekend */}
+      <section className="rounded-xl border border-white/[0.06] bg-gradient-to-r from-[#1e1e2e] to-[#15151e] p-6">
+        <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="space-y-2">
+            <p className="text-[10px] font-bold uppercase tracking-[0.35em] text-[#e10600]">
+              GP Weekend
+            </p>
+            {currentGP ? (
+              <>
+                <h1 className="text-2xl font-bold text-white">
+                  {currentGP.meetingName}
+                </h1>
+                <p className="text-sm text-[#9ca3af]">
+                  {currentGP.circuitShortName &&
+                    `${currentGP.circuitShortName} · `}
+                  {currentGP.location}, {currentGP.countryName}
+                  {currentGP.startDateUtc && (
+                    <span className="ml-2 tabular-nums">
+                      R{currentGP.roundNumber} ·{" "}
+                      {new Date(currentGP.startDateUtc).toLocaleDateString(
+                        "en-US",
+                        { month: "short", day: "numeric" },
+                      )}
+                      {currentGP.endDateUtc &&
+                        `–${new Date(currentGP.endDateUtc).toLocaleDateString("en-US", { day: "numeric" })}`}
+                    </span>
+                  )}
+                </p>
+              </>
+            ) : (
+              <h1 className="text-2xl font-bold text-white">
+                No Meetings Loaded
+              </h1>
+            )}
+          </div>
+          <div className="flex items-center gap-4">
+            <StatusIndicator
+              status={health.status === "ok" ? "ok" : "error"}
+              label={`API ${health.status}`}
+            />
+            {lastFetch && (
+              <span className="text-[11px] tabular-nums text-[#6b7280]">
+                Last sync{" "}
+                {new Date(lastFetch).toLocaleTimeString("en-US", {
+                  hour: "2-digit",
+                  minute: "2-digit",
+                  hour12: false,
+                })}
+              </span>
+            )}
           </div>
         </div>
-        <Panel title="Current Slice" eyebrow="Phase 0 / 1">
-          <div className="space-y-4 text-sm text-slate-200">
-            <p>API health: {health.status}</p>
-            <p>Last fetch: {lastFetched(freshness)}</p>
-            <p>Mapped F1 markets: {mappedMarkets.length}</p>
-            <p>
-              Schema: Bronze raw envelopes + Silver normalized entities + Gold
-              placeholders.
-            </p>
+        {gpSessions.length > 0 && (
+          <div className="mt-6">
+            <SessionTimeline
+              completedCodes={completedCodes}
+              activeCode={activeSession?.sessionCode ?? undefined}
+            />
           </div>
-        </Panel>
-      </header>
-
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          label="Freshness Records"
-          value={freshness.length}
-          hint="connector fetch summaries"
-        />
-        <StatCard
-          label="Practice Sessions"
-          value={practiceSessions.length}
-          hint="FP1/FP2/FP3 rows"
-        />
-        <StatCard
-          label="Markets"
-          value={markets.length}
-          hint="official Polymarket API payloads"
-        />
-        <StatCard
-          label="Mappings"
-          value={mappedMarkets.length}
-          hint="deterministic join attempts"
-        />
+        )}
       </section>
 
-      <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+      {/* Quick Actions */}
+      <DashboardActions />
+
+      {/* Stats Row */}
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <StatCard label="Meetings" value={meetings.length} hint="GP weekends" />
+        <StatCard
+          label="Sessions"
+          value={sessions.length}
+          hint="FP / Quali / Race"
+        />
+        <StatCard
+          label="Active Markets"
+          value={activeMarkets.length}
+          hint="open on Polymarket"
+        />
         <StatCard
           label="Model Runs"
           value={modelRuns.length}
-          hint="training runs"
+          hint="trained models"
         />
         <StatCard
           label="Predictions"
@@ -104,25 +196,155 @@ export default async function HomePage() {
         />
       </section>
 
-      <section className="grid gap-6 lg:grid-cols-2">
-        <Panel title="Explorers" eyebrow="Browse">
-          <div className="grid gap-3 text-sm">
-            <Link href="/sessions">F1 Session Explorer</Link>
-            <Link href="/markets">Polymarket Explorer</Link>
-            <Link href="/lineage">Lineage & Freshness</Link>
-            <Link href="/predictions">Model Predictions</Link>
-            <Link href="/backtest">Backtest Results</Link>
+      {/* Markets by Taxonomy */}
+      <section className="grid gap-4 lg:grid-cols-2">
+        {[...marketGroups.entries()].map(([taxonomy, group]) => (
+          <Panel
+            key={taxonomy}
+            title={TAXONOMY_LABELS[taxonomy] ?? taxonomy}
+            eyebrow={`${group.length} markets`}
+          >
+            <div className="space-y-2">
+              {group.slice(0, 6).map((m) => (
+                <Link
+                  key={m.id}
+                  href={`/markets/${m.id}`}
+                  className="flex items-center justify-between rounded-lg border border-white/[0.04] px-3 py-2 transition-colors hover:border-[#e10600]/20 hover:bg-white/[0.02]"
+                >
+                  <span className="mr-4 line-clamp-1 text-sm text-[#d1d5db]">
+                    {m.question}
+                  </span>
+                  <div className="flex shrink-0 items-center gap-2">
+                    {m.lastTradePrice != null && (
+                      <span className="text-sm font-semibold tabular-nums text-white">
+                        {formatPrice(m.lastTradePrice)}
+                      </span>
+                    )}
+                    <Badge tone={m.active ? "good" : "default"}>
+                      {m.active ? "Active" : "Closed"}
+                    </Badge>
+                  </div>
+                </Link>
+              ))}
+              {group.length > 6 && (
+                <Link
+                  href="/markets"
+                  className="block text-center text-xs text-[#e10600] hover:underline"
+                >
+                  View all {group.length} →
+                </Link>
+              )}
+            </div>
+          </Panel>
+        ))}
+        {marketGroups.size === 0 && (
+          <Panel title="Markets" eyebrow="Polymarket">
+            <p className="text-sm text-[#6b7280]">No active markets loaded.</p>
+          </Panel>
+        )}
+      </section>
+
+      {/* Bottom Row — Activity + Platform */}
+      <section className="grid gap-4 lg:grid-cols-3">
+        <Panel title="Recent Model Runs" eyebrow="ML Pipeline">
+          <div className="space-y-2 text-sm">
+            {modelRuns.length === 0 ? (
+              <p className="text-[#6b7280]">No model runs yet.</p>
+            ) : (
+              modelRuns.slice(0, 5).map((run) => (
+                <div
+                  key={run.id}
+                  className="flex items-center justify-between rounded-lg border border-white/[0.04] px-3 py-2"
+                >
+                  <div>
+                    <span className="text-white">{run.modelName}</span>
+                    <span className="ml-1 text-[#6b7280]">
+                      ({run.modelFamily})
+                    </span>
+                  </div>
+                  <Badge>{run.stage}</Badge>
+                </div>
+              ))
+            )}
           </div>
         </Panel>
-        <Panel title="Modeling Order" eyebrow="Non-Negotiable">
-          <ol className="list-decimal space-y-2 pl-5 text-sm text-slate-200">
-            <li>FP2 / FP3 head-to-head</li>
-            <li>Constructor / team fastest lap</li>
-            <li>Driver outright fastest lap</li>
-            <li>Red flag / safety car</li>
-          </ol>
+
+        <Panel title="Backtest Summary" eyebrow="Performance">
+          <div className="space-y-2 text-sm">
+            {backtestResults.length === 0 ? (
+              <p className="text-[#6b7280]">No backtests yet.</p>
+            ) : (
+              backtestResults.slice(0, 5).map((bt) => {
+                const metrics = bt.metricsJson as Record<string, number> | null;
+                const pnl = metrics?.realized_pnl_total;
+                return (
+                  <div
+                    key={bt.id}
+                    className="flex items-center justify-between rounded-lg border border-white/[0.04] px-3 py-2"
+                  >
+                    <span className="text-white">{bt.strategyName}</span>
+                    {pnl != null && (
+                      <Badge tone={pnl >= 0 ? "good" : "warn"}>
+                        ${pnl.toFixed(2)}
+                      </Badge>
+                    )}
+                  </div>
+                );
+              })
+            )}
+          </div>
+        </Panel>
+
+        <Panel title="Data Freshness" eyebrow="Connectors">
+          <div className="space-y-2 text-sm">
+            {freshness.length === 0 ? (
+              <p className="text-[#6b7280]">No data sources configured.</p>
+            ) : (
+              freshness.slice(0, 5).map((f) => (
+                <div
+                  key={`${f.source}:${f.dataset}`}
+                  className="flex items-center justify-between rounded-lg border border-white/[0.04] px-3 py-2"
+                >
+                  <span className="text-[#d1d5db]">
+                    {f.source}/{f.dataset}
+                  </span>
+                  <StatusIndicator
+                    status={
+                      f.status === "ok"
+                        ? "ok"
+                        : f.status === "pending"
+                          ? "pending"
+                          : "idle"
+                    }
+                    label={`${f.recordsFetched}`}
+                  />
+                </div>
+              ))
+            )}
+          </div>
         </Panel>
       </section>
-    </main>
+
+      {/* Platform Stats */}
+      <section className="grid gap-3 sm:grid-cols-3">
+        <StatCard
+          label="Entity Mappings"
+          value={mappedCount}
+          hint="F1 ↔ Polymarket links"
+        />
+        <StatCard
+          label="Data Sources"
+          value={freshness.length}
+          hint="connector datasets"
+        />
+        <StatCard
+          label="Strategies"
+          value={
+            [...new Set(backtestResults.map((b) => b.strategyName))].length
+          }
+          hint="backtested strategies"
+        />
+      </section>
+    </div>
   );
 }

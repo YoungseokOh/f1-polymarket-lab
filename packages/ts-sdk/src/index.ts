@@ -1,16 +1,28 @@
 import { getWebEnv } from "@f1/config";
 import type {
+  ActionStatusResponse,
   ApiHealth,
   BacktestResult,
   EntityMapping,
+  F1Driver,
   F1Meeting,
   F1Session,
+  F1Team,
   FeatureSnapshot,
   FreshnessRecord,
+  GPRegistryItem,
+  IngestDemoRequest,
   ModelPrediction,
   ModelRun,
+  PaperTradePosition,
+  PaperTradeSession,
   PolymarketEvent,
   PolymarketMarket,
+  PricePoint,
+  RunBacktestRequest,
+  RunPaperTradeRequest,
+  SyncCalendarRequest,
+  SyncF1MarketsRequest,
 } from "@f1/shared-types";
 
 async function apiGet<T>(path: string): Promise<T> {
@@ -29,6 +41,25 @@ async function apiGet<T>(path: string): Promise<T> {
   }
 
   return (await response.json()) as T;
+}
+
+async function apiPost<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
+  const { NEXT_PUBLIC_API_BASE_URL } = getWebEnv();
+  const response = await fetch(`${NEXT_PUBLIC_API_BASE_URL}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+
+  if (!response.ok) {
+    const detail = await response.text().catch(() => response.statusText);
+    throw new Error(`API request failed: ${response.status} ${detail}`);
+  }
+
+  return (await response.json()) as TRes;
 }
 
 type FreshnessApi = {
@@ -209,6 +240,38 @@ export const sdk = {
     ),
   mappings: async () =>
     (await apiGet<EntityMappingApi[]>("/api/v1/mappings")).map(mapMapping),
+  meeting: async (meetingId: string): Promise<F1Meeting> => {
+    const record = await apiGet<F1MeetingApi>(
+      `/api/v1/f1/meetings/${encodeURIComponent(meetingId)}`,
+    );
+    return mapMeeting(record);
+  },
+  meetingSessions: async (meetingId: string): Promise<F1Session[]> => {
+    const records = await apiGet<F1SessionApi[]>(
+      `/api/v1/f1/meetings/${encodeURIComponent(meetingId)}/sessions`,
+    );
+    return records.map(mapSession);
+  },
+  drivers: async (): Promise<F1Driver[]> => {
+    const records = await apiGet<F1DriverApi[]>("/api/v1/f1/drivers");
+    return records.map(mapDriver);
+  },
+  teams: async (): Promise<F1Team[]> => {
+    const records = await apiGet<F1TeamApi[]>("/api/v1/f1/teams");
+    return records.map(mapTeam);
+  },
+  market: async (marketId: string): Promise<PolymarketMarket> => {
+    const record = await apiGet<PolymarketMarketApi>(
+      `/api/v1/polymarket/markets/${encodeURIComponent(marketId)}`,
+    );
+    return mapMarket(record);
+  },
+  marketPrices: async (marketId: string): Promise<PricePoint[]> => {
+    const records = await apiGet<PricePointApi[]>(
+      `/api/v1/polymarket/markets/${encodeURIComponent(marketId)}/prices`,
+    );
+    return records.map(mapPricePoint);
+  },
   modelRuns: async (): Promise<ModelRun[]> => {
     const records = await apiGet<ModelRunApi[]>("/api/v1/model-runs");
     return records.map(mapModelRun);
@@ -221,13 +284,66 @@ export const sdk = {
     return records.map(mapModelPrediction);
   },
   backtestResults: async (): Promise<BacktestResult[]> => {
-    const records = await apiGet<BacktestResultApi[]>("/api/v1/backtest/results");
+    const records = await apiGet<BacktestResultApi[]>(
+      "/api/v1/backtest/results",
+    );
     return records.map(mapBacktestResult);
   },
   snapshots: async (): Promise<FeatureSnapshot[]> => {
     const records = await apiGet<FeatureSnapshotApi[]>("/api/v1/snapshots");
     return records.map(mapFeatureSnapshot);
   },
+
+  // Action endpoints
+  gpRegistry: () => apiGet<GPRegistryItem[]>("/api/v1/actions/gp-registry"),
+  ingestDemo: (body?: IngestDemoRequest) =>
+    apiPost<IngestDemoRequest, ActionStatusResponse>(
+      "/api/v1/actions/ingest-demo",
+      body ?? {},
+    ),
+  syncCalendar: (body?: SyncCalendarRequest) =>
+    apiPost<SyncCalendarRequest, ActionStatusResponse>(
+      "/api/v1/actions/sync-calendar",
+      body ?? {},
+    ),
+  runBacktest: (body: RunBacktestRequest) =>
+    apiPost<RunBacktestRequest, ActionStatusResponse>(
+      "/api/v1/actions/run-backtest",
+      body,
+    ),
+  syncF1Markets: (body?: SyncF1MarketsRequest) =>
+    apiPost<SyncF1MarketsRequest, ActionStatusResponse>(
+      "/api/v1/actions/sync-f1-markets",
+      body ?? {},
+    ),
+
+  // Paper trading
+  paperTradeSessions: async (gpSlug?: string): Promise<PaperTradeSession[]> => {
+    const path = gpSlug
+      ? `/api/v1/paper-trading/sessions?gp_slug=${encodeURIComponent(gpSlug)}`
+      : "/api/v1/paper-trading/sessions";
+    const records = await apiGet<PaperTradeSessionApi[]>(path);
+    return records.map(mapPaperTradeSession);
+  },
+  paperTradeSession: async (sessionId: string): Promise<PaperTradeSession> => {
+    const record = await apiGet<PaperTradeSessionApi>(
+      `/api/v1/paper-trading/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return mapPaperTradeSession(record);
+  },
+  paperTradePositions: async (
+    sessionId: string,
+  ): Promise<PaperTradePosition[]> => {
+    const records = await apiGet<PaperTradePositionApi[]>(
+      `/api/v1/paper-trading/sessions/${encodeURIComponent(sessionId)}/positions`,
+    );
+    return records.map(mapPaperTradePosition);
+  },
+  runPaperTrade: (body: RunPaperTradeRequest) =>
+    apiPost<RunPaperTradeRequest, ActionStatusResponse>(
+      "/api/v1/actions/run-paper-trade",
+      body,
+    ),
 };
 
 type ModelRunApi = {
@@ -329,5 +445,139 @@ function mapFeatureSnapshot(record: FeatureSnapshotApi): FeatureSnapshot {
     featureVersion: record.feature_version,
     storagePath: record.storage_path,
     rowCount: record.row_count,
+  };
+}
+
+type F1DriverApi = {
+  id: string;
+  driver_number: number;
+  broadcast_name: string | null;
+  full_name: string | null;
+  first_name: string | null;
+  last_name: string | null;
+  name_acronym: string | null;
+  team_id: string | null;
+  country_code: string | null;
+  headshot_url: string | null;
+};
+
+type F1TeamApi = {
+  id: string;
+  team_name: string;
+  team_color: string | null;
+};
+
+type PricePointApi = {
+  id: string;
+  market_id: string;
+  token_id: string;
+  observed_at_utc: string;
+  price: number | null;
+  midpoint: number | null;
+  best_bid: number | null;
+  best_ask: number | null;
+};
+
+function mapDriver(record: F1DriverApi): F1Driver {
+  return {
+    id: record.id,
+    driverNumber: record.driver_number,
+    broadcastName: record.broadcast_name,
+    fullName: record.full_name,
+    firstName: record.first_name,
+    lastName: record.last_name,
+    nameAcronym: record.name_acronym,
+    teamId: record.team_id,
+    countryCode: record.country_code,
+    headshotUrl: record.headshot_url,
+  };
+}
+
+function mapTeam(record: F1TeamApi): F1Team {
+  return {
+    id: record.id,
+    teamName: record.team_name,
+    teamColor: record.team_color,
+  };
+}
+
+function mapPricePoint(record: PricePointApi): PricePoint {
+  return {
+    id: record.id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    observedAtUtc: record.observed_at_utc,
+    price: record.price,
+    midpoint: record.midpoint,
+    bestBid: record.best_bid,
+    bestAsk: record.best_ask,
+  };
+}
+
+type PaperTradeSessionApi = {
+  id: string;
+  gp_slug: string;
+  snapshot_id: string | null;
+  model_run_id: string | null;
+  status: string;
+  config_json: Record<string, unknown> | null;
+  summary_json: Record<string, unknown> | null;
+  log_path: string | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type PaperTradePositionApi = {
+  id: string;
+  session_id: string;
+  market_id: string;
+  token_id: string | null;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  entry_time: string;
+  model_prob: number;
+  market_prob: number;
+  edge: number;
+  status: string;
+  exit_price: number | null;
+  exit_time: string | null;
+  realized_pnl: number | null;
+};
+
+function mapPaperTradeSession(record: PaperTradeSessionApi): PaperTradeSession {
+  return {
+    id: record.id,
+    gpSlug: record.gp_slug,
+    snapshotId: record.snapshot_id,
+    modelRunId: record.model_run_id,
+    status: record.status,
+    configJson: record.config_json,
+    summaryJson: record.summary_json,
+    logPath: record.log_path,
+    startedAt: record.started_at,
+    finishedAt: record.finished_at,
+  };
+}
+
+function mapPaperTradePosition(
+  record: PaperTradePositionApi,
+): PaperTradePosition {
+  return {
+    id: record.id,
+    sessionId: record.session_id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    side: record.side,
+    quantity: record.quantity,
+    entryPrice: record.entry_price,
+    entryTime: record.entry_time,
+    modelProb: record.model_prob,
+    marketProb: record.market_prob,
+    edge: record.edge,
+    status: record.status,
+    exitPrice: record.exit_price,
+    exitTime: record.exit_time,
+    realizedPnl: record.realized_pnl,
   };
 }

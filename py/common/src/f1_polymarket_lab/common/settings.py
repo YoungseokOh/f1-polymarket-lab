@@ -25,9 +25,15 @@ class Settings(BaseSettings):
     openf1_max_requests_per_second: int = 2
     next_public_api_base_url: str = "http://127.0.0.1:8000"
 
+    # Optional override – set DATABASE_URL=sqlite+pysqlite:///./data/lab.db in
+    # .env to run without PostgreSQL.
+    database_url_override: str | None = None
+
     @computed_field  # type: ignore[prop-decorator]
     @property
     def database_url(self) -> str:
+        if self.database_url_override:
+            return self.database_url_override
         auth = self.postgres_user
         if self.postgres_password:
             auth = f"{auth}:{self.postgres_password}"

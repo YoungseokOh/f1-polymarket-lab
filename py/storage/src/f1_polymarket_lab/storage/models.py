@@ -791,3 +791,42 @@ class BacktestResult(Base):
     equity_curve_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     trades_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class PaperTradeSession(Base):
+    """A paper trading session tied to a GP snapshot and model run."""
+
+    __tablename__ = "paper_trade_sessions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    gp_slug: Mapped[str] = mapped_column(String(128), index=True)
+    snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    summary_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    log_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class PaperTradePosition(Base):
+    """A single simulated position within a paper trading session."""
+
+    __tablename__ = "paper_trade_positions"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    side: Mapped[str] = mapped_column(String(16))
+    quantity: Mapped[float] = mapped_column(Float)
+    entry_price: Mapped[float] = mapped_column(Float)
+    entry_time: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    model_prob: Mapped[float] = mapped_column(Float)
+    market_prob: Mapped[float] = mapped_column(Float)
+    edge: Mapped[float] = mapped_column(Float)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)

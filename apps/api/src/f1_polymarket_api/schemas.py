@@ -183,3 +183,126 @@ class FeatureSnapshotResponse(BaseModel):
     feature_version: str
     storage_path: str | None
     row_count: int | None
+
+
+class F1DriverResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    driver_number: int
+    broadcast_name: str | None
+    full_name: str | None
+    first_name: str | None
+    last_name: str | None
+    name_acronym: str | None
+    team_id: str | None
+    country_code: str | None
+    headshot_url: str | None
+
+
+class F1TeamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    team_name: str
+    team_color: str | None
+
+
+class PriceHistoryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    market_id: str
+    token_id: str
+    observed_at_utc: datetime
+    price: float | None
+    midpoint: float | None
+    best_bid: float | None
+    best_ask: float | None
+
+
+# ---------------------------------------------------------------------------
+# Action request / response schemas
+# ---------------------------------------------------------------------------
+
+
+class ActionStatusResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    details: dict[str, object] | None = None
+
+
+class IngestDemoRequest(BaseModel):
+    season: int = 2026
+    weekends: int = 2
+    market_batches: int = 3
+
+
+class SyncCalendarRequest(BaseModel):
+    season: int = 2026
+
+
+class SyncF1MarketsRequest(BaseModel):
+    max_pages: int = 20
+    search_fallback: bool = True
+    start_year: int = 2022
+    end_year: int | None = None
+
+
+class RunBacktestRequest(BaseModel):
+    gp_short_code: str
+    min_edge: float = 0.05
+    bet_size: float = 10.0
+
+
+class GPRegistryItem(BaseModel):
+    name: str
+    short_code: str
+    meeting_key: int
+    season: int
+    target_session_code: str
+    variant: str
+
+
+class PaperTradePositionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    session_id: str
+    market_id: str
+    token_id: str | None
+    side: str
+    quantity: float
+    entry_price: float
+    entry_time: datetime
+    model_prob: float
+    market_prob: float
+    edge: float
+    status: str
+    exit_price: float | None
+    exit_time: datetime | None
+    realized_pnl: float | None
+
+
+class PaperTradeSessionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    gp_slug: str
+    snapshot_id: str | None
+    model_run_id: str | None
+    status: str
+    config_json: dict[str, object] | None
+    summary_json: dict[str, object] | None
+    log_path: str | None
+    started_at: datetime
+    finished_at: datetime | None
+
+
+class RunPaperTradeRequest(BaseModel):
+    gp_short_code: str
+    snapshot_id: str | None = None
+    baseline: str = "hybrid"
+    min_edge: float = 0.05
+    bet_size: float = 10.0
