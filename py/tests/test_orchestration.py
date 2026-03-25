@@ -87,9 +87,9 @@ def make_f1_event(event_id: str, market_id: str, question: str) -> dict[str, obj
                 "lastTradePrice": 0.485,
                 "volumeNum": 123.0,
                 "liquidityNum": 456.0,
-                "clobTokenIds": "[\"token-1\", \"token-2\"]",
-                "outcomes": "[\"Yes\", \"No\"]",
-                "outcomePrices": "[\"0.48\", \"0.52\"]",
+                "clobTokenIds": '["token-1", "token-2"]',
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.48", "0.52"]',
             }
         ],
     }
@@ -139,9 +139,9 @@ def make_session_market_event(
                 "lastTradePrice": 0.485,
                 "volumeNum": 123.0,
                 "liquidityNum": 456.0,
-                "clobTokenIds": "[\"token-1\", \"token-2\"]",
-                "outcomes": "[\"Yes\", \"No\"]",
-                "outcomePrices": "[\"0.48\", \"0.52\"]",
+                "clobTokenIds": '["token-1", "token-2"]',
+                "outcomes": '["Yes", "No"]',
+                "outcomePrices": '["0.48", "0.52"]',
             }
         ],
     }
@@ -1181,8 +1181,7 @@ def test_sync_polymarket_f1_catalog_filters_to_f1_events(
             is not None
         )
         assert (
-            session.scalar(select(PolymarketEvent).where(PolymarketEvent.id == "event-3"))
-            is None
+            session.scalar(select(PolymarketEvent).where(PolymarketEvent.id == "event-3")) is None
         )
         market = session.get(PolymarketMarket, "market-1")
         assert market is not None
@@ -1314,8 +1313,7 @@ def test_discover_session_polymarket_uses_exact_slug_and_auto_maps(
         slug="f1-japanese-grand-prix-practice-2-fastest-lap-2026-03-27",
         title="Japanese Grand Prix: Practice 2 Fastest Lap",
         question=(
-            "Will Oscar Piastri set the fastest lap in Practice 2 "
-            "at the 2026 Japanese Grand Prix?"
+            "Will Oscar Piastri set the fastest lap in Practice 2 at the 2026 Japanese Grand Prix?"
         ),
         description=(
             "This market will resolve according to the fastest lap in Practice 2 at the 2026 "

@@ -3,6 +3,9 @@ import Link from "next/link";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, StatCard } from "@f1/ui";
 
+import { PageStatusBanner } from "../../components/page-status-banner";
+import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+
 export const revalidate = 300;
 
 const SESSION_ORDER: Record<string, number> = {
@@ -16,9 +19,15 @@ const SESSION_ORDER: Record<string, number> = {
 };
 
 export default async function SessionsPage() {
-  const [sessions, meetings] = await Promise.all([
-    sdk.sessions().catch(() => []),
-    sdk.meetings().catch(() => []),
+  const [sessionsState, meetingsState] = await Promise.all([
+    loadResource(() => sdk.sessions({ limit: 250 }), [], "Session feed"),
+    loadResource(() => sdk.meetings({ limit: 100 }), [], "Meeting feed"),
+  ]);
+  const sessions = sessionsState.data;
+  const meetings = meetingsState.data;
+  const degradedMessages = collectResourceErrors([
+    sessionsState,
+    meetingsState,
   ]);
 
   const now = new Date();
@@ -42,6 +51,8 @@ export default async function SessionsPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
+      <PageStatusBanner messages={degradedMessages} />
+
       <div>
         <h1 className="text-xl font-bold text-white">Sessions</h1>
         <p className="mt-1 text-sm text-[#6b7280]">

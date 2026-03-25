@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from functools import cache
 
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -11,10 +12,12 @@ class Base(DeclarativeBase):
     pass
 
 
+@cache
 def build_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True, pool_pre_ping=True)
 
 
+@cache
 def session_factory(database_url: str) -> sessionmaker[Session]:
     return sessionmaker(bind=build_engine(database_url), expire_on_commit=False)
 

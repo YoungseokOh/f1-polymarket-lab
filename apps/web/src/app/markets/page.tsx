@@ -4,6 +4,9 @@ import type { PolymarketMarket } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, StatCard } from "@f1/ui";
 
+import { PageStatusBanner } from "../../components/page-status-banner";
+import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+
 export const revalidate = 300;
 
 const TAXONOMY_LABELS: Record<string, string> = {
@@ -17,7 +20,9 @@ const TAXONOMY_LABELS: Record<string, string> = {
   driver_podium: "Driver Podium",
   constructor_scores_first: "Constructor First",
   constructor_fastest_lap_practice: "Constructor Fastest Lap",
+  constructor_fastest_lap_session: "Constructor Fastest Lap",
   driver_fastest_lap_practice: "Driver Fastest Lap",
+  driver_fastest_lap_session: "Driver Fastest Lap",
   drivers_champion: "Drivers Champion",
   constructors_champion: "Constructors Champion",
   red_flag: "Red Flag",
@@ -36,11 +41,13 @@ const TAXONOMY_ORDER: Record<string, number> = {
   constructor_pole_position: 7,
   constructor_scores_first: 8,
   constructor_fastest_lap_practice: 9,
-  driver_fastest_lap_practice: 10,
-  drivers_champion: 11,
-  constructors_champion: 12,
-  red_flag: 13,
-  safety_car: 14,
+  constructor_fastest_lap_session: 10,
+  driver_fastest_lap_practice: 11,
+  driver_fastest_lap_session: 12,
+  drivers_champion: 13,
+  constructors_champion: 14,
+  red_flag: 15,
+  safety_car: 16,
 };
 
 function formatPrice(v: number | null) {
@@ -60,8 +67,14 @@ function groupByTaxonomy(markets: PolymarketMarket[]) {
 }
 
 export default async function MarketsPage() {
-  const allMarkets = await sdk.markets().catch(() => []);
+  const marketsState = await loadResource(
+    () => sdk.markets({ limit: 250 }),
+    [],
+    "Market feed",
+  );
+  const allMarkets = marketsState.data;
   const markets = allMarkets.filter((m) => (m.taxonomy ?? "other") !== "other");
+  const degradedMessages = collectResourceErrors([marketsState]);
 
   const activeMarkets = markets.filter((m) => m.active && !m.closed);
   const closedMarkets = markets.filter((m) => m.closed);
@@ -83,6 +96,8 @@ export default async function MarketsPage() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
+      <PageStatusBanner messages={degradedMessages} />
+
       <div>
         <h1 className="text-xl font-bold text-white">Markets</h1>
         <p className="mt-1 text-sm text-[#6b7280]">

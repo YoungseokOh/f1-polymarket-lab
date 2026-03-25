@@ -4,6 +4,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 
+from f1_polymarket_lab.common import MarketTaxonomy
+
 DRIVER_NAMES = [
     "antonelli",
     "verstappen",
@@ -96,7 +98,7 @@ MONTH_LOOKUP = {
 
 @dataclass(slots=True)
 class ParsedMarket:
-    taxonomy: str = "other"
+    taxonomy: MarketTaxonomy = "other"
     confidence: float = 0.1
     target_session_code: str | None = None
     driver_a: str | None = None
@@ -184,12 +186,16 @@ def parse_market_taxonomy(
                 parsed.confidence = max(parsed.confidence, 0.3)
                 break
 
-    if "red flag" in question_text or "red flag" in title_text or (
-        "red flag" in description_text
-        and (
-            "will there be a red flag" in description_text
-            or ": red flag" in description_text
-            or " red flag during " in description_text
+    if (
+        "red flag" in question_text
+        or "red flag" in title_text
+        or (
+            "red flag" in description_text
+            and (
+                "will there be a red flag" in description_text
+                or ": red flag" in description_text
+                or " red flag during " in description_text
+            )
         )
     ):
         parsed.taxonomy = "red_flag"
@@ -201,7 +207,8 @@ def parse_market_taxonomy(
         or "safety car" in title_text
         or "virtual safety car" in question_text
         or "virtual safety car" in title_text
-        or "safety car" in description_text and "will there be a safety car" in description_text
+        or "safety car" in description_text
+        and "will there be a safety car" in description_text
         or "virtual safety car" in description_text
         or "vsc" in question_text
     ):
@@ -270,24 +277,21 @@ def parse_market_taxonomy(
             return parsed
 
     if (
-        question_mentions_winner
-        or (not question_text.strip() and title_mentions_winner)
+        question_mentions_winner or (not question_text.strip() and title_mentions_winner)
     ) and parsed.target_session_code in {"Q", "SQ"}:
         parsed.taxonomy = "qualifying_winner"
         parsed.confidence = 0.8 if "contains_placeholder" not in parsed.metadata else 0.3
         return parsed
 
     if (
-        question_mentions_winner
-        or (not question_text.strip() and title_mentions_winner)
+        question_mentions_winner or (not question_text.strip() and title_mentions_winner)
     ) and parsed.target_session_code == "S":
         parsed.taxonomy = "sprint_winner"
         parsed.confidence = 0.8 if "contains_placeholder" not in parsed.metadata else 0.3
         return parsed
 
     if (
-        question_mentions_winner
-        or (not question_text.strip() and title_mentions_winner)
+        question_mentions_winner or (not question_text.strip() and title_mentions_winner)
     ) and parsed.target_session_code == "R":
         parsed.taxonomy = "race_winner"
         parsed.confidence = 0.82 if "contains_placeholder" not in parsed.metadata else 0.3

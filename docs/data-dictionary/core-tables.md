@@ -2,6 +2,12 @@
 
 Current schema baseline includes the required canonical table families:
 
+- relational guards:
+  - core F1 and Polymarket tables now enforce foreign keys on the main meeting/session/event/market
+    chains plus mapping tables
+  - destructive cleanup should rely on database constraints first; code-level delete fan-out is a
+    compatibility layer, not the primary integrity boundary
+
 - ingestion:
   - `source_fetch_log`
   - `ingestion_job_definitions`, `ingestion_job_runs`

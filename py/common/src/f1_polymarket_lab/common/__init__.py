@@ -1,3 +1,4 @@
+from .markets import MARKET_TAXONOMIES, MarketTaxonomy, coerce_market_taxonomy, is_market_taxonomy
 from .settings import Settings, get_settings
 from .time import utc_now
 from .timing import (
@@ -22,9 +23,13 @@ __all__ = [
     "Settings",
     "ParsedGapValue",
     "ParsedResultTimeValue",
+    "MARKET_TAXONOMIES",
+    "MarketTaxonomy",
+    "coerce_market_taxonomy",
     "ensure_dir",
     "get_settings",
     "infer_result_time_kind",
+    "is_market_taxonomy",
     "normalize_float",
     "normalize_text",
     "parse_utc_offset",

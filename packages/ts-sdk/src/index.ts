@@ -12,6 +12,7 @@ import type {
   FreshnessRecord,
   GPRegistryItem,
   IngestDemoRequest,
+  MarketTaxonomy,
   ModelPrediction,
   ModelRun,
   PaperTradePosition,
@@ -25,14 +26,70 @@ import type {
   SyncF1MarketsRequest,
 } from "@f1/shared-types";
 
-async function apiGet<T>(path: string): Promise<T> {
+type QueryValue = boolean | number | string | null | undefined;
+
+export type ListOptions = {
+  limit?: number;
+};
+
+export type MeetingListOptions = ListOptions & {
+  season?: number;
+};
+
+export type SessionListOptions = ListOptions & {
+  season?: number;
+  meetingId?: string;
+  sessionCode?: string;
+  isPractice?: boolean;
+};
+
+export type MarketListOptions = ListOptions & {
+  eventId?: string;
+  taxonomy?: MarketTaxonomy;
+  active?: boolean;
+  closed?: boolean;
+};
+
+export type MappingListOptions = ListOptions & {
+  f1SessionId?: string;
+  polymarketMarketId?: string;
+  minConfidence?: number;
+};
+
+function buildPath(path: string, query?: Record<string, QueryValue>): string {
+  if (!query) {
+    return path;
+  }
+
+  const searchParams = new URLSearchParams();
+  for (const [key, value] of Object.entries(query)) {
+    if (value === null || value === undefined) {
+      continue;
+    }
+    searchParams.set(key, String(value));
+  }
+
+  const search = searchParams.toString();
+  if (!search) {
+    return path;
+  }
+  return `${path}?${search}`;
+}
+
+async function apiGet<T>(
+  path: string,
+  query?: Record<string, QueryValue>,
+): Promise<T> {
   const { NEXT_PUBLIC_API_BASE_URL } = getWebEnv();
-  const response = await fetch(`${NEXT_PUBLIC_API_BASE_URL}${path}`, {
-    headers: {
-      "Content-Type": "application/json",
+  const response = await fetch(
+    `${NEXT_PUBLIC_API_BASE_URL}${buildPath(path, query)}`,
+    {
+      headers: {
+        "Content-Type": "application/json",
+      },
+      cache: "no-store",
     },
-    cache: "no-store",
-  });
+  );
 
   if (!response.ok) {
     throw new Error(
@@ -224,22 +281,54 @@ function mapMapping(record: EntityMappingApi): EntityMapping {
 
 export const sdk = {
   health: () => apiGet<ApiHealth>("/health"),
-  freshness: async () =>
-    (await apiGet<FreshnessApi[]>("/api/v1/freshness")).map(mapFreshness),
-  meetings: async () =>
-    (await apiGet<F1MeetingApi[]>("/api/v1/f1/meetings")).map(mapMeeting),
-  sessions: async () =>
-    (await apiGet<F1SessionApi[]>("/api/v1/f1/sessions")).map(mapSession),
-  events: async () =>
-    (await apiGet<PolymarketEventApi[]>("/api/v1/polymarket/events")).map(
-      mapEvent,
-    ),
-  markets: async () =>
-    (await apiGet<PolymarketMarketApi[]>("/api/v1/polymarket/markets")).map(
-      mapMarket,
-    ),
-  mappings: async () =>
-    (await apiGet<EntityMappingApi[]>("/api/v1/mappings")).map(mapMapping),
+  freshness: async (options?: ListOptions) =>
+    (
+      await apiGet<FreshnessApi[]>("/api/v1/freshness", {
+        limit: options?.limit,
+      })
+    ).map(mapFreshness),
+  meetings: async (options?: MeetingListOptions) =>
+    (
+      await apiGet<F1MeetingApi[]>("/api/v1/f1/meetings", {
+        limit: options?.limit,
+        season: options?.season,
+      })
+    ).map(mapMeeting),
+  sessions: async (options?: SessionListOptions) =>
+    (
+      await apiGet<F1SessionApi[]>("/api/v1/f1/sessions", {
+        limit: options?.limit,
+        season: options?.season,
+        meeting_id: options?.meetingId,
+        session_code: options?.sessionCode,
+        is_practice: options?.isPractice,
+      })
+    ).map(mapSession),
+  events: async (options?: ListOptions) =>
+    (
+      await apiGet<PolymarketEventApi[]>("/api/v1/polymarket/events", {
+        limit: options?.limit,
+      })
+    ).map(mapEvent),
+  markets: async (options?: MarketListOptions) =>
+    (
+      await apiGet<PolymarketMarketApi[]>("/api/v1/polymarket/markets", {
+        limit: options?.limit,
+        event_id: options?.eventId,
+        taxonomy: options?.taxonomy,
+        active: options?.active,
+        closed: options?.closed,
+      })
+    ).map(mapMarket),
+  mappings: async (options?: MappingListOptions) =>
+    (
+      await apiGet<EntityMappingApi[]>("/api/v1/mappings", {
+        limit: options?.limit,
+        f1_session_id: options?.f1SessionId,
+        polymarket_market_id: options?.polymarketMarketId,
+        min_confidence: options?.minConfidence,
+      })
+    ).map(mapMapping),
   meeting: async (meetingId: string): Promise<F1Meeting> => {
     const record = await apiGet<F1MeetingApi>(
       `/api/v1/f1/meetings/${encodeURIComponent(meetingId)}`,

@@ -961,9 +961,7 @@ def _jolpica_driver_row(
         "id": driver_id,
         "source": "jolpica",
         "driver_number": (
-            permanent_number
-            if permanent_number is not None
-            else _stable_negative_number(driver_id)
+            permanent_number if permanent_number is not None else _stable_negative_number(driver_id)
         ),
         "broadcast_name": driver.get("code") or full_name or driver.get("familyName"),
         "full_name": full_name or None,
@@ -1010,8 +1008,7 @@ def _jolpica_result_time(
         if not text.startswith("+"):
             return _result_time_value(
                 kind="total_time",
-                seconds=_parse_clock_to_seconds(time_text)
-                or _parse_millis_to_seconds(time_millis),
+                seconds=_parse_clock_to_seconds(time_text) or _parse_millis_to_seconds(time_millis),
                 display=normalize_text(time_text),
             )
     return _result_time_value(kind="unknown")
@@ -1453,11 +1450,7 @@ def sync_jolpica_history(
         status="completed",
         cursor_after=cursor_after,
         records_written=(
-            meetings_written
-            + sessions_written
-            + results_written
-            + pit_written
-            + lap_written
+            meetings_written + sessions_written + results_written + pit_written + lap_written
         ),
     )
     return {

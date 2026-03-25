@@ -3,6 +3,9 @@ import Link from "next/link";
 import type { PolymarketMarket } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
+
+import { PageStatusBanner } from "../components/page-status-banner";
+import { collectResourceErrors, loadResource } from "../lib/resource-state";
 import { DashboardActions } from "./_components/dashboard-actions";
 import { SessionTimeline } from "./_components/session-timeline";
 import { StatusIndicator } from "./_components/status-indicator";
@@ -20,7 +23,9 @@ const TAXONOMY_LABELS: Record<string, string> = {
   driver_podium: "Podium",
   constructor_scores_first: "Constructor First",
   constructor_fastest_lap_practice: "Constructor FL",
+  constructor_fastest_lap_session: "Constructor FL",
   driver_fastest_lap_practice: "Driver FL",
+  driver_fastest_lap_session: "Driver FL",
   drivers_champion: "Drivers Champion",
   constructors_champion: "Constructors Champion",
   red_flag: "Red Flag",
@@ -46,29 +51,54 @@ function groupByTaxonomy(markets: PolymarketMarket[]) {
 
 export default async function HomePage() {
   const [
-    health,
-    freshness,
-    sessions,
-    meetings,
-    markets,
-    mappings,
-    modelRuns,
-    predictions,
-    backtestResults,
+    healthState,
+    freshnessState,
+    sessionsState,
+    meetingsState,
+    marketsState,
+    mappingsState,
+    modelRunsState,
+    predictionsState,
+    backtestResultsState,
   ] = await Promise.all([
-    sdk.health().catch(() => ({
-      service: "api",
-      status: "offline",
-      now: new Date().toISOString(),
-    })),
-    sdk.freshness().catch(() => []),
-    sdk.sessions().catch(() => []),
-    sdk.meetings().catch(() => []),
-    sdk.markets().catch(() => []),
-    sdk.mappings().catch(() => []),
-    sdk.modelRuns().catch(() => []),
-    sdk.predictions().catch(() => []),
-    sdk.backtestResults().catch(() => []),
+    loadResource(
+      sdk.health,
+      {
+        service: "api",
+        status: "offline",
+        now: new Date().toISOString(),
+      },
+      "API health",
+    ),
+    loadResource(() => sdk.freshness({ limit: 100 }), [], "Freshness feed"),
+    loadResource(() => sdk.sessions({ limit: 250 }), [], "Session feed"),
+    loadResource(() => sdk.meetings({ limit: 100 }), [], "Meeting feed"),
+    loadResource(() => sdk.markets({ limit: 250 }), [], "Market feed"),
+    loadResource(() => sdk.mappings({ limit: 250 }), [], "Mapping feed"),
+    loadResource(sdk.modelRuns, [], "Model runs"),
+    loadResource(sdk.predictions, [], "Predictions"),
+    loadResource(sdk.backtestResults, [], "Backtest results"),
+  ]);
+
+  const health = healthState.data;
+  const freshness = freshnessState.data;
+  const sessions = sessionsState.data;
+  const meetings = meetingsState.data;
+  const markets = marketsState.data;
+  const mappings = mappingsState.data;
+  const modelRuns = modelRunsState.data;
+  const predictions = predictionsState.data;
+  const backtestResults = backtestResultsState.data;
+  const degradedMessages = collectResourceErrors([
+    healthState,
+    freshnessState,
+    sessionsState,
+    meetingsState,
+    marketsState,
+    mappingsState,
+    modelRunsState,
+    predictionsState,
+    backtestResultsState,
   ]);
 
   const now = new Date();
@@ -106,6 +136,8 @@ export default async function HomePage() {
 
   return (
     <div className="flex flex-col gap-6 p-6">
+      <PageStatusBanner messages={degradedMessages} />
+
       {/* Hero — GP Weekend */}
       <section className="rounded-xl border border-white/[0.06] bg-gradient-to-r from-[#1e1e2e] to-[#15151e] p-6">
         <div className="flex flex-col gap-6 lg:flex-row lg:items-center lg:justify-between">

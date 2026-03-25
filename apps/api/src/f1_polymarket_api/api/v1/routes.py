@@ -22,6 +22,7 @@ from f1_polymarket_api.schemas import (
     PolymarketMarketResponse,
     PriceHistoryResponse,
 )
+from f1_polymarket_lab.common import MarketTaxonomy, coerce_market_taxonomy
 from f1_polymarket_lab.storage.models import (
     BacktestResult,
     DataQualityResult,
@@ -42,17 +43,48 @@ from f1_polymarket_lab.storage.models import (
     SourceCursorState,
     SourceFetchLog,
 )
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/v1")
 
+DEFAULT_LIMIT = 200
+MAX_LIMIT = 1000
+
+
+def _market_response(record: PolymarketMarket) -> PolymarketMarketResponse:
+    return PolymarketMarketResponse.model_validate(
+        {
+            "id": record.id,
+            "event_id": record.event_id,
+            "question": record.question,
+            "slug": record.slug,
+            "taxonomy": coerce_market_taxonomy(record.taxonomy),
+            "taxonomy_confidence": record.taxonomy_confidence,
+            "target_session_code": record.target_session_code,
+            "condition_id": record.condition_id,
+            "question_id": record.question_id,
+            "best_bid": record.best_bid,
+            "best_ask": record.best_ask,
+            "last_trade_price": record.last_trade_price,
+            "volume": record.volume,
+            "liquidity": record.liquidity,
+            "active": record.active,
+            "closed": record.closed,
+        }
+    )
+
 
 @router.get("/freshness", response_model=list[FreshnessResponse])
-def freshness(db: Session = Depends(get_db_session)) -> list[FreshnessResponse]:
+def freshness(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[FreshnessResponse]:
     logs = db.scalars(
-        select(SourceFetchLog).order_by(SourceFetchLog.finished_at.desc()).limit(100)
+        select(SourceFetchLog)
+        .order_by(SourceFetchLog.finished_at.desc())
+        .limit(max(limit * 4, DEFAULT_LIMIT))
     ).all()
 
     latest: dict[tuple[str, str], FreshnessResponse] = {}
@@ -67,14 +99,23 @@ def freshness(db: Session = Depends(get_db_session)) -> list[FreshnessResponse]:
             last_fetch_at=log.finished_at,
             records_fetched=log.records_fetched,
         )
+        if len(latest) >= limit:
+            break
 
     return list(latest.values())
 
 
 @router.get("/f1/meetings", response_model=list[F1MeetingResponse])
-def meetings(db: Session = Depends(get_db_session)) -> list[F1MeetingResponse]:
+def meetings(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    season: int | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> list[F1MeetingResponse]:
+    stmt = select(F1Meeting)
+    if season is not None:
+        stmt = stmt.where(F1Meeting.season == season)
     records = db.scalars(
-        select(F1Meeting).order_by(F1Meeting.season.desc(), F1Meeting.meeting_key)
+        stmt.order_by(F1Meeting.season.desc(), F1Meeting.meeting_key).limit(limit)
     ).all()
     return [F1MeetingResponse.model_validate(record) for record in records]
 
@@ -102,8 +143,26 @@ def meeting_sessions(
 
 
 @router.get("/f1/sessions", response_model=list[F1SessionResponse])
-def sessions(db: Session = Depends(get_db_session)) -> list[F1SessionResponse]:
-    records = db.scalars(select(F1Session).order_by(F1Session.date_start_utc.desc())).all()
+def sessions(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    season: int | None = Query(None),
+    meeting_id: str | None = Query(None),
+    session_code: str | None = Query(None),
+    is_practice: bool | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> list[F1SessionResponse]:
+    stmt = select(F1Session)
+    if season is not None:
+        stmt = stmt.join(F1Meeting, F1Session.meeting_id == F1Meeting.id).where(
+            F1Meeting.season == season
+        )
+    if meeting_id is not None:
+        stmt = stmt.where(F1Session.meeting_id == meeting_id)
+    if session_code is not None:
+        stmt = stmt.where(F1Session.session_code == session_code)
+    if is_practice is not None:
+        stmt = stmt.where(F1Session.is_practice == is_practice)
+    records = db.scalars(stmt.order_by(F1Session.date_start_utc.desc()).limit(limit)).all()
     return [F1SessionResponse.model_validate(record) for record in records]
 
 
@@ -122,17 +181,36 @@ def teams(db: Session = Depends(get_db_session)) -> list[F1TeamResponse]:
 
 
 @router.get("/polymarket/events", response_model=list[PolymarketEventResponse])
-def polymarket_events(db: Session = Depends(get_db_session)) -> list[PolymarketEventResponse]:
-    records = db.scalars(select(PolymarketEvent).order_by(PolymarketEvent.end_at_utc.desc())).all()
+def polymarket_events(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[PolymarketEventResponse]:
+    records = db.scalars(
+        select(PolymarketEvent).order_by(PolymarketEvent.end_at_utc.desc()).limit(limit)
+    ).all()
     return [PolymarketEventResponse.model_validate(record) for record in records]
 
 
 @router.get("/polymarket/markets", response_model=list[PolymarketMarketResponse])
-def polymarket_markets(db: Session = Depends(get_db_session)) -> list[PolymarketMarketResponse]:
-    records = db.scalars(
-        select(PolymarketMarket).order_by(PolymarketMarket.end_at_utc.desc())
-    ).all()
-    return [PolymarketMarketResponse.model_validate(record) for record in records]
+def polymarket_markets(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    event_id: str | None = Query(None),
+    taxonomy: MarketTaxonomy | None = Query(None),
+    active: bool | None = Query(None),
+    closed: bool | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> list[PolymarketMarketResponse]:
+    stmt = select(PolymarketMarket)
+    if event_id is not None:
+        stmt = stmt.where(PolymarketMarket.event_id == event_id)
+    if taxonomy is not None:
+        stmt = stmt.where(PolymarketMarket.taxonomy == taxonomy)
+    if active is not None:
+        stmt = stmt.where(PolymarketMarket.active == active)
+    if closed is not None:
+        stmt = stmt.where(PolymarketMarket.closed == closed)
+    records = db.scalars(stmt.order_by(PolymarketMarket.end_at_utc.desc()).limit(limit)).all()
+    return [_market_response(record) for record in records]
 
 
 @router.get("/polymarket/markets/{market_id}", response_model=PolymarketMarketResponse)
@@ -142,7 +220,7 @@ def polymarket_market_detail(
     record = db.get(PolymarketMarket, market_id)
     if not record:
         raise HTTPException(status_code=404, detail="Market not found")
-    return PolymarketMarketResponse.model_validate(record)
+    return _market_response(record)
 
 
 @router.get("/polymarket/markets/{market_id}/prices", response_model=list[PriceHistoryResponse])
@@ -159,31 +237,55 @@ def market_prices(
 
 
 @router.get("/mappings", response_model=list[EntityMappingResponse])
-def mappings(db: Session = Depends(get_db_session)) -> list[EntityMappingResponse]:
+def mappings(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    f1_session_id: str | None = Query(None),
+    polymarket_market_id: str | None = Query(None),
+    min_confidence: float | None = Query(None, ge=0.0, le=1.0),
+    db: Session = Depends(get_db_session),
+) -> list[EntityMappingResponse]:
+    stmt = select(EntityMappingF1ToPolymarket)
+    if f1_session_id is not None:
+        stmt = stmt.where(EntityMappingF1ToPolymarket.f1_session_id == f1_session_id)
+    if polymarket_market_id is not None:
+        stmt = stmt.where(EntityMappingF1ToPolymarket.polymarket_market_id == polymarket_market_id)
+    if min_confidence is not None:
+        stmt = stmt.where(EntityMappingF1ToPolymarket.confidence >= min_confidence)
     records = db.scalars(
-        select(EntityMappingF1ToPolymarket).order_by(EntityMappingF1ToPolymarket.confidence.desc())
+        stmt.order_by(EntityMappingF1ToPolymarket.confidence.desc()).limit(limit)
     ).all()
     return [EntityMappingResponse.model_validate(record) for record in records]
 
 
 @router.get("/lineage/jobs", response_model=list[IngestionJobRunResponse])
-def ingestion_jobs(db: Session = Depends(get_db_session)) -> list[IngestionJobRunResponse]:
-    records = db.scalars(select(IngestionJobRun).order_by(IngestionJobRun.started_at.desc())).all()
+def ingestion_jobs(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[IngestionJobRunResponse]:
+    records = db.scalars(
+        select(IngestionJobRun).order_by(IngestionJobRun.started_at.desc()).limit(limit)
+    ).all()
     return [IngestionJobRunResponse.model_validate(record) for record in records]
 
 
 @router.get("/lineage/cursors", response_model=list[CursorStateResponse])
-def cursor_states(db: Session = Depends(get_db_session)) -> list[CursorStateResponse]:
+def cursor_states(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[CursorStateResponse]:
     records = db.scalars(
-        select(SourceCursorState).order_by(SourceCursorState.updated_at.desc())
+        select(SourceCursorState).order_by(SourceCursorState.updated_at.desc()).limit(limit)
     ).all()
     return [CursorStateResponse.model_validate(record) for record in records]
 
 
 @router.get("/quality/results", response_model=list[DataQualityResultResponse])
-def quality_results(db: Session = Depends(get_db_session)) -> list[DataQualityResultResponse]:
+def quality_results(
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[DataQualityResultResponse]:
     records = db.scalars(
-        select(DataQualityResult).order_by(DataQualityResult.observed_at.desc())
+        select(DataQualityResult).order_by(DataQualityResult.observed_at.desc()).limit(limit)
     ).all()
     return [DataQualityResultResponse.model_validate(record) for record in records]
 

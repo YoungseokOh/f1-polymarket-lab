@@ -4,7 +4,17 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, Integer, String, Text, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -22,7 +32,12 @@ class SourceFetchLog(Base):
     __tablename__ = "source_fetch_log"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uuid_str)
-    job_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    job_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("ingestion_job_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     source: Mapped[str] = mapped_column(String(50), index=True)
     dataset: Mapped[str] = mapped_column(String(100), index=True)
     endpoint: Mapped[str] = mapped_column(String(255))
@@ -57,7 +72,12 @@ class IngestionJobRun(Base):
     __tablename__ = "ingestion_job_runs"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    job_definition_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    job_definition_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("ingestion_job_definitions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     job_name: Mapped[str] = mapped_column(String(128), index=True)
     source: Mapped[str] = mapped_column(String(64), index=True)
     dataset: Mapped[str] = mapped_column(String(128), index=True)
@@ -90,7 +110,12 @@ class BronzeObjectManifest(Base):
     __table_args__ = (UniqueConstraint("object_path", name="uq_bronze_object_path"),)
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    job_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    job_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("ingestion_job_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     storage_tier: Mapped[str] = mapped_column(String(16), default="bronze")
     source: Mapped[str] = mapped_column(String(64), index=True)
     dataset: Mapped[str] = mapped_column(String(128), index=True)
@@ -139,8 +164,18 @@ class DataQualityResult(Base):
     __tablename__ = "data_quality_results"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True, default=uuid_str)
-    check_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
-    job_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    check_id: Mapped[str | None] = mapped_column(
+        String(128),
+        ForeignKey("data_quality_checks.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    job_run_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("ingestion_job_runs.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     dataset: Mapped[str] = mapped_column(String(128), index=True)
     status: Mapped[str] = mapped_column(String(32), index=True)
     metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -172,7 +207,12 @@ class F1Session(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     source: Mapped[str] = mapped_column(String(32), default="openf1")
     session_key: Mapped[int] = mapped_column(Integer, unique=True, index=True)
-    meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     session_name: Mapped[str] = mapped_column(String(255))
     session_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
     session_code: Mapped[str | None] = mapped_column(String(16), nullable=True)
@@ -215,7 +255,11 @@ class F1SessionResult(Base):
     __tablename__ = "f1_session_results"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     result_time_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -238,7 +282,11 @@ class F1Lap(Base):
     __tablename__ = "f1_laps"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     lap_number: Mapped[int] = mapped_column(Integer)
     lap_start_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -257,7 +305,11 @@ class F1Stint(Base):
     __tablename__ = "f1_stints"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     stint_number: Mapped[int] = mapped_column(Integer)
     compound: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -271,8 +323,18 @@ class F1Weather(Base):
     __tablename__ = "f1_weather"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     observed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     air_temperature_c: Mapped[float | None] = mapped_column(Float, nullable=True)
     humidity_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -288,8 +350,18 @@ class F1RaceControl(Base):
     __tablename__ = "f1_race_control"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     driver_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     category: Mapped[str | None] = mapped_column(String(64), nullable=True)
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -303,7 +375,11 @@ class F1Position(Base):
     __tablename__ = "f1_positions"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     observed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     position: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -314,7 +390,11 @@ class F1Interval(Base):
     __tablename__ = "f1_intervals"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     observed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     gap_to_leader_display: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -332,7 +412,11 @@ class F1Pit(Base):
     __tablename__ = "f1_pit"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     observed_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     lap_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -344,7 +428,11 @@ class F1TelemetryIndex(Base):
     __tablename__ = "f1_telemetry_index"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     dataset_name: Mapped[str] = mapped_column(String(64))
     storage_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
@@ -358,7 +446,11 @@ class F1TeamRadioMetadata(Base):
     __tablename__ = "f1_team_radio_metadata"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     recording_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
     transcript_text: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -370,7 +462,11 @@ class F1StartingGrid(Base):
     __tablename__ = "f1_starting_grid"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    session_id: Mapped[str] = mapped_column(String(64), index=True)
+    session_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        index=True,
+    )
     driver_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     grid_position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -416,7 +512,12 @@ class PolymarketMarket(Base):
     __tablename__ = "polymarket_markets"
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    event_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_events.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     question: Mapped[str] = mapped_column(Text)
     slug: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     condition_id: Mapped[str] = mapped_column(String(128), unique=True, index=True)
@@ -453,7 +554,11 @@ class PolymarketMarketStatusHistory(Base):
     __tablename__ = "polymarket_market_status_history"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     active: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     closed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -466,7 +571,11 @@ class PolymarketToken(Base):
     __tablename__ = "polymarket_tokens"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
     latest_price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -477,7 +586,11 @@ class PolymarketMarketRule(Base):
     __tablename__ = "polymarket_market_rules"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     rules_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolution_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     parsed_metadata: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -488,7 +601,11 @@ class PolymarketPriceHistory(Base):
     __tablename__ = "polymarket_price_history"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     token_id: Mapped[str] = mapped_column(String(128), index=True)
     observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -503,7 +620,11 @@ class PolymarketOpenInterestHistory(Base):
     __tablename__ = "polymarket_open_interest_history"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     open_interest: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -514,7 +635,11 @@ class PolymarketOrderbookSnapshot(Base):
     __tablename__ = "polymarket_orderbook_snapshots"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     token_id: Mapped[str] = mapped_column(String(128), index=True)
     observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
     best_bid: Mapped[float | None] = mapped_column(Float, nullable=True)
@@ -538,8 +663,16 @@ class PolymarketOrderbookLevel(Base):
     )
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    snapshot_id: Mapped[str] = mapped_column(String(128), index=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    snapshot_id: Mapped[str] = mapped_column(
+        String(128),
+        ForeignKey("polymarket_orderbook_snapshots.id", ondelete="CASCADE"),
+        index=True,
+    )
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     token_id: Mapped[str] = mapped_column(String(128), index=True)
     side: Mapped[str] = mapped_column(String(8))
     level_index: Mapped[int] = mapped_column(Integer)
@@ -551,7 +684,11 @@ class PolymarketTrade(Base):
     __tablename__ = "polymarket_trades"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     condition_id: Mapped[str] = mapped_column(String(128), index=True)
     trade_timestamp_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
@@ -567,7 +704,11 @@ class PolymarketResolution(Base):
     __tablename__ = "polymarket_resolution"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
     resolved_at_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     result: Mapped[str | None] = mapped_column(String(64), nullable=True)
     outcome: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -579,7 +720,12 @@ class PolymarketWsMessageManifest(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     channel: Mapped[str] = mapped_column(String(32), index=True)
-    market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     object_path: Mapped[str] = mapped_column(String(512))
     event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -604,8 +750,17 @@ class MarketTaxonomyLabel(Base):
     __tablename__ = "market_taxonomy_labels"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    market_id: Mapped[str] = mapped_column(String(64), index=True)
-    taxonomy_version_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
+    taxonomy_version_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("market_taxonomy_versions.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     taxonomy: Mapped[str] = mapped_column(String(64), index=True)
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     label_status: Mapped[str] = mapped_column(String(32), default="candidate")
@@ -618,10 +773,30 @@ class MappingCandidate(Base):
     __tablename__ = "mapping_candidates"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    f1_meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    f1_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    polymarket_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    polymarket_market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    f1_meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    f1_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    polymarket_event_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_events.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    polymarket_market_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     candidate_type: Mapped[str] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     matched_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -634,9 +809,23 @@ class ManualMappingOverride(Base):
     __tablename__ = "manual_mapping_overrides"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    polymarket_market_id: Mapped[str] = mapped_column(String(64), index=True)
-    f1_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    f1_meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    polymarket_market_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        index=True,
+    )
+    f1_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    f1_meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     mapping_type: Mapped[str] = mapped_column(String(64))
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -648,10 +837,30 @@ class EntityMappingF1ToPolymarket(Base):
     __tablename__ = "entity_mapping_f1_to_polymarket"
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
-    f1_meeting_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    f1_session_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    polymarket_event_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
-    polymarket_market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    f1_meeting_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_meetings.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    f1_session_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("f1_sessions.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    polymarket_event_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_events.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    polymarket_market_id: Mapped[str | None] = mapped_column(
+        String(64),
+        ForeignKey("polymarket_markets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     mapping_type: Mapped[str] = mapped_column(String(64))
     confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     matched_by: Mapped[str | None] = mapped_column(String(128), nullable=True)

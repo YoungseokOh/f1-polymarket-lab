@@ -26,7 +26,8 @@ web:
 	pnpm --filter @f1/web dev
 
 worker:
-	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli worker
+	@echo "No background worker is implemented. Use one-shot commands such as make sync-f1-calendar or make sync-polymarket-f1-catalog."
+	@false
 
 dev:
 	pnpm dev

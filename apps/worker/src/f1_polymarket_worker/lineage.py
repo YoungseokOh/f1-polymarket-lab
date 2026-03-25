@@ -177,10 +177,7 @@ def record_fetch_batch(
     bronze_ref = None if bronze_object is None else bronze_object.path
     fetch_id = payload_checksum([batch.endpoint, batch.params, bronze_ref])[:24]
     record = {
-        "id": (
-            f"{batch.source}:{batch.dataset}:"
-            f"{fetch_id}"
-        ),
+        "id": (f"{batch.source}:{batch.dataset}:{fetch_id}"),
         "job_run_id": job_run_id,
         "source": batch.source,
         "dataset": batch.dataset,

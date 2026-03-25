@@ -119,14 +119,10 @@ def test_parse_market_taxonomy_prefers_race_winner_over_podium_ceremony_text() -
 
 
 def test_infer_market_scheduled_date_parses_slug_and_description_dates() -> None:
-    assert (
-        infer_market_scheduled_date("f1-japanese-grand-prix-practice-2-fastest-lap-2026-03-27")
-        == date(2026, 3, 27)
-    )
-    assert (
-        infer_market_scheduled_date(
-            "This market is on the driver with the fastest lap in Practice 2, "
-            "scheduled for Mar 27, 2026."
-        )
-        == date(2026, 3, 27)
-    )
+    assert infer_market_scheduled_date(
+        "f1-japanese-grand-prix-practice-2-fastest-lap-2026-03-27"
+    ) == date(2026, 3, 27)
+    assert infer_market_scheduled_date(
+        "This market is on the driver with the fastest lap in Practice 2, "
+        "scheduled for Mar 27, 2026."
+    ) == date(2026, 3, 27)

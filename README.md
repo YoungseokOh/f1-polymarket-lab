@@ -32,6 +32,9 @@ make ingest-demo DEMO_WEEKENDS=2 DEMO_MARKET_BATCHES=3
 - **API:** FastAPI with typed Pydantic schemas
 - **Dashboard:** Next.js with TypeScript SDK and shared UI components
 
+There is no queue-backed background worker in the current slice. Collection and hydration run through
+explicit CLI commands.
+
 ## Collection workflow
 
 For the F1-focused ingestion path:

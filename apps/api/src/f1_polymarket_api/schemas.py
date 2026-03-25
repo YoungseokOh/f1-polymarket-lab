@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from f1_polymarket_lab.common import MarketTaxonomy
 from pydantic import BaseModel, ConfigDict
 
 
@@ -67,7 +68,7 @@ class PolymarketMarketResponse(BaseModel):
     event_id: str | None
     question: str
     slug: str | None
-    taxonomy: str
+    taxonomy: MarketTaxonomy
     taxonomy_confidence: float | None
     target_session_code: str | None
     condition_id: str

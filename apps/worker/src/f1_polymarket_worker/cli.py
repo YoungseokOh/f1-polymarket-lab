@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import time
-
 import typer
 from f1_polymarket_lab.common import get_settings
 from f1_polymarket_lab.storage.db import Base, build_engine, db_session
@@ -43,6 +41,7 @@ from f1_polymarket_worker.pipeline import (
     reconcile_mappings,
     run_data_quality_checks,
     sync_f1_calendar,
+    sync_polymarket_catalog,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -108,10 +107,13 @@ def sync_polymarket_catalog_command(
     settings = get_settings()
     with db_session(settings.database_url) as session:
         context = PipelineContext(db=session, execute=execute)
-        result = sync_polymarket_f1_catalog(
+        result = sync_polymarket_catalog(
             context,
             max_pages=max_pages,
             batch_size=batch_size,
+            active=active,
+            closed=closed,
+            archived=archived,
         )
     typer.echo(result)
 
@@ -1402,11 +1404,13 @@ def h2h_signals_command(
     typer.echo(f"\n  Total buy signals: {len(buys)}  |  Teammate H2H: {len(teammate_signals)}")
 
 
-@app.command("worker")
+@app.command("worker", hidden=True)
 def worker() -> None:
-    typer.echo("Worker heartbeat loop started. Use the CLI to trigger ingestion jobs.")
-    while True:
-        time.sleep(30)
+    typer.echo(
+        "No background queue worker is implemented. Use explicit CLI ingestion commands instead.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 if __name__ == "__main__":
