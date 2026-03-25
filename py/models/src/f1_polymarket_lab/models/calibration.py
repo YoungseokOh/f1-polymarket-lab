@@ -10,9 +10,10 @@ Provides:
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
+from numpy.typing import NDArray
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,7 +80,7 @@ def platt_scale(
     y_true: np.ndarray,
     y_prob: np.ndarray,
     y_prob_new: np.ndarray | None = None,
-) -> np.ndarray:
+) -> NDArray[np.float64]:
     """Apply Platt scaling (logistic regression on predicted probs).
 
     If *y_prob_new* is provided, fits on (y_prob, y_true) and transforms
@@ -91,7 +92,8 @@ def platt_scale(
     lr.fit(y_prob.reshape(-1, 1), y_true)
 
     target = y_prob_new if y_prob_new is not None else y_prob
-    return lr.predict_proba(target.reshape(-1, 1))[:, 1]
+    calibrated = lr.predict_proba(target.reshape(-1, 1))[:, 1]
+    return cast(NDArray[np.float64], calibrated)
 
 
 def error_analysis(

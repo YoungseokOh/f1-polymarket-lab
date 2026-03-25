@@ -104,7 +104,7 @@ def compute_h2h_signals(
 
     # Driver affinity profiles for this circuit
     profiles = compute_driver_sector_profiles(db, circuit_key=circuit_key)
-    weights = (
+    weights: dict[str, float] = (
         compute_track_sector_weights(db, circuit_short_name=circuit_short_name)
         if circuit_short_name
         else {"s1_fraction": 1 / 3, "s2_fraction": 1 / 3, "s3_fraction": 1 / 3}
@@ -113,8 +113,14 @@ def compute_h2h_signals(
     def _affinity(driver_id: str | None) -> float:
         if not driver_id:
             return 0.0
-        return compute_driver_track_affinity(
-            driver_profile=profiles.get(driver_id, {}), track_weights=weights
+        profile = profiles.get(driver_id)
+        if profile is None:
+            return 0.0
+        return float(
+            compute_driver_track_affinity(
+                driver_profile=profile,
+                track_weights=weights,
+            )
         )
 
     # Fetch all H2H tokens mapped to this session

@@ -6,10 +6,10 @@ from typing import Any
 from f1_polymarket_lab.common import ensure_dir
 
 
-def _get_fastf1():  # noqa: ANN202
+def _get_fastf1() -> Any:
     """Lazy-import fastf1 so the package can be imported without it installed."""
     try:
-        import fastf1  # type: ignore[import-untyped]
+        import fastf1
     except ModuleNotFoundError as exc:
         msg = "fastf1 is required for FastF1ScheduleConnector – install it with: pip install fastf1"
         raise ImportError(msg) from exc

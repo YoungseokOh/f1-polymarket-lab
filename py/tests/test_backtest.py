@@ -127,14 +127,14 @@ class TestResolveMarketOutcome:
         resolution = PolymarketResolution(
             id="res-1", market_id="m-1", result="YES", raw_payload={}
         )
-        row: dict = {}
+        row: dict[str, object] = {}
         assert _resolve_market_outcome(resolution, row) == 1
 
     def test_resolution_fallback_no(self) -> None:
         resolution = PolymarketResolution(
             id="res-1", market_id="m-1", result="no", raw_payload={}
         )
-        row: dict = {}
+        row: dict[str, object] = {}
         assert _resolve_market_outcome(resolution, row) == 0
 
     def test_returns_none_when_no_data(self) -> None:

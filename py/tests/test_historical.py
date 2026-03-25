@@ -544,7 +544,7 @@ class TestSyncOpenF1SeasonRange:
     ) -> None:
         session, context = build_context(tmp_path)
 
-        def fake_sync_f1_calendar(ctx: object, *, season: int) -> dict:
+        def fake_sync_f1_calendar(ctx: object, *, season: int) -> dict[str, object]:
             upsert_records(context.db, F1Meeting, [{
                 "id": f"meeting:fake-{season}",
                 "source": "openf1",
@@ -568,7 +568,7 @@ class TestSyncOpenF1SeasonRange:
 
         hydrate_calls: list[int] = []
 
-        def fake_hydrate_f1_session(ctx: object, *, session_key: int) -> dict:
+        def fake_hydrate_f1_session(ctx: object, *, session_key: int) -> dict[str, object]:
             hydrate_calls.append(session_key)
             return {"status": "completed", "session_key": session_key}
 
@@ -622,12 +622,12 @@ class TestSyncOpenF1SeasonRange:
         session.add_all([meeting, fp1, result_row])
         session.commit()
 
-        def fake_sync_calendar(ctx: object, *, season: int) -> dict:
+        def fake_sync_calendar(ctx: object, *, season: int) -> dict[str, object]:
             return {"status": "completed"}
 
         hydrate_calls: list[int] = []
 
-        def fake_hydrate(ctx: object, *, session_key: int) -> dict:
+        def fake_hydrate(ctx: object, *, session_key: int) -> dict[str, object]:
             hydrate_calls.append(session_key)
             return {"status": "completed"}
 
@@ -664,10 +664,10 @@ class TestSweepPolymarketHistoricalPoles:
     ) -> None:
         session, context = build_context(tmp_path)
 
-        def fake_sync_catalog(ctx: object, **kwargs: object) -> dict:
+        def fake_sync_catalog(ctx: object, **kwargs: object) -> dict[str, object]:
             return {"markets": 5, "events": 2, "tokens": 10}
 
-        def fake_hydrate_history(ctx: object, **kwargs: object) -> dict:
+        def fake_hydrate_history(ctx: object, **kwargs: object) -> dict[str, object]:
             return {"markets_hydrated": 3, "records_written": 150}
 
         monkeypatch.setattr(

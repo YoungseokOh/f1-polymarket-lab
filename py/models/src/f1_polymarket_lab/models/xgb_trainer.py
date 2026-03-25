@@ -13,7 +13,11 @@ from typing import Any
 
 import numpy as np
 import polars as pl
-import xgboost as xgb
+
+try:
+    import xgboost as xgb
+except ModuleNotFoundError:
+    xgb = None
 
 # Feature columns expected in every snapshot parquet
 PACE_FEATURES = [
@@ -182,33 +186,72 @@ def train_one_split(
     if len(unique_groups) >= 2:
         last_group = unique_groups[-1]
         eval_mask = np.array([g == last_group for g in train_groups])
-        dtrain = xgb.DMatrix(X_train[~eval_mask], label=y_train[~eval_mask])
-        deval = xgb.DMatrix(X_train[eval_mask], label=y_train[eval_mask])
-        evals = [(dtrain, "train"), (deval, "eval")]
+        fit_X = X_train[~eval_mask]
+        fit_y = y_train[~eval_mask]
     else:
-        dtrain = xgb.DMatrix(X_train, label=y_train)
-        evals = [(dtrain, "train")]
+        fit_X = X_train
+        fit_y = y_train
 
-    booster = xgb.train(
-        cfg.xgb_params,
-        dtrain,
-        num_boost_round=cfg.num_boost_round,
-        evals=evals,
-        early_stopping_rounds=cfg.early_stopping_rounds if len(evals) > 1 else None,
-        verbose_eval=False,
-    )
+    backend = "xgboost"
+    if len(unique_groups) >= 2:
+        last_group = unique_groups[-1]
+        eval_mask = np.array([g == last_group for g in train_groups])
+    else:
+        eval_mask = np.zeros(len(train_groups), dtype=bool)
 
-    dtest = xgb.DMatrix(X_test)
-    raw_probs = booster.predict(dtest)
+    feature_importance: dict[str, float] | None = None
+    if xgb is not None:
+        if len(unique_groups) >= 2:
+            dtrain = xgb.DMatrix(fit_X, label=fit_y)
+            deval = xgb.DMatrix(X_train[eval_mask], label=y_train[eval_mask])
+            evals = [(dtrain, "train"), (deval, "eval")]
+        else:
+            dtrain = xgb.DMatrix(fit_X, label=fit_y)
+            evals = [(dtrain, "train")]
+
+        booster = xgb.train(
+            cfg.xgb_params,
+            dtrain,
+            num_boost_round=cfg.num_boost_round,
+            evals=evals,
+            early_stopping_rounds=cfg.early_stopping_rounds if len(evals) > 1 else None,
+            verbose_eval=False,
+        )
+
+        dtest = xgb.DMatrix(X_test)
+        raw_probs = booster.predict(dtest)
+        gain = booster.feature_importance(importance_type="gain").tolist()
+        feature_importance = dict(zip(feature_cols, gain, strict=True))
+    else:
+        backend = "numpy_fallback"
+        if "entry_yes_price" in feature_cols:
+            price_idx = feature_cols.index("entry_yes_price")
+            raw_probs = np.clip(X_test[:, price_idx].astype(np.float64), 0.0, 1.0)
+        else:
+            raw_probs = np.full(len(X_test), float(np.mean(fit_y)), dtype=np.float64)
 
     # Optional isotonic calibration using the training set
     if cfg.calibrate and len(X_train) >= cfg.min_train_rows:
-        from sklearn.isotonic import IsotonicRegression
-
-        train_preds = booster.predict(dtrain)
-        iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
-        iso.fit(train_preds, y_train[~eval_mask] if len(unique_groups) >= 2 else y_train)
-        raw_probs = iso.predict(raw_probs)
+        try:
+            from sklearn.isotonic import IsotonicRegression
+        except ModuleNotFoundError:
+            pass
+        else:
+            if xgb is not None:
+                train_preds = booster.predict(dtrain)
+            else:
+                if "entry_yes_price" in feature_cols:
+                    price_idx = feature_cols.index("entry_yes_price")
+                    train_preds = np.clip(
+                        fit_X[:, price_idx].astype(np.float64),
+                        0.0,
+                        1.0,
+                    )
+                else:
+                    train_preds = np.full(len(fit_y), float(np.mean(fit_y)), dtype=np.float64)
+            iso = IsotonicRegression(y_min=0.0, y_max=1.0, out_of_bounds="clip")
+            iso.fit(train_preds, fit_y)
+            raw_probs = iso.predict(raw_probs)
 
     prices = test_df["entry_yes_price"].to_numpy().astype(np.float32)
     metrics = _evaluate(y_test, raw_probs, prices, min_edge=min_edge)
@@ -239,7 +282,10 @@ def train_one_split(
         "min_edge": min_edge,
         "train_rows": len(X_train),
         "test_rows": len(X_test),
+        "backend": backend,
     }
+    if feature_importance is not None:
+        run_config["feature_importance"] = feature_importance
 
     return TrainResult(
         model_run_id=model_run_id,

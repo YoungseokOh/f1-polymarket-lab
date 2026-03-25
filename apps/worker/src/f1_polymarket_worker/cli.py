@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import typer
 from f1_polymarket_lab.common import get_settings
 from f1_polymarket_lab.storage.db import Base, build_engine, db_session
@@ -14,6 +16,7 @@ from f1_polymarket_worker.backtest import (
 from f1_polymarket_worker.demo_ingest import ingest_demo
 from f1_polymarket_worker.gp_registry import (
     GP_REGISTRY,
+    GPConfig,
     build_snapshot,
     generate_report,
     run_baseline,
@@ -388,7 +391,7 @@ def _register_gp_commands() -> None:
         code = gp.short_code.replace("_", "-")
 
         # -- build --
-        def _make_build(cfg=gp):  # noqa: B006
+        def _make_build(cfg: GPConfig = gp) -> Callable[..., None]:  # noqa: B006
             def _cmd(
                 meeting_key: int = typer.Option(cfg.meeting_key, "--meeting-key"),
                 season: int = typer.Option(cfg.season, "--season"),
@@ -413,7 +416,7 @@ def _register_gp_commands() -> None:
         app.command(f"build-{code}-snapshot")(_make_build())
 
         # -- run baseline --
-        def _make_run(cfg=gp):  # noqa: B006
+        def _make_run(cfg: GPConfig = gp) -> Callable[..., None]:  # noqa: B006
             def _cmd(
                 snapshot_id: str = typer.Option(..., "--snapshot-id"),
                 min_edge: float = typer.Option(cfg.min_edge, "--min-edge"),
@@ -431,7 +434,7 @@ def _register_gp_commands() -> None:
         app.command(f"run-{code}-baseline")(_make_run())
 
         # -- report --
-        def _make_report(cfg=gp):  # noqa: B006
+        def _make_report(cfg: GPConfig = gp) -> Callable[..., None]:  # noqa: B006
             def _cmd(
                 snapshot_id: str = typer.Option(..., "--snapshot-id"),
                 report_slug: str | None = typer.Option(None, "--report-slug"),
@@ -454,7 +457,7 @@ def _register_gp_commands() -> None:
         app.command(f"report-{code}-quicktest")(_make_report())
 
         # -- paper trade (build + baseline + paper trade in one shot) --
-        def _make_paper_trade(cfg=gp):  # noqa: B006
+        def _make_paper_trade(cfg: GPConfig = gp) -> Callable[..., None]:  # noqa: B006
             def _cmd(
                 snapshot_id: str | None = typer.Option(
                     None,

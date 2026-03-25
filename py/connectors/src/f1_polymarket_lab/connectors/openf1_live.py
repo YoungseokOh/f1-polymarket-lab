@@ -10,9 +10,9 @@ from typing import Any
 from .openf1 import OpenF1Connector
 
 
-def _mqtt():  # noqa: ANN202
+def _mqtt() -> Any:
     try:
-        import paho.mqtt.client as mqtt  # type: ignore[import-untyped]
+        import paho.mqtt.client as mqtt
     except ModuleNotFoundError as exc:
         msg = "paho-mqtt is required for OpenF1LiveConnector – pip install paho-mqtt"
         raise ImportError(msg) from exc

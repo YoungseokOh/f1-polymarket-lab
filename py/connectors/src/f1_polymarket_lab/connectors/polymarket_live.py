@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from typing import Any
 
 
-def _ws_connect():  # noqa: ANN202
+def _ws_connect() -> Any:
     try:
-        from websockets.asyncio.client import connect  # type: ignore[import-untyped]
+        from websockets.asyncio.client import connect
     except ModuleNotFoundError as exc:
         msg = "websockets is required for PolymarketLiveConnector – pip install websockets"
         raise ImportError(msg) from exc

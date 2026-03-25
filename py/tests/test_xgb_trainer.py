@@ -96,7 +96,7 @@ class TestEvaluate:
 def _make_snapshot_df(meeting_key: int, n_drivers: int = 10) -> pl.DataFrame:
     """Build a synthetic snapshot DataFrame."""
     rng = np.random.default_rng(seed=meeting_key)
-    rows: list[dict] = []
+    rows: list[dict[str, object]] = []
     event_id = f"event-{meeting_key}"
     winner_idx = rng.integers(0, n_drivers)
     for i in range(n_drivers):

@@ -143,7 +143,7 @@ def rolling_cross_gp_features(df: pl.DataFrame, window: int = 3) -> pl.DataFrame
         new_cols.append(
             pl.col(col)
             .cast(pl.Float64)
-            .rolling_mean(window_size=window, min_periods=1)
+            .rolling_mean(window_size=window, min_samples=1)
             .over("driver_id")
             .alias(alias)
         )
