@@ -34,6 +34,6 @@ Use this skill for storage and ingestion changes.
 ## Validation
 
 - `uv run ruff check .`
-- `uv run mypy apps py tests`
+- `uv run mypy apps py`
 - `uv run pytest`
 - `uv run alembic upgrade head` when models or migrations change

@@ -8,6 +8,20 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 
+def _dedupe_records(
+    records: Sequence[dict[str, Any]],
+    *,
+    conflict_keys: Sequence[str],
+) -> list[dict[str, Any]]:
+    deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for record in records:
+        key = tuple(record[column] for column in conflict_keys)
+        if key in deduped:
+            deduped.pop(key)
+        deduped[key] = record
+    return list(deduped.values())
+
+
 def _fallback_upsert(
     session: Session,
     model: type[Any],
@@ -48,6 +62,9 @@ def upsert_records(
     conflict_keys = list(conflict_columns or [column.name for column in mapper.primary_key])
     if not conflict_keys:
         _fallback_upsert(session, model, payload, primary_key=primary_key)
+        return
+    payload = _dedupe_records(payload, conflict_keys=conflict_keys)
+    if not payload:
         return
 
     parameter_budget = 60000

@@ -30,7 +30,7 @@ and Claude, and the tool-specific directories should point to that shared source
 - Demo ingest: `make ingest-demo`
 - API: `make api`
 - Web: `make web`
-- Python checks: `uv run ruff check .`, `uv run mypy apps py tests`, `uv run pytest`
+- Python checks: `uv run ruff check .`, `uv run mypy apps py`, `uv run pytest`
 - JS/TS checks: `pnpm lint`, `pnpm typecheck`, `pnpm test`
 
 ## Git and commits

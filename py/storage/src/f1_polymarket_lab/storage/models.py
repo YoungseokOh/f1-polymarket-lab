@@ -883,7 +883,7 @@ class DatasetVersionManifest(Base):
 class FeatureRegistry(Base):
     __tablename__ = "feature_registry"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    id: Mapped[str] = mapped_column(String(512), primary_key=True, default=uuid_str)
     feature_name: Mapped[str] = mapped_column(String(255), unique=True)
     feature_group: Mapped[str] = mapped_column(String(128))
     description: Mapped[str | None] = mapped_column(Text, nullable=True)

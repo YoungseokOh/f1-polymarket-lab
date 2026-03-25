@@ -75,7 +75,7 @@ test:
 
 typecheck:
 	pnpm typecheck
-	uv run mypy apps py py/tests
+	uv run mypy apps py
 
 format:
 	pnpm format
