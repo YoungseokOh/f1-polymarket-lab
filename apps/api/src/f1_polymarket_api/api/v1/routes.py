@@ -7,6 +7,7 @@ from f1_polymarket_api.schemas import (
     BacktestResultResponse,
     CursorStateResponse,
     DataQualityResultResponse,
+    DriverAffinityReportResponse,
     EntityMappingResponse,
     F1DriverResponse,
     F1MeetingResponse,
@@ -122,6 +123,10 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
         primary_action_cta=payload["primary_action_cta"],
         explanation=payload["explanation"],
     )
+
+
+def _driver_affinity_report_response(payload: dict[str, Any]) -> DriverAffinityReportResponse:
+    return DriverAffinityReportResponse.model_validate(payload)
 
 
 @router.get("/freshness", response_model=list[FreshnessResponse])
@@ -441,6 +446,28 @@ def weekend_cockpit_status(
             )
         )
     except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/driver-affinity", response_model=DriverAffinityReportResponse)
+def driver_affinity_report(
+    season: int = Query(2026),
+    meeting_key: int | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> DriverAffinityReportResponse:
+    from f1_polymarket_worker.driver_affinity import get_driver_affinity_report
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        payload = get_driver_affinity_report(
+            PipelineContext(db=db, execute=False),
+            season=season,
+            meeting_key=meeting_key,
+        )
+        return _driver_affinity_report_response(payload)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 

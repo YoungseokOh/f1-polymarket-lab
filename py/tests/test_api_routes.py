@@ -425,3 +425,120 @@ def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
 
     assert response.status_code == 409
     assert "FP1 ends at 2026-03-27T03:30:00+00:00" in response.text
+
+
+def test_driver_affinity_report_endpoint_serializes_worker_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.driver_affinity.get_driver_affinity_report",
+        lambda *args, **kwargs: {
+            "season": 2026,
+            "meeting_key": 1281,
+            "meeting": {
+                "id": "meeting:1281",
+                "meeting_key": 1281,
+                "season": 2026,
+                "round_number": 3,
+                "meeting_name": "Japanese Grand Prix",
+                "circuit_short_name": "Suzuka",
+                "country_name": "Japan",
+                "location": "Suzuka",
+                "start_date_utc": "2026-03-27T02:30:00Z",
+                "end_date_utc": "2026-03-29T07:00:00Z",
+            },
+            "computed_at_utc": "2026-03-27T08:45:00Z",
+            "as_of_utc": "2026-03-27T08:45:00Z",
+            "lookback_start_season": 2024,
+            "session_code_weights": {"Q": 1.0, "FP3": 0.8, "FP2": 0.6, "FP1": 0.4},
+            "season_weights": {"2026": 1.0, "2025": 0.65, "2024": 0.4},
+            "track_weights": {
+                "s1_fraction": 0.35,
+                "s2_fraction": 0.44,
+                "s3_fraction": 0.21,
+            },
+            "source_session_codes_included": ["FP1", "FP2"],
+            "source_max_session_end_utc": "2026-03-27T07:00:00Z",
+            "latest_ended_relevant_session_code": "FP2",
+            "latest_ended_relevant_session_end_utc": "2026-03-27T07:00:00Z",
+            "entry_count": 1,
+            "is_fresh": True,
+            "stale_reason": None,
+            "entries": [
+                {
+                    "canonical_driver_key": "lando norris",
+                    "display_driver_id": "driver:1",
+                    "display_name": "Lando NORRIS",
+                    "display_broadcast_name": "L NORRIS",
+                    "driver_number": 1,
+                    "team_id": "team:mclaren",
+                    "team_name": "McLaren",
+                    "country_code": "GBR",
+                    "headshot_url": None,
+                    "rank": 1,
+                    "affinity_score": 1.23,
+                    "s1_strength": 1.0,
+                    "s2_strength": 1.2,
+                    "s3_strength": 1.1,
+                    "track_s1_fraction": 0.35,
+                    "track_s2_fraction": 0.44,
+                    "track_s3_fraction": 0.21,
+                    "contributing_session_count": 6,
+                    "contributing_session_codes": ["Q", "FP2"],
+                    "latest_contributing_session_code": "FP2",
+                    "latest_contributing_session_end_utc": "2026-03-27T07:00:00Z",
+                }
+            ],
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/driver-affinity",
+            params={"season": 2026, "meeting_key": 1281},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meeting_key"] == 1281
+    assert payload["is_fresh"] is True
+    assert payload["entries"][0]["display_name"] == "Lando NORRIS"
+
+
+def test_refresh_driver_affinity_endpoint_returns_blocked_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.driver_affinity.refresh_driver_affinity",
+        lambda *args, **kwargs: {
+            "action": "refresh-driver-affinity",
+            "status": "blocked",
+            "message": (
+                "Driver affinity needs newer ended session data, "
+                "but OpenF1 credentials are missing."
+            ),
+            "season": 2026,
+            "meeting_key": 1281,
+            "computed_at_utc": None,
+            "source_max_session_end_utc": "2026-03-27T07:00:00Z",
+            "hydrated_session_keys": [],
+            "report": None,
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/refresh-driver-affinity",
+            json={"season": 2026, "meeting_key": 1281},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "blocked"
+    assert payload["meeting_key"] == 1281

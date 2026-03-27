@@ -20,6 +20,8 @@ class OpenF1Connector:
 
     def __init__(self) -> None:
         self.client = httpx.Client(timeout=30.0, headers={"User-Agent": "f1-polymarket-lab/0.1.0"})
+        self._access_token: str | None = None
+        self._access_token_expiry_monotonic: float = 0.0
         self._configure_limits()
 
     @classmethod
@@ -63,11 +65,52 @@ class OpenF1Connector:
         allow_404: bool = False,
     ) -> list[dict[str, Any]]:
         self._throttle()
-        response = self.client.get(f"{self.base_url}/{path}", params=params)
+        response = self.client.get(
+            f"{self.base_url}/{path}",
+            params=params,
+            headers=self._auth_headers(),
+        )
+        if response.status_code == 401 and self._can_authenticate():
+            self._invalidate_access_token()
+            response = self.client.get(
+                f"{self.base_url}/{path}",
+                params=params,
+                headers=self._auth_headers(),
+            )
         if allow_404 and response.status_code == 404:
             return []
         response.raise_for_status()
         return list(response.json())
+
+    def _can_authenticate(self) -> bool:
+        settings = get_settings()
+        return bool(settings.openf1_username and settings.openf1_password)
+
+    def _invalidate_access_token(self) -> None:
+        self._access_token = None
+        self._access_token_expiry_monotonic = 0.0
+
+    def _auth_headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {}
+        token = self._access_token_or_none()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
+
+    def _access_token_or_none(self) -> str | None:
+        settings = get_settings()
+        if not settings.openf1_username or not settings.openf1_password:
+            return None
+        now = time.monotonic()
+        if self._access_token and now < self._access_token_expiry_monotonic:
+            return self._access_token
+        token = self.fetch_access_token(
+            username=settings.openf1_username,
+            password=settings.openf1_password,
+        )
+        self._access_token = token
+        self._access_token_expiry_monotonic = now + 3300.0
+        return token
 
     @retry(wait=wait_exponential(min=2, max=30), stop=stop_after_attempt(5), reraise=True)
     def fetch_access_token(self, *, username: str, password: str) -> str:

@@ -96,9 +96,9 @@ describe("sdk", () => {
           market_taxonomy: "driver_pole_position",
           stage_rank: 0,
           stage_label: "Pre-Weekend -> Q",
-          display_label: "예선 시장 사전 준비",
+          display_label: "Prepare Qualifying markets before practice",
           display_description:
-            "연습주행 전 정보만으로 예선 관련 시장을 먼저 살펴보는 단계입니다.",
+            "Review Qualifying markets before practice sessions begin.",
         },
         available_configs: [
           {
@@ -112,9 +112,9 @@ describe("sdk", () => {
             market_taxonomy: "driver_pole_position",
             stage_rank: 0,
             stage_label: "Pre-Weekend -> Q",
-            display_label: "예선 시장 사전 준비",
+            display_label: "Prepare Qualifying markets before practice",
             display_description:
-              "연습주행 전 정보만으로 예선 관련 시장을 먼저 살펴보는 단계입니다.",
+              "Review Qualifying markets before practice sessions begin.",
           },
         ],
         meeting: {
@@ -159,25 +159,26 @@ describe("sdk", () => {
         steps: [
           {
             key: "sync_calendar",
-            label: "주말 일정 확인",
+            label: "Load weekend schedule",
             status: "completed",
-            detail: "이번 그랑프리 일정과 필요한 세션 정보를 불러왔습니다.",
+            detail:
+              "Loaded the Grand Prix schedule and the sessions required for this stage.",
             session_code: null,
             session_key: null,
             count: null,
             reason_code: "already_loaded",
             actionable_after_utc: null,
-            resource_label: "주말 일정",
+            resource_label: "Weekend schedule",
           },
         ],
         blockers: [],
         ready_to_run: true,
-        primary_action_title: "예선 시장 사전 준비 시작",
+        primary_action_title: "Prepare Qualifying markets",
         primary_action_description:
-          "버튼을 누르면 예선 관련 시장 준비와 페이퍼 트레이딩 준비를 순서대로 진행합니다.",
-        primary_action_cta: "예선 시장 준비 실행",
+          "This will discover Qualifying markets first, then continue into paper trading.",
+        primary_action_cta: "Find Qualifying markets",
         explanation:
-          "이 단계는 연습주행 전 정보를 바탕으로 예선 관련 시장을 미리 살펴보는 단계입니다.",
+          "This stage reviews pre-practice information to prepare Qualifying markets.",
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -197,8 +198,8 @@ describe("sdk", () => {
         readyToRun: true,
         focusStatus: "upcoming",
         timelineActiveCode: "Q",
-        primaryActionTitle: "예선 시장 사전 준비 시작",
-        primaryActionCta: "예선 시장 준비 실행",
+        primaryActionTitle: "Prepare Qualifying markets",
+        primaryActionCta: "Find Qualifying markets",
         targetSession: expect.objectContaining({
           sessionCode: "Q",
         }),
@@ -206,10 +207,147 @@ describe("sdk", () => {
           expect.objectContaining({
             key: "sync_calendar",
             status: "completed",
-            resourceLabel: "주말 일정",
+            resourceLabel: "Weekend schedule",
           }),
         ],
       }),
     );
+  });
+
+  it("serializes driver affinity queries and maps the report payload", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        season: 2026,
+        meeting_key: 1281,
+        meeting: {
+          id: "meeting:1281",
+          meeting_key: 1281,
+          season: 2026,
+          round_number: 3,
+          meeting_name: "Japanese Grand Prix",
+          circuit_short_name: "Suzuka",
+          country_name: "Japan",
+          location: "Suzuka",
+          start_date_utc: "2026-03-27T02:30:00Z",
+          end_date_utc: "2026-03-29T07:00:00Z",
+        },
+        computed_at_utc: "2026-03-27T08:45:00Z",
+        as_of_utc: "2026-03-27T08:45:00Z",
+        lookback_start_season: 2024,
+        session_code_weights: { Q: 1.0, FP3: 0.8, FP2: 0.6, FP1: 0.4 },
+        season_weights: { 2026: 1.0, 2025: 0.65, 2024: 0.4 },
+        track_weights: {
+          s1_fraction: 0.35,
+          s2_fraction: 0.44,
+          s3_fraction: 0.21,
+        },
+        source_session_codes_included: ["FP1", "FP2"],
+        source_max_session_end_utc: "2026-03-27T07:00:00Z",
+        latest_ended_relevant_session_code: "FP2",
+        latest_ended_relevant_session_end_utc: "2026-03-27T07:00:00Z",
+        entry_count: 1,
+        is_fresh: true,
+        stale_reason: null,
+        entries: [
+          {
+            canonical_driver_key: "lando norris",
+            display_driver_id: "driver:1",
+            display_name: "Lando NORRIS",
+            display_broadcast_name: "L NORRIS",
+            driver_number: 1,
+            team_id: "team:mclaren",
+            team_name: "McLaren",
+            country_code: "GBR",
+            headshot_url: null,
+            rank: 1,
+            affinity_score: 1.23,
+            s1_strength: 1.0,
+            s2_strength: 1.2,
+            s3_strength: 1.1,
+            track_s1_fraction: 0.35,
+            track_s2_fraction: 0.44,
+            track_s3_fraction: 0.21,
+            contributing_session_count: 6,
+            contributing_session_codes: ["Q", "FP2"],
+            latest_contributing_session_code: "FP2",
+            latest_contributing_session_end_utc: "2026-03-27T07:00:00Z",
+          },
+        ],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const report = await sdk.driverAffinity(2026, 1281);
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/driver-affinity?season=2026&meeting_key=1281",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(report).toEqual(
+      expect.objectContaining({
+        meetingKey: 1281,
+        isFresh: true,
+        sourceSessionCodesIncluded: ["FP1", "FP2"],
+        entries: [
+          expect.objectContaining({
+            canonicalDriverKey: "lando norris",
+            displayName: "Lando NORRIS",
+            teamName: "McLaren",
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("posts driver affinity refresh requests and maps the response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "refresh-driver-affinity",
+        status: "blocked",
+        message:
+          "Driver affinity needs newer ended session data, but OpenF1 credentials are missing.",
+        season: 2026,
+        meeting_key: 1281,
+        computed_at_utc: null,
+        source_max_session_end_utc: "2026-03-27T07:00:00Z",
+        hydrated_session_keys: [],
+        report: null,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await sdk.refreshDriverAffinity({
+      season: 2026,
+      meeting_key: 1281,
+      force: true,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/refresh-driver-affinity",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          season: 2026,
+          meeting_key: 1281,
+          force: true,
+        }),
+      }),
+    );
+    expect(response).toEqual({
+      action: "refresh-driver-affinity",
+      status: "blocked",
+      message:
+        "Driver affinity needs newer ended session data, but OpenF1 credentials are missing.",
+      season: 2026,
+      meetingKey: 1281,
+      computedAtUtc: null,
+      sourceMaxSessionEndUtc: "2026-03-27T07:00:00Z",
+      hydratedSessionKeys: [],
+      report: null,
+    });
   });
 });

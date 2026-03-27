@@ -11,9 +11,15 @@ def test_optional_openf1_dataset_returns_empty_list_on_404(
 ) -> None:
     connector = OpenF1Connector()
 
-    def fake_get(url: str, *, params: dict[str, int]) -> httpx.Response:
+    def fake_get(
+        url: str,
+        *,
+        params: dict[str, int],
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         assert url.endswith("/intervals")
         assert params == {"session_key": 9222}
+        assert headers == {}
         return httpx.Response(
             404,
             request=httpx.Request("GET", url, params=params),
@@ -29,9 +35,15 @@ def test_session_core_dataset_returns_empty_list_on_404(
 ) -> None:
     connector = OpenF1Connector()
 
-    def fake_get(url: str, *, params: dict[str, int]) -> httpx.Response:
+    def fake_get(
+        url: str,
+        *,
+        params: dict[str, int],
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
         assert url.endswith("/drivers")
         assert params == {"session_key": 9079}
+        assert headers == {}
         return httpx.Response(
             404,
             request=httpx.Request("GET", url, params=params),
@@ -47,7 +59,13 @@ def test_required_openf1_dataset_still_raises_on_404(
 ) -> None:
     connector = OpenF1Connector()
 
-    def fake_get(url: str, *, params: dict[str, int]) -> httpx.Response:
+    def fake_get(
+        url: str,
+        *,
+        params: dict[str, int],
+        headers: dict[str, str] | None = None,
+    ) -> httpx.Response:
+        assert headers == {}
         return httpx.Response(
             404,
             request=httpx.Request("GET", url, params=params),
@@ -70,5 +88,42 @@ def test_openf1_connector_reads_configured_throttle_limits(
 
     assert connector._max_requests_per_minute == 18
     assert connector._max_requests_per_second == 1
+
+    get_settings.cache_clear()
+
+
+def test_openf1_connector_uses_bearer_token_when_credentials_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("OPENF1_USERNAME", "user@example.com")
+    monkeypatch.setenv("OPENF1_PASSWORD", "secret")
+
+    connector = OpenF1Connector()
+
+    monkeypatch.setattr(
+        connector,
+        "fetch_access_token",
+        lambda **kwargs: "token-123",
+    )
+
+    def fake_get(
+        url: str,
+        *,
+        params: dict[str, int],
+        headers: dict[str, str],
+    ) -> httpx.Response:
+        assert url.endswith("/sessions")
+        assert params == {"year": 2026}
+        assert headers["Authorization"] == "Bearer token-123"
+        return httpx.Response(
+            200,
+            request=httpx.Request("GET", url, params=params, headers=headers),
+            json=[{"session_key": 1}],
+        )
+
+    monkeypatch.setattr(connector.client, "get", fake_get)
+
+    assert connector.fetch_sessions(2026) == [{"session_key": 1}]
 
     get_settings.cache_clear()

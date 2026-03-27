@@ -1427,6 +1427,7 @@ def _build_session_to_target_snapshot(
         db=ctx.db,
         circuit_key=getattr(meeting, "circuit_key", None),
         circuit_short_name=getattr(meeting, "circuit_short_name", None),
+        as_of_utc=entry_floor,
     )
 
     snapshot_id = stable_uuid(config.snapshot_type, meeting_key, season, entry_offset_min, "v1")
@@ -1729,6 +1730,7 @@ def _build_pre_weekend_snapshot(
         db=ctx.db,
         circuit_key=getattr(meeting, "circuit_key", None),
         circuit_short_name=getattr(meeting, "circuit_short_name", None),
+        as_of_utc=entry_floor,
     )
     enriched_rows = _enrich_snapshot_probabilities(rows)
 

@@ -308,6 +308,50 @@ class WeekendCockpitStatusResponse(BaseModel):
     explanation: str
 
 
+class DriverAffinityEntryResponse(BaseModel):
+    canonical_driver_key: str
+    display_driver_id: str | None = None
+    display_name: str
+    display_broadcast_name: str | None = None
+    driver_number: int | None = None
+    team_id: str | None = None
+    team_name: str | None = None
+    country_code: str | None = None
+    headshot_url: str | None = None
+    rank: int
+    affinity_score: float
+    s1_strength: float
+    s2_strength: float
+    s3_strength: float
+    track_s1_fraction: float
+    track_s2_fraction: float
+    track_s3_fraction: float
+    contributing_session_count: int
+    contributing_session_codes: list[str]
+    latest_contributing_session_code: str | None = None
+    latest_contributing_session_end_utc: datetime | None = None
+
+
+class DriverAffinityReportResponse(BaseModel):
+    season: int
+    meeting_key: int
+    meeting: F1MeetingResponse
+    computed_at_utc: datetime
+    as_of_utc: datetime
+    lookback_start_season: int
+    session_code_weights: dict[str, float]
+    season_weights: dict[str, float]
+    track_weights: dict[str, float]
+    source_session_codes_included: list[str]
+    source_max_session_end_utc: datetime | None
+    latest_ended_relevant_session_code: str | None = None
+    latest_ended_relevant_session_end_utc: datetime | None = None
+    entry_count: int
+    is_fresh: bool
+    stale_reason: str | None = None
+    entries: list[DriverAffinityEntryResponse]
+
+
 class RunWeekendCockpitRequest(BaseModel):
     gp_short_code: str | None = None
     baseline: str = "hybrid"
@@ -327,6 +371,24 @@ class RunWeekendCockpitResponse(BaseModel):
     pt_session_id: str | None
     executed_steps: list[WeekendCockpitStepResponse]
     details: dict[str, object] | None = None
+
+
+class RefreshDriverAffinityRequest(BaseModel):
+    season: int = 2026
+    meeting_key: int | None = None
+    force: bool = False
+
+
+class RefreshDriverAffinityResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    season: int
+    meeting_key: int
+    computed_at_utc: datetime | None
+    source_max_session_end_utc: datetime | None
+    hydrated_session_keys: list[int]
+    report: DriverAffinityReportResponse | None = None
 
 
 class PaperTradePositionResponse(BaseModel):

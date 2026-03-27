@@ -3,6 +3,8 @@ import type {
   ActionStatusResponse,
   ApiHealth,
   BacktestResult,
+  DriverAffinityEntry,
+  DriverAffinityReport,
   EntityMapping,
   F1Driver,
   F1Meeting,
@@ -20,6 +22,8 @@ import type {
   PolymarketEvent,
   PolymarketMarket,
   PricePoint,
+  RefreshDriverAffinityRequest,
+  RefreshDriverAffinityResponse,
   RunBacktestRequest,
   RunPaperTradeRequest,
   RunWeekendCockpitRequest,
@@ -423,6 +427,21 @@ export const sdk = {
       "/api/v1/actions/run-weekend-cockpit",
       body ?? {},
     ).then(mapRunWeekendCockpitResponse),
+  driverAffinity: async (
+    season = 2026,
+    meetingKey?: number,
+  ): Promise<DriverAffinityReport> => {
+    const record = await apiGet<DriverAffinityReportApi>("/api/v1/driver-affinity", {
+      season,
+      meeting_key: meetingKey,
+    });
+    return mapDriverAffinityReport(record);
+  },
+  refreshDriverAffinity: (body?: RefreshDriverAffinityRequest) =>
+    apiPost<RefreshDriverAffinityRequest, RefreshDriverAffinityResponseApi>(
+      "/api/v1/actions/refresh-driver-affinity",
+      body ?? {},
+    ).then(mapRefreshDriverAffinityResponse),
 
   // Paper trading
   paperTradeSessions: async (gpSlug?: string): Promise<PaperTradeSession[]> => {
@@ -700,6 +719,62 @@ type RunWeekendCockpitResponseApi = {
   details: Record<string, unknown> | null;
 };
 
+type DriverAffinityEntryApi = {
+  canonical_driver_key: string;
+  display_driver_id: string | null;
+  display_name: string;
+  display_broadcast_name: string | null;
+  driver_number: number | null;
+  team_id: string | null;
+  team_name: string | null;
+  country_code: string | null;
+  headshot_url: string | null;
+  rank: number;
+  affinity_score: number;
+  s1_strength: number;
+  s2_strength: number;
+  s3_strength: number;
+  track_s1_fraction: number;
+  track_s2_fraction: number;
+  track_s3_fraction: number;
+  contributing_session_count: number;
+  contributing_session_codes: string[];
+  latest_contributing_session_code: string | null;
+  latest_contributing_session_end_utc: string | null;
+};
+
+type DriverAffinityReportApi = {
+  season: number;
+  meeting_key: number;
+  meeting: F1MeetingApi;
+  computed_at_utc: string;
+  as_of_utc: string;
+  lookback_start_season: number;
+  session_code_weights: Record<string, number>;
+  season_weights: Record<string, number>;
+  track_weights: Record<string, number>;
+  source_session_codes_included: string[];
+  source_max_session_end_utc: string | null;
+  latest_ended_relevant_session_code: string | null;
+  latest_ended_relevant_session_end_utc: string | null;
+  entry_count: number;
+  is_fresh: boolean;
+  stale_reason: string | null;
+  entries: DriverAffinityEntryApi[];
+};
+
+type RefreshDriverAffinityResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  season: number;
+  meeting_key: number;
+  computed_at_utc: string | null;
+  source_max_session_end_utc: string | null;
+  hydrated_session_keys: number[];
+  report: DriverAffinityReportApi | null;
+};
+
 function mapPaperTradeSession(record: PaperTradeSessionApi): PaperTradeSession {
   return {
     id: record.id,
@@ -796,5 +871,74 @@ function mapRunWeekendCockpitResponse(
     ptSessionId: record.pt_session_id,
     executedSteps: record.executed_steps.map(mapWeekendCockpitStep),
     details: record.details,
+  };
+}
+
+function mapDriverAffinityEntry(
+  record: DriverAffinityEntryApi,
+): DriverAffinityEntry {
+  return {
+    canonicalDriverKey: record.canonical_driver_key,
+    displayDriverId: record.display_driver_id,
+    displayName: record.display_name,
+    displayBroadcastName: record.display_broadcast_name,
+    driverNumber: record.driver_number,
+    teamId: record.team_id,
+    teamName: record.team_name,
+    countryCode: record.country_code,
+    headshotUrl: record.headshot_url,
+    rank: record.rank,
+    affinityScore: record.affinity_score,
+    s1Strength: record.s1_strength,
+    s2Strength: record.s2_strength,
+    s3Strength: record.s3_strength,
+    trackS1Fraction: record.track_s1_fraction,
+    trackS2Fraction: record.track_s2_fraction,
+    trackS3Fraction: record.track_s3_fraction,
+    contributingSessionCount: record.contributing_session_count,
+    contributingSessionCodes: record.contributing_session_codes,
+    latestContributingSessionCode: record.latest_contributing_session_code,
+    latestContributingSessionEndUtc: record.latest_contributing_session_end_utc,
+  };
+}
+
+function mapDriverAffinityReport(
+  record: DriverAffinityReportApi,
+): DriverAffinityReport {
+  return {
+    season: record.season,
+    meetingKey: record.meeting_key,
+    meeting: mapMeeting(record.meeting),
+    computedAtUtc: record.computed_at_utc,
+    asOfUtc: record.as_of_utc,
+    lookbackStartSeason: record.lookback_start_season,
+    sessionCodeWeights: record.session_code_weights,
+    seasonWeights: record.season_weights,
+    trackWeights: record.track_weights,
+    sourceSessionCodesIncluded: record.source_session_codes_included,
+    sourceMaxSessionEndUtc: record.source_max_session_end_utc,
+    latestEndedRelevantSessionCode: record.latest_ended_relevant_session_code,
+    latestEndedRelevantSessionEndUtc:
+      record.latest_ended_relevant_session_end_utc,
+    entryCount: record.entry_count,
+    isFresh: record.is_fresh,
+    staleReason: record.stale_reason,
+    entries: record.entries.map(mapDriverAffinityEntry),
+  };
+}
+
+function mapRefreshDriverAffinityResponse(
+  record: RefreshDriverAffinityResponseApi,
+): RefreshDriverAffinityResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    season: record.season,
+    meetingKey: record.meeting_key,
+    computedAtUtc: record.computed_at_utc,
+    sourceMaxSessionEndUtc: record.source_max_session_end_utc,
+    hydratedSessionKeys: record.hydrated_session_keys,
+    report: record.report ? mapDriverAffinityReport(record.report) : null,
   };
 }

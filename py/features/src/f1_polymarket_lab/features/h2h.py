@@ -15,9 +15,11 @@ from __future__ import annotations
 
 import math
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 from f1_polymarket_lab.features.driver_profile import (
+    build_driver_identity_map,
     compute_driver_sector_profiles,
     compute_driver_track_affinity,
     compute_track_sector_weights,
@@ -85,6 +87,7 @@ def compute_h2h_signals(
     circuit_key: int | None = None,
     circuit_short_name: str | None = None,
     min_edge: float = 0.05,
+    as_of_utc: datetime | None = None,
 ) -> list[dict[str, Any]]:
     """Return H2H market signals for a given session.
 
@@ -101,11 +104,21 @@ def compute_h2h_signals(
     """
     name_map = build_driver_name_map(db, season=2026)
     team_map = build_team_map(db, season=2026)
+    identity_map = build_driver_identity_map(db)
 
     # Driver affinity profiles for this circuit
-    profiles = compute_driver_sector_profiles(db, circuit_key=circuit_key)
+    profiles = compute_driver_sector_profiles(
+        db,
+        circuit_key=circuit_key,
+        circuit_short_name=circuit_short_name,
+        as_of_utc=as_of_utc,
+    )
     weights: dict[str, float] = (
-        compute_track_sector_weights(db, circuit_short_name=circuit_short_name)
+        compute_track_sector_weights(
+            db,
+            circuit_short_name=circuit_short_name,
+            as_of_utc=as_of_utc,
+        )
         if circuit_short_name
         else {"s1_fraction": 1 / 3, "s2_fraction": 1 / 3, "s3_fraction": 1 / 3}
     )
@@ -113,7 +126,8 @@ def compute_h2h_signals(
     def _affinity(driver_id: str | None) -> float:
         if not driver_id:
             return 0.0
-        profile = profiles.get(driver_id)
+        driver_identity = identity_map.get(driver_id, driver_id)
+        profile = profiles.get(driver_identity)
         if profile is None:
             return 0.0
         return float(

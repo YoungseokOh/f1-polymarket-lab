@@ -260,6 +260,50 @@ export interface WeekendCockpitStatus {
   explanation: string;
 }
 
+export interface DriverAffinityEntry {
+  canonicalDriverKey: string;
+  displayDriverId: string | null;
+  displayName: string;
+  displayBroadcastName: string | null;
+  driverNumber: number | null;
+  teamId: string | null;
+  teamName: string | null;
+  countryCode: string | null;
+  headshotUrl: string | null;
+  rank: number;
+  affinityScore: number;
+  s1Strength: number;
+  s2Strength: number;
+  s3Strength: number;
+  trackS1Fraction: number;
+  trackS2Fraction: number;
+  trackS3Fraction: number;
+  contributingSessionCount: number;
+  contributingSessionCodes: string[];
+  latestContributingSessionCode: string | null;
+  latestContributingSessionEndUtc: string | null;
+}
+
+export interface DriverAffinityReport {
+  season: number;
+  meetingKey: number;
+  meeting: F1Meeting;
+  computedAtUtc: string;
+  asOfUtc: string;
+  lookbackStartSeason: number;
+  sessionCodeWeights: Record<string, number>;
+  seasonWeights: Record<string, number>;
+  trackWeights: Record<string, number>;
+  sourceSessionCodesIncluded: string[];
+  sourceMaxSessionEndUtc: string | null;
+  latestEndedRelevantSessionCode: string | null;
+  latestEndedRelevantSessionEndUtc: string | null;
+  entryCount: number;
+  isFresh: boolean;
+  staleReason: string | null;
+  entries: DriverAffinityEntry[];
+}
+
 export interface PaperTradeSession {
   id: string;
   gpSlug: string;
@@ -318,4 +362,22 @@ export interface RunWeekendCockpitResponse {
   ptSessionId: string | null;
   executedSteps: WeekendCockpitStep[];
   details?: Record<string, unknown> | null;
+}
+
+export interface RefreshDriverAffinityRequest {
+  season?: number;
+  meeting_key?: number | null;
+  force?: boolean;
+}
+
+export interface RefreshDriverAffinityResponse {
+  action: string;
+  status: string;
+  message: string;
+  season: number;
+  meetingKey: number;
+  computedAtUtc: string | null;
+  sourceMaxSessionEndUtc: string | null;
+  hydratedSessionKeys: number[];
+  report: DriverAffinityReport | null;
 }

@@ -6,6 +6,8 @@ from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
     IngestDemoRequest,
+    RefreshDriverAffinityRequest,
+    RefreshDriverAffinityResponse,
     RunBacktestRequest,
     RunPaperTradeRequest,
     RunWeekendCockpitRequest,
@@ -248,4 +250,32 @@ def action_run_weekend_cockpit(
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         log.exception("run-weekend-cockpit failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post(
+    "/actions/refresh-driver-affinity",
+    response_model=RefreshDriverAffinityResponse,
+)
+def action_refresh_driver_affinity(
+    body: RefreshDriverAffinityRequest,
+    db: Session = Depends(get_db_session),
+) -> RefreshDriverAffinityResponse:
+    from f1_polymarket_worker.driver_affinity import refresh_driver_affinity
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = refresh_driver_affinity(
+            ctx,
+            season=body.season,
+            meeting_key=body.meeting_key,
+            force=body.force,
+        )
+        db.commit()
+        return RefreshDriverAffinityResponse.model_validate(result)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("refresh-driver-affinity failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

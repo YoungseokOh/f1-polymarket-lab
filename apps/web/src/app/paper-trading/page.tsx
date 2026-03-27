@@ -1,8 +1,14 @@
-import type { PaperTradePosition, PaperTradeSession } from "@f1/shared-types";
+import type {
+  DriverAffinityReport,
+  PaperTradePosition,
+  PaperTradeSession,
+  RefreshDriverAffinityResponse,
+} from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Panel, StatCard } from "@f1/ui";
 import { PageStatusBanner } from "../../components/page-status-banner";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { DriverAffinitySummary } from "../_components/driver-affinity-summary";
 import { WeekendCockpitPanel } from "../_components/weekend-cockpit-panel";
 
 export const revalidate = 60;
@@ -30,6 +36,13 @@ function fmtDateTime(value: string) {
     minute: "2-digit",
     hour12: false,
   });
+}
+
+function affinityRefreshMessage(
+  response: RefreshDriverAffinityResponse | null,
+) {
+  if (!response) return null;
+  return response.status === "blocked" ? response.message : null;
 }
 
 function StatusBadge({ status }: { status: string }) {
@@ -170,6 +183,16 @@ function SessionRow({
 }
 
 export default async function PaperTradingPage() {
+  const affinityRefreshState = await loadResource(
+    () => sdk.refreshDriverAffinity({ season: 2026 }),
+    null as RefreshDriverAffinityResponse | null,
+    "Driver affinity refresh",
+  );
+  const affinityState = await loadResource(
+    () => sdk.driverAffinity(2026),
+    null as DriverAffinityReport | null,
+    "Driver affinity",
+  );
   const cockpitState = await loadResource(
     () => sdk.weekendCockpitStatus(),
     null,
@@ -193,10 +216,21 @@ export default async function PaperTradingPage() {
   );
   const positionsBySession = positionsState.data;
   const degradedMessages = collectResourceErrors([
+    affinityRefreshState,
+    affinityState,
     cockpitState,
     sessionsState,
     positionsState,
-  ]);
+  ]).concat(
+    affinityRefreshMessage(affinityRefreshState.data)
+      ? [affinityRefreshMessage(affinityRefreshState.data) as string]
+      : [],
+    affinityState.data &&
+      !affinityState.data.isFresh &&
+      affinityState.data.staleReason
+      ? [affinityState.data.staleReason]
+      : [],
+  );
 
   const allPositions = positionsBySession.flat();
 
@@ -227,7 +261,13 @@ export default async function PaperTradingPage() {
         </p>
       </div>
 
-      <WeekendCockpitPanel initialStatus={cockpitState.data} />
+      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
+        <WeekendCockpitPanel initialStatus={cockpitState.data} />
+        <DriverAffinitySummary
+          report={affinityState.data}
+          refreshMessage={affinityRefreshMessage(affinityRefreshState.data)}
+        />
+      </section>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
