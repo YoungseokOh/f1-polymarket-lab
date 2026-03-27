@@ -80,6 +80,33 @@ make db-upgrade
 uv run python -m f1_polymarket_worker.cli run-<gp-code>-fp1-paper-trade --execute
 ```
 
+## Multitask Q/R research workflow
+
+Build checkpoint-aware snapshots:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-multitask-qr-snapshots \
+  --meeting-key 1281 \
+  --season 2026 \
+  --execute
+```
+
+Train the shared-encoder model with walk-forward splits:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-multitask-walk-forward \
+  --manifest data/feature_snapshots/multitask/2026/manifest.json \
+  --execute
+```
+
+Run the experiment loop:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-multitask-autoresearch \
+  --output-dir data/experiments/autoresearch/multitask_qr \
+  --iterations 20
+```
+
 ## Worker package layout
 
 | Module | Purpose |
