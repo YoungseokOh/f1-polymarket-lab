@@ -103,27 +103,86 @@ def add_availability_sum(df: pl.DataFrame) -> pl.DataFrame:
     )
 
 
-def _latest_available_position_col(df: pl.DataFrame) -> str | None:
-    for col in ("fp3_position", "fp2_position", "fp1_position"):
-        if col in df.columns:
-            return col
-    return None
+def _available_position_expr(
+    df: pl.DataFrame,
+    availability_col: str,
+    position_col: str,
+) -> pl.Expr | None:
+    if availability_col not in df.columns or position_col not in df.columns:
+        return None
+
+    return (
+        pl.when(pl.col(availability_col).fill_null(False))
+        .then(pl.col(position_col))
+        .otherwise(None)
+    )
+
+
+def _checkpoint_position_expr(df: pl.DataFrame) -> pl.Expr | None:
+    """Select the latest visible position for each row's checkpoint."""
+    if "checkpoint_ordinal" not in df.columns:
+        return None
+
+    fp1 = _available_position_expr(df, "has_fp1", "fp1_position")
+    fp2 = _available_position_expr(df, "has_fp2", "fp2_position")
+    fp3 = _available_position_expr(df, "has_fp3", "fp3_position")
+    q = _available_position_expr(df, "has_q", "qualifying_position")
+
+    def coalesce(exprs: list[pl.Expr | None]) -> pl.Expr | None:
+        available = [expr for expr in exprs if expr is not None]
+        if not available:
+            return None
+        return pl.coalesce(available)
+
+    branches: list[pl.Expr] = []
+
+    q_visible = coalesce([q, fp3, fp2, fp1])
+    if q_visible is not None:
+        branches.append(
+            pl.when(pl.col("checkpoint_ordinal") == CHECKPOINT_ORDER["Q"])
+            .then(q_visible)
+            .otherwise(None)
+        )
+
+    fp3_visible = coalesce([fp3, fp2, fp1])
+    if fp3_visible is not None:
+        branches.append(
+            pl.when(pl.col("checkpoint_ordinal") == CHECKPOINT_ORDER["FP3"])
+            .then(fp3_visible)
+            .otherwise(None)
+        )
+
+    fp2_visible = coalesce([fp2, fp1])
+    if fp2_visible is not None:
+        branches.append(
+            pl.when(pl.col("checkpoint_ordinal") == CHECKPOINT_ORDER["FP2"])
+            .then(fp2_visible)
+            .otherwise(None)
+        )
+
+    if fp1 is not None:
+        branches.append(
+            pl.when(pl.col("checkpoint_ordinal") == CHECKPOINT_ORDER["FP1"])
+            .then(fp1)
+            .otherwise(None)
+        )
+
+    if not branches:
+        return None
+
+    return pl.coalesce(branches)
 
 
 def add_checkpoint_interactions(df: pl.DataFrame) -> pl.DataFrame:
     """Add checkpoint-aware interaction features."""
-    if "checkpoint_ordinal" not in df.columns:
-        return df
-
-    position_col = _latest_available_position_col(df)
-    if not position_col:
+    position_expr = _checkpoint_position_expr(df)
+    if position_expr is None:
         return df
 
     return df.with_columns(
-        (
-            pl.col(position_col).cast(pl.Float64)
-            * pl.col("checkpoint_ordinal").cast(pl.Float64)
-        ).alias("pace_x_checkpoint")
+        (position_expr.cast(pl.Float64) * pl.col("checkpoint_ordinal").cast(pl.Float64)).alias(
+            "pace_x_checkpoint"
+        )
     )
 
 

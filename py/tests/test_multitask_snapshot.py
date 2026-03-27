@@ -28,20 +28,20 @@ def test_default_feature_registry_includes_multitask_contract_features() -> None
 def test_compute_features_adds_multitask_checkpoint_contract_columns() -> None:
     df = pl.DataFrame(
         {
-            "event_id": [101, 101],
-            "driver_id": ["driver-1", "driver-2"],
-            "meeting_key": [2026, 2026],
-            "as_of_checkpoint": ["FP1", "Q"],
-            "target_market_family": ["winner", "h2h"],
-            "has_fp1": [True, True],
-            "has_fp2": [False, True],
-            "has_fp3": [False, True],
-            "has_q": [False, True],
-            "fp1_position": [3, 4],
-            "fp2_position": [2, 3],
-            "fp3_position": [1, 2],
-            "qualifying_position": [None, 2],
-            "qualifying_gap_to_pole_seconds": [None, 0.123],
+            "event_id": [101, 101, 101, 101],
+            "driver_id": ["driver-1", "driver-2", "driver-3", "driver-4"],
+            "meeting_key": [2026, 2026, 2026, 2026],
+            "as_of_checkpoint": ["FP1", "FP2", "FP3", "Q"],
+            "target_market_family": ["winner", "winner", "winner", "h2h"],
+            "has_fp1": [True, True, True, True],
+            "has_fp2": [False, True, True, True],
+            "has_fp3": [False, True, True, True],
+            "has_q": [False, False, False, True],
+            "fp1_position": [3, 7, 9, 11],
+            "fp2_position": [2, 5, 8, 10],
+            "fp3_position": [1, 4, 6, 12],
+            "qualifying_position": [None, None, None, 2],
+            "qualifying_gap_to_pole_seconds": [None, None, None, 0.123],
         }
     )
 
@@ -54,5 +54,6 @@ def test_compute_features_adds_multitask_checkpoint_contract_columns() -> None:
         "availability_sum",
         "pace_x_checkpoint",
     } <= set(result.columns)
-    assert result["checkpoint_ordinal"].to_list() == [1, 4]
-    assert result["availability_sum"].to_list() == [1, 4]
+    assert result["checkpoint_ordinal"].to_list() == [1, 2, 3, 4]
+    assert result["availability_sum"].to_list() == [1, 3, 3, 4]
+    assert result["pace_x_checkpoint"].to_list() == [3.0, 10.0, 18.0, 8.0]
