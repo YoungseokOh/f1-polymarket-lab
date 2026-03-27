@@ -833,6 +833,117 @@ def run_walk_forward_backtest_command(
             typer.echo(result)
 
 
+@app.command("train-multitask-walk-forward")
+def train_multitask_walk_forward_command(
+    manifest: str = typer.Option(..., "--manifest", help="Path to multitask manifest.json"),
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    min_train_gps: int = typer.Option(2, "--min-train-gps", help="Min training GPs"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    """Train the shared-encoder multitask model across walk-forward GP splits."""
+    import json
+    from pathlib import Path
+
+    import polars as pl_module
+    from f1_polymarket_lab.common import stable_uuid
+    from f1_polymarket_lab.models import (
+        MultitaskTrainerConfig,
+        build_walk_forward_splits,
+        train_multitask_split,
+    )
+    from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
+    from f1_polymarket_lab.storage.repository import upsert_records
+
+    manifest_payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
+    grouped: dict[int, list[dict[str, object]]] = {}
+    for row in manifest_payload.get("snapshots", []):
+        grouped.setdefault(int(row["meeting_key"]), []).append(row)
+
+    meeting_keys = sorted(grouped)
+    splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
+    if not splits:
+        typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
+        raise typer.Exit(1)
+
+    if not execute:
+        for split in splits:
+            typer.echo(
+                f"[plan] train on {split.train_meeting_keys} "
+                f"-> test {split.test_meeting_key}"
+            )
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        all_results = []
+        checkpoint_order = {"FP1": 1, "FP2": 2, "FP3": 3, "Q": 4}
+        for split in splits:
+            train_paths: list[str] = []
+            for meeting_key in split.train_meeting_keys:
+                snapshots = sorted(
+                    grouped[meeting_key],
+                    key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
+                )
+                train_paths.extend(str(row["path"]) for row in snapshots)
+
+            test_snapshots = sorted(
+                grouped[split.test_meeting_key],
+                key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
+            )
+            if not train_paths:
+                typer.echo(f"Skipping test meeting_key={split.test_meeting_key}: no training data")
+                continue
+            if not test_snapshots:
+                typer.echo(f"Skipping test meeting_key={split.test_meeting_key}: no test data")
+                continue
+
+            train_df = pl_module.concat([pl_module.read_parquet(path) for path in train_paths])
+            test_df = pl_module.concat(
+                [pl_module.read_parquet(str(row["path"])) for row in test_snapshots]
+            )
+
+            model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
+            result = train_multitask_split(
+                train_df,
+                test_df,
+                model_run_id=model_run_id,
+                stage=stage,
+                config=MultitaskTrainerConfig(),
+            )
+
+            run_record = ModelRun(
+                id=result.model_run_id,
+                stage=stage,
+                model_family="torch_multitask",
+                model_name="shared_encoder_multitask_v1",
+                dataset_version="multitask_v1",
+                feature_snapshot_id=None,
+                test_start=None,
+                test_end=None,
+                config_json=result.config,
+                metrics_json=result.metrics,
+            )
+            upsert_records(session, ModelRun, [run_record], key_columns=["id"])
+
+            pred_records = [ModelPrediction(**row) for row in result.predictions]
+            upsert_records(
+                session,
+                ModelPrediction,
+                pred_records,
+                key_columns=["model_run_id", "market_id"],
+            )
+
+            session.commit()
+            all_results.append(result)
+            typer.echo(
+                f"GP {split.test_meeting_key}: "
+                f"log_loss={result.metrics['log_loss']:.4f} "
+                f"brier={result.metrics['brier_score']:.4f}"
+            )
+
+        typer.echo(f"Multitask walk-forward training complete: {len(all_results)} folds evaluated.")
+
+
 @app.command("train-xgb-walk-forward")
 def train_xgb_walk_forward_command(
     snapshot_ids: str = typer.Option(

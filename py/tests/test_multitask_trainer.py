@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import polars as pl
 import torch
 from f1_polymarket_lab.models.multitask_model import MultitaskModelConfig, MultitaskTabularModel
@@ -7,6 +10,8 @@ from f1_polymarket_lab.models.multitask_trainer import (
     MultitaskTrainerConfig,
     train_multitask_split,
 )
+from f1_polymarket_worker.cli import app
+from typer.testing import CliRunner
 
 
 def test_multitask_model_returns_all_heads() -> None:
@@ -78,3 +83,46 @@ def test_train_multitask_split_returns_predictions_for_each_head() -> None:
     assert "brier_score" in result.metrics
     assert "log_loss" in result.metrics
     assert "family_metrics" in result.metrics
+
+
+def test_train_multitask_walk_forward_cli_plan_only(tmp_path: Path) -> None:
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "meeting_key": 1280,
+                        "season": 2026,
+                        "checkpoint": "FP1",
+                        "snapshot_id": "s1",
+                        "path": "a.parquet",
+                    },
+                    {
+                        "meeting_key": 1281,
+                        "season": 2026,
+                        "checkpoint": "Q",
+                        "snapshot_id": "s2",
+                        "path": "b.parquet",
+                    },
+                    {
+                        "meeting_key": 1282,
+                        "season": 2026,
+                        "checkpoint": "Q",
+                        "snapshot_id": "s3",
+                        "path": "c.parquet",
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["train-multitask-walk-forward", "--manifest", str(manifest), "--plan-only"],
+    )
+
+    assert result.exit_code == 0
+    assert "[plan]" in result.stdout
