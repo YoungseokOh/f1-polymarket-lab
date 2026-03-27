@@ -16,7 +16,7 @@ import polars as pl
 
 try:
     import xgboost as xgb
-except ModuleNotFoundError:
+except Exception:
     xgb = None
 
 # Feature columns expected in every snapshot parquet
