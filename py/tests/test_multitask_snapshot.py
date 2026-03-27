@@ -35,11 +35,11 @@ def test_compute_features_adds_multitask_checkpoint_contract_columns() -> None:
             "target_market_family": ["winner", "winner", "winner", "h2h"],
             "has_fp1": [True, True, True, True],
             "has_fp2": [False, True, True, True],
-            "has_fp3": [False, True, True, True],
+            "has_fp3": [False, False, True, True],
             "has_q": [False, False, False, True],
             "fp1_position": [3, 7, 9, 11],
-            "fp2_position": [2, 5, 8, 10],
-            "fp3_position": [1, 4, 6, 12],
+            "fp2_position": [None, 5, 8, 10],
+            "fp3_position": [None, None, 6, 12],
             "qualifying_position": [None, None, None, 2],
             "qualifying_gap_to_pole_seconds": [None, None, None, 0.123],
         }
@@ -55,5 +55,5 @@ def test_compute_features_adds_multitask_checkpoint_contract_columns() -> None:
         "pace_x_checkpoint",
     } <= set(result.columns)
     assert result["checkpoint_ordinal"].to_list() == [1, 2, 3, 4]
-    assert result["availability_sum"].to_list() == [1, 3, 3, 4]
+    assert result["availability_sum"].to_list() == [1, 2, 3, 4]
     assert result["pace_x_checkpoint"].to_list() == [3.0, 10.0, 18.0, 8.0]
