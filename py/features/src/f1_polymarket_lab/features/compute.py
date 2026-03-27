@@ -11,6 +11,20 @@ from __future__ import annotations
 
 import polars as pl
 
+CHECKPOINT_ORDER = {
+    "FP1": 1,
+    "FP2": 2,
+    "FP3": 3,
+    "Q": 4,
+}
+
+MARKET_FAMILY_INDICATORS = {
+    "market_family_is_pole": "pole",
+    "market_family_is_constructor_pole": "constructor_pole",
+    "market_family_is_winner": "winner",
+    "market_family_is_h2h": "h2h",
+}
+
 PACE_COLS = [
     "fp1_position",
     "fp1_gap_to_leader_seconds",
@@ -44,6 +58,73 @@ MARKET_COLS = [
     "trade_count_pre_entry",
     "last_trade_age_seconds",
 ]
+
+
+def add_checkpoint_ordinal(df: pl.DataFrame) -> pl.DataFrame:
+    """Add an ordinal snapshot checkpoint from the checkpoint label."""
+    if "as_of_checkpoint" not in df.columns:
+        return df
+
+    return df.with_columns(
+        pl.col("as_of_checkpoint")
+        .replace_strict(CHECKPOINT_ORDER, default=0)
+        .cast(pl.Int64)
+        .alias("checkpoint_ordinal")
+    )
+
+
+def add_market_family_indicators(df: pl.DataFrame) -> pl.DataFrame:
+    """Add one-hot market family indicator columns."""
+    if "target_market_family" not in df.columns:
+        return df
+
+    return df.with_columns(
+        [
+            pl.when(pl.col("target_market_family") == market_family)
+            .then(1)
+            .otherwise(0)
+            .cast(pl.Int64)
+            .alias(feature_name)
+            for feature_name, market_family in MARKET_FAMILY_INDICATORS.items()
+        ]
+    )
+
+
+def add_availability_sum(df: pl.DataFrame) -> pl.DataFrame:
+    """Add the count of available practice and qualifying sessions."""
+    available = [c for c in ("has_fp1", "has_fp2", "has_fp3", "has_q") if c in df.columns]
+    if not available:
+        return df
+
+    return df.with_columns(
+        pl.sum_horizontal(
+            [pl.col(col).fill_null(False).cast(pl.Int64) for col in available]
+        ).alias("availability_sum")
+    )
+
+
+def _latest_available_position_col(df: pl.DataFrame) -> str | None:
+    for col in ("fp3_position", "fp2_position", "fp1_position"):
+        if col in df.columns:
+            return col
+    return None
+
+
+def add_checkpoint_interactions(df: pl.DataFrame) -> pl.DataFrame:
+    """Add checkpoint-aware interaction features."""
+    if "checkpoint_ordinal" not in df.columns:
+        return df
+
+    position_col = _latest_available_position_col(df)
+    if not position_col:
+        return df
+
+    return df.with_columns(
+        (
+            pl.col(position_col).cast(pl.Float64)
+            * pl.col("checkpoint_ordinal").cast(pl.Float64)
+        ).alias("pace_x_checkpoint")
+    )
 
 
 def zscore_within_event(df: pl.DataFrame, cols: list[str]) -> pl.DataFrame:
@@ -167,6 +248,9 @@ def compute_features(
 
     Returns a DataFrame with the original columns plus all engineered features.
     """
+    df = add_checkpoint_ordinal(df)
+    df = add_market_family_indicators(df)
+    df = add_availability_sum(df)
     if zscore:
         df = zscore_within_event(df, PACE_COLS + MARKET_COLS)
     if log:
@@ -183,6 +267,7 @@ def compute_features(
         )
     if interactions:
         df = interaction_features(df)
+    df = add_checkpoint_interactions(df)
     if cross_gp:
         df = rolling_cross_gp_features(df, window=cross_gp_window)
     return df

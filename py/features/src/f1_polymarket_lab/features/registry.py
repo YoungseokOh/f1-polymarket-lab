@@ -162,6 +162,62 @@ def default_feature_registry() -> list[FeatureDefinition]:
             data_type="int",
             description="Highest practice session number with data available (1, 2, or 3).",
         ),
+        # -- Checkpoint context features --
+        FeatureDefinition(
+            feature_name="has_fp1",
+            feature_group="checkpoint_context",
+            data_type="int",
+            description="Indicator that FP1 data is available for the snapshot.",
+        ),
+        FeatureDefinition(
+            feature_name="has_fp2",
+            feature_group="checkpoint_context",
+            data_type="int",
+            description="Indicator that FP2 data is available for the snapshot.",
+        ),
+        FeatureDefinition(
+            feature_name="has_fp3",
+            feature_group="checkpoint_context",
+            data_type="int",
+            description="Indicator that FP3 data is available for the snapshot.",
+        ),
+        FeatureDefinition(
+            feature_name="has_q",
+            feature_group="checkpoint_context",
+            data_type="int",
+            description="Indicator that qualifying data is available for the snapshot.",
+        ),
+        FeatureDefinition(
+            feature_name="checkpoint_ordinal",
+            feature_group="checkpoint_context",
+            data_type="int",
+            description="Ordinal representation of the snapshot checkpoint (FP1=1, FP2=2, FP3=3, Q=4).",
+        ),
+        # -- Market family features --
+        FeatureDefinition(
+            feature_name="market_family_is_pole",
+            feature_group="market_family",
+            data_type="int",
+            description="Indicator that the target market family is pole.",
+        ),
+        FeatureDefinition(
+            feature_name="market_family_is_constructor_pole",
+            feature_group="market_family",
+            data_type="int",
+            description="Indicator that the target market family is constructor pole.",
+        ),
+        FeatureDefinition(
+            feature_name="market_family_is_winner",
+            feature_group="market_family",
+            data_type="int",
+            description="Indicator that the target market family is winner.",
+        ),
+        FeatureDefinition(
+            feature_name="market_family_is_h2h",
+            feature_group="market_family",
+            data_type="int",
+            description="Indicator that the target market family is head-to-head.",
+        ),
         # -- Market microstructure features --
         FeatureDefinition(
             feature_name="entry_yes_price",
@@ -217,6 +273,19 @@ def default_feature_registry() -> list[FeatureDefinition]:
             feature_group="driver_profile",
             data_type="int",
             description="Number of sessions used to compute the driver sector profile.",
+        ),
+        # -- Target session features --
+        FeatureDefinition(
+            feature_name="qualifying_position",
+            feature_group="target_session",
+            data_type="int",
+            description="Driver finishing position in qualifying.",
+        ),
+        FeatureDefinition(
+            feature_name="qualifying_gap_to_pole_seconds",
+            feature_group="target_session",
+            data_type="float",
+            description="Gap to pole in qualifying, measured in seconds.",
         ),
         # -- Track sector weight features --
         FeatureDefinition(
