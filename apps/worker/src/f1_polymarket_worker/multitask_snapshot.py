@@ -3,11 +3,20 @@ from __future__ import annotations
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
+import json
+from pathlib import Path
 from typing import Any
 
 import polars as pl
+from f1_polymarket_lab.common import ensure_dir, stable_uuid, utc_now
 from f1_polymarket_lab.features.compute import compute_features
-from f1_polymarket_lab.storage.models import F1Driver, F1SessionResult, PolymarketToken
+from f1_polymarket_lab.storage.models import (
+    F1Driver,
+    F1SessionResult,
+    FeatureSnapshot,
+    PolymarketToken,
+)
+from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy import select
 
 from f1_polymarket_worker.gp_registry import (
@@ -22,6 +31,7 @@ from f1_polymarket_worker.gp_registry import (
     _result_gap_seconds,
     _select_entry_price_point,
 )
+from f1_polymarket_worker.lineage import ensure_job_definition, finish_job_run, start_job_run
 from f1_polymarket_worker.pipeline import PipelineContext
 
 CHECKPOINTS = ("FP1", "FP2", "FP3", "Q")
@@ -92,6 +102,97 @@ def build_multitask_checkpoint_rows(
         interactions=False,
         cross_gp=False,
     ).to_dicts()
+
+
+def build_multitask_feature_snapshots(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int,
+    season: int,
+    checkpoints: tuple[str, ...] = CHECKPOINTS,
+    stage: str = "multitask_qr",
+) -> dict[str, Any]:
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="build-multitask-qr-snapshots",
+        source="derived",
+        dataset="multitask_feature_snapshot",
+        description="Build checkpoint-aware Q/R feature snapshots for multitask modeling.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "meeting_key": meeting_key,
+            "season": season,
+            "checkpoints": list(checkpoints),
+        },
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        return {
+            "job_run_id": run.id,
+            "status": "planned",
+            "meeting_key": meeting_key,
+            "season": season,
+            "checkpoints": list(checkpoints),
+        }
+
+    root = ensure_dir(
+        Path(ctx.settings.data_root) / "feature_snapshots" / "multitask" / str(season)
+    )
+    snapshot_records: list[dict[str, Any]] = []
+    manifest_rows: list[dict[str, Any]] = []
+
+    for checkpoint in checkpoints:
+        rows = build_multitask_checkpoint_rows(
+            ctx,
+            meeting_key=meeting_key,
+            season=season,
+            checkpoint=checkpoint,
+        )
+        snapshot_id = stable_uuid("multitask-snapshot", season, meeting_key, checkpoint)
+        parquet_path = root / f"{meeting_key}_{checkpoint}.parquet"
+        pl.DataFrame(rows).write_parquet(parquet_path)
+        snapshot_records.append(
+            {
+                "id": snapshot_id,
+                "market_id": None,
+                "session_id": None,
+                "as_of_ts": utc_now(),
+                "snapshot_type": f"{stage}_{checkpoint.lower()}",
+                "feature_version": "multitask_v1",
+                "storage_path": str(parquet_path),
+                "source_cutoffs": {
+                    "meeting_key": meeting_key,
+                    "season": season,
+                    "checkpoint": checkpoint,
+                },
+                "row_count": len(rows),
+            }
+        )
+        manifest_rows.append(
+            {
+                "meeting_key": meeting_key,
+                "season": season,
+                "checkpoint": checkpoint,
+                "snapshot_id": snapshot_id,
+                "path": str(parquet_path),
+            }
+        )
+
+    upsert_records(ctx.db, FeatureSnapshot, snapshot_records)
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(json.dumps({"snapshots": manifest_rows}, indent=2), encoding="utf-8")
+    finish_job_run(ctx.db, run, status="completed", records_written=len(snapshot_records))
+    return {
+        "job_run_id": run.id,
+        "status": "completed",
+        "snapshot_ids": [record["id"] for record in snapshot_records],
+        "manifest_path": str(manifest_path),
+    }
 
 
 def _build_market_family_rows(

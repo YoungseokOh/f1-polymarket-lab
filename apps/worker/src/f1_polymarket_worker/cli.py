@@ -1411,6 +1411,30 @@ def h2h_signals_command(
     typer.echo(f"\n  Total buy signals: {len(buys)}  |  Teammate H2H: {len(teammate_signals)}")
 
 
+@app.command("build-multitask-qr-snapshots")
+def build_multitask_qr_snapshots_command(
+    meeting_key: int = typer.Option(..., "--meeting-key"),
+    season: int = typer.Option(..., "--season"),
+    checkpoints: str = typer.Option("FP1,FP2,FP3,Q", "--checkpoints"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snapshots
+
+    checkpoint_tuple = tuple(
+        part.strip() for part in checkpoints.split(",") if part.strip()
+    )
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute, settings=settings)
+        result = build_multitask_feature_snapshots(
+            context,
+            meeting_key=meeting_key,
+            season=season,
+            checkpoints=checkpoint_tuple,
+        )
+    typer.echo(result)
+
+
 @app.command("worker", hidden=True)
 def worker() -> None:
     typer.echo(

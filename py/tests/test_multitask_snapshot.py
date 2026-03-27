@@ -12,15 +12,19 @@ from f1_polymarket_lab.storage.models import (
     F1Meeting,
     F1Session,
     F1SessionResult,
+    FeatureSnapshot,
     PolymarketEvent,
     PolymarketMarket,
     PolymarketPriceHistory,
     PolymarketToken,
     PolymarketTrade,
 )
-from f1_polymarket_worker.multitask_snapshot import build_multitask_checkpoint_rows
+from f1_polymarket_worker.multitask_snapshot import (
+    build_multitask_checkpoint_rows,
+    build_multitask_feature_snapshots,
+)
 from f1_polymarket_worker.pipeline import PipelineContext
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from f1_polymarket_lab.features import compute_features, default_feature_registry
@@ -697,3 +701,22 @@ def test_build_multitask_checkpoint_rows_emits_all_supported_families(
     families = {row["target_market_family"] for row in rows if row["as_of_checkpoint"] == "Q"}
 
     assert families == {"constructor_pole", "h2h", "pole", "winner"}
+
+
+def test_build_multitask_feature_snapshots_persists_manifest_and_rows(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_multitask_fixture(session)
+
+    result = build_multitask_feature_snapshots(
+        context,
+        meeting_key=1281,
+        season=2026,
+        checkpoints=("FP1", "FP2", "FP3", "Q"),
+    )
+
+    snapshots = session.scalars(select(FeatureSnapshot)).all()
+    assert len(snapshots) == 4
+    assert set(result["snapshot_ids"]) == {row.id for row in snapshots}
+    assert result["manifest_path"].endswith("manifest.json")
