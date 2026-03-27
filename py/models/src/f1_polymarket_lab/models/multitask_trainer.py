@@ -102,7 +102,7 @@ def train_multitask_split(
             head_loss = loss_fn(logits[head][mask], y_train[mask]).mean()
             total_loss = total_loss + cfg.head_weights[head] * head_loss
         optimizer.zero_grad()
-        total_loss.backward()
+        torch.autograd.backward(total_loss)
         optimizer.step()
 
     model.eval()

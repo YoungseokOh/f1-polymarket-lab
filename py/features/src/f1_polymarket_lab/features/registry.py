@@ -191,7 +191,10 @@ def default_feature_registry() -> list[FeatureDefinition]:
             feature_name="checkpoint_ordinal",
             feature_group="checkpoint_context",
             data_type="int",
-            description="Ordinal representation of the snapshot checkpoint (FP1=1, FP2=2, FP3=3, Q=4).",
+            description=(
+                "Ordinal representation of the snapshot checkpoint "
+                "(FP1=1, FP2=2, FP3=3, Q=4)."
+            ),
         ),
         # -- Market family features --
         FeatureDefinition(

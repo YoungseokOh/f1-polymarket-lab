@@ -5,6 +5,7 @@ from pathlib import Path
 
 import polars as pl
 from f1_polymarket_lab.common.settings import Settings
+from f1_polymarket_lab.features import compute_features, default_feature_registry
 from f1_polymarket_lab.storage.db import Base
 from f1_polymarket_lab.storage.models import (
     EntityMappingF1ToPolymarket,
@@ -26,8 +27,6 @@ from f1_polymarket_worker.multitask_snapshot import (
 from f1_polymarket_worker.pipeline import PipelineContext
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
-
-from f1_polymarket_lab.features import compute_features, default_feature_registry
 
 
 def build_context(tmp_path: Path) -> tuple[Session, PipelineContext]:
@@ -682,7 +681,9 @@ def test_build_multitask_checkpoint_rows_respects_visibility(tmp_path: Path) -> 
         if row["target_market_family"] == "winner" and row["driver_id"] == "driver-leclerc"
     )
     q_winner = next(
-        row for row in q_rows if row["target_market_family"] == "winner" and row["driver_id"] == "driver-leclerc"
+        row
+        for row in q_rows
+        if row["target_market_family"] == "winner" and row["driver_id"] == "driver-leclerc"
     )
 
     assert fp1_winner["has_q"] == 0

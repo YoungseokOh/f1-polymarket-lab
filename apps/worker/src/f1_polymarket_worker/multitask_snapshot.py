@@ -1,11 +1,11 @@
 from __future__ import annotations
 
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
-import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import polars as pl
 from f1_polymarket_lab.common import ensure_dir, stable_uuid, utc_now
@@ -31,7 +31,11 @@ from f1_polymarket_worker.gp_registry import (
     _result_gap_seconds,
     _select_entry_price_point,
 )
-from f1_polymarket_worker.lineage import ensure_job_definition, finish_job_run, start_job_run
+from f1_polymarket_worker.lineage import (
+    ensure_job_definition,
+    finish_job_run,
+    start_job_run,
+)
 from f1_polymarket_worker.pipeline import PipelineContext
 
 CHECKPOINTS = ("FP1", "FP2", "FP3", "Q")
@@ -95,13 +99,14 @@ def build_multitask_checkpoint_rows(
 
     if not rows:
         return []
-    return compute_features(
+    computed = compute_features(
         pl.DataFrame(rows),
         zscore=False,
         log=False,
         interactions=False,
         cross_gp=False,
-    ).to_dicts()
+    )
+    return cast(list[dict[str, Any]], computed.to_dicts())
 
 
 def build_multitask_feature_snapshots(
@@ -398,17 +403,44 @@ def _build_binary_market_row(
     target_results: dict[str, F1SessionResult],
     trades: list[Any],
 ) -> dict[str, Any] | None:
-    matched_driver = _match_market_driver(market=market, drivers=drivers, driver_map=driver_map)
+    matched_driver = _match_market_driver(
+        market=market,
+        drivers=drivers,
+        driver_map=driver_map,
+    )
     driver_id = getattr(matched_driver, "id", None)
     if driver_id is None:
         return None
 
-    fp1_result = _result_for_checkpoint(checkpoint, result_maps, session_code="FP1", driver_id=driver_id)
-    fp2_result = _result_for_checkpoint(checkpoint, result_maps, session_code="FP2", driver_id=driver_id)
-    fp3_result = _result_for_checkpoint(checkpoint, result_maps, session_code="FP3", driver_id=driver_id)
-    q_result = _result_for_checkpoint(checkpoint, result_maps, session_code="Q", driver_id=driver_id)
+    fp1_result = _result_for_checkpoint(
+        checkpoint,
+        result_maps,
+        session_code="FP1",
+        driver_id=driver_id,
+    )
+    fp2_result = _result_for_checkpoint(
+        checkpoint,
+        result_maps,
+        session_code="FP2",
+        driver_id=driver_id,
+    )
+    fp3_result = _result_for_checkpoint(
+        checkpoint,
+        result_maps,
+        session_code="FP3",
+        driver_id=driver_id,
+    )
+    q_result = _result_for_checkpoint(
+        checkpoint,
+        result_maps,
+        session_code="Q",
+        driver_id=driver_id,
+    )
     target_result = target_results.get(driver_id)
-    trade_count, last_trade_age_seconds = _trade_summary(trades=trades, as_of_ts=point.observed_at_utc)
+    trade_count, last_trade_age_seconds = _trade_summary(
+        trades=trades,
+        as_of_ts=point.observed_at_utc,
+    )
 
     return {
         "meeting_key": meeting_key,
@@ -463,7 +495,10 @@ def _build_h2h_rows(
     )
     target_result_a = result_maps.get(target_session_code, {}).get(driver_a.id)
     target_result_b = result_maps.get(target_session_code, {}).get(driver_b.id)
-    trade_count, last_trade_age_seconds = _trade_summary(trades=trades, as_of_ts=point.observed_at_utc)
+    trade_count, last_trade_age_seconds = _trade_summary(
+        trades=trades,
+        as_of_ts=point.observed_at_utc,
+    )
 
     return [
         {
@@ -491,7 +526,8 @@ def _build_h2h_rows(
                 _result_gap_seconds(q_result_a) if q_result_a is not None else None
             ),
             "label_yes": int(
-                getattr(target_result_a, "position", 999) < getattr(target_result_b, "position", 999)
+                getattr(target_result_a, "position", 999)
+                < getattr(target_result_b, "position", 999)
             ),
             **_checkpoint_flags(checkpoint),
         }

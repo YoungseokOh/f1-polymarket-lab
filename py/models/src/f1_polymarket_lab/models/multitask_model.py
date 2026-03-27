@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 import torch
 from torch import nn
@@ -28,7 +29,8 @@ class ResidualBlock(nn.Module):
         self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.norm(x + self.net(x))
+        residual: torch.Tensor = self.net(x)
+        return cast(torch.Tensor, self.norm(x + residual))
 
 
 class MultitaskTabularModel(nn.Module):
