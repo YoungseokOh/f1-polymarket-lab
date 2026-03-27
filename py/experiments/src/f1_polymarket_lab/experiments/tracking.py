@@ -12,6 +12,7 @@ class ExperimentSpec:
     stage: str
     model_family: str
     config_path: str
+    description: str | None = None
 
 
 @dataclass(slots=True)
@@ -33,13 +34,20 @@ class ExperimentTracker:
         metrics: dict[str, Any],
         predictions_count: int = 0,
         artifact_path: str | None = None,
+        parent_experiment_id: str | None = None,
+        search_phase: str = "screening",
+        decision: str = "discard",
     ) -> dict[str, Any]:
         """Record a single experiment run."""
         entry = {
             "experiment_id": experiment_id,
+            "parent_experiment_id": parent_experiment_id,
+            "search_phase": search_phase,
+            "decision": decision,
             "stage": spec.stage,
             "model_family": spec.model_family,
             "config_path": spec.config_path,
+            "description": spec.description,
             "config": config,
             "metrics": metrics,
             "predictions_count": predictions_count,
@@ -55,36 +63,57 @@ class ExperimentTracker:
     def compare_runs(
         self,
         metric_key: str = "log_loss",
+        *,
+        higher_is_better: bool = False,
     ) -> list[dict[str, Any]]:
-        """Return runs sorted by a metric (ascending = better for losses)."""
+        """Return runs sorted by a metric."""
         scored = [
             r for r in self.runs
             if r.get("metrics", {}).get(metric_key) is not None
         ]
-        return sorted(scored, key=lambda r: r["metrics"][metric_key])
+        return sorted(
+            scored,
+            key=lambda r: float(r["metrics"][metric_key]),
+            reverse=higher_is_better,
+        )
 
-    def best_run(self, metric_key: str = "log_loss") -> dict[str, Any] | None:
+    def best_run(
+        self,
+        metric_key: str = "log_loss",
+        *,
+        higher_is_better: bool = False,
+    ) -> dict[str, Any] | None:
         """Return the best run by the given metric."""
-        compared = self.compare_runs(metric_key)
+        compared = self.compare_runs(metric_key, higher_is_better=higher_is_better)
         return compared[0] if compared else None
 
-    def save_comparison_report(self, metric_key: str = "log_loss") -> Path:
+    def save_comparison_report(
+        self,
+        metric_key: str = "log_loss",
+        *,
+        higher_is_better: bool = False,
+    ) -> Path:
         """Write a markdown comparison table to disk."""
-        compared = self.compare_runs(metric_key)
+        compared = self.compare_runs(metric_key, higher_is_better=higher_is_better)
+        direction = "descending" if higher_is_better else "ascending"
         lines = [
             "# Experiment Comparison",
             "",
-            f"Sorted by `{metric_key}` (ascending)",
+            f"Sorted by `{metric_key}` ({direction})",
             "",
             f"| Rank | ID | Family | Stage | {metric_key} | Brier | Bet Count |",
             "|------|-------|--------|-------|---------|-------|-----------|",
         ]
         for i, run in enumerate(compared, 1):
             m = run.get("metrics", {})
+            metric_value = m.get(metric_key)
+            brier = m.get("brier_score")
+            metric_text = f"{metric_value:.4f}" if isinstance(metric_value, int | float) else "N/A"
+            brier_text = f"{brier:.4f}" if isinstance(brier, int | float) else "N/A"
             lines.append(
                 f"| {i} | {run['experiment_id'][:12]} | {run['model_family']} "
-                f"| {run['stage']} | {m.get(metric_key, 'N/A'):.4f} "
-                f"| {m.get('brier_score', 'N/A'):.4f} "
+                f"| {run['stage']} | {metric_text} "
+                f"| {brier_text} "
                 f"| {m.get('bet_count', 0)} |"
             )
 

@@ -944,6 +944,46 @@ def train_multitask_walk_forward_command(
         typer.echo(f"Multitask walk-forward training complete: {len(all_results)} folds evaluated.")
 
 
+@app.command("run-multitask-autoresearch")
+def run_multitask_autoresearch_command(
+    output_dir: str = typer.Option(
+        "data/experiments/autoresearch/multitask_qr",
+        "--output-dir",
+    ),
+    iterations: int = typer.Option(20, "--iterations"),
+) -> None:
+    from pathlib import Path
+
+    from f1_polymarket_lab.experiments import (
+        AutoResearchConfig,
+        ExperimentTracker,
+        run_autoresearch_loop,
+    )
+
+    tracker = ExperimentTracker(storage_dir=Path(output_dir))
+
+    def scoring_fn(candidate: dict[str, float]) -> dict[str, float]:
+        pnl = 20.0 + candidate["winner_weight"] * 10.0 - candidate["dropout"] * 15.0
+        return {
+            "total_pnl": pnl,
+            "roi_pct": pnl / 5.0,
+            "bet_count": 30,
+            "family_pnl_share_max": 0.60,
+        }
+
+    history = run_autoresearch_loop(
+        tracker=tracker,
+        config=AutoResearchConfig(iterations=iterations),
+        scoring_fn=scoring_fn,
+    )
+    typer.echo(
+        {
+            "runs": len(history),
+            "best": tracker.best_run(metric_key="total_pnl", higher_is_better=True),
+        }
+    )
+
+
 @app.command("train-xgb-walk-forward")
 def train_xgb_walk_forward_command(
     snapshot_ids: str = typer.Option(
