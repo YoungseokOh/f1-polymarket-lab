@@ -18,7 +18,9 @@ describe("PageStatusBanner", () => {
     render(<PageStatusBanner messages={["Session feed unavailable: boom"]} />);
 
     expect(screen.getByRole("alert")).toBeInTheDocument();
-    expect(screen.getByText("Some API data is degraded.")).toBeInTheDocument();
+    expect(
+      screen.getByText("Some data is not fully available yet."),
+    ).toBeInTheDocument();
     expect(
       screen.getByText("Session feed unavailable: boom"),
     ).toBeInTheDocument();

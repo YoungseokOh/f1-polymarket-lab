@@ -11,6 +11,7 @@ from f1_polymarket_lab.storage.models import (
     EntityMappingF1ToPolymarket,
     F1Meeting,
     F1Session,
+    PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
 )
@@ -40,6 +41,18 @@ def build_test_client(tmp_path: Path) -> TestClient:
                     season=2025,
                     meeting_name="Bahrain Grand Prix",
                 ),
+                F1Meeting(
+                    id="meeting:1281",
+                    meeting_key=1281,
+                    season=2026,
+                    round_number=3,
+                    meeting_name="Japanese Grand Prix",
+                    circuit_short_name="Suzuka",
+                    country_name="Japan",
+                    location="Suzuka",
+                    start_date_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+                    end_date_utc=datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc),
+                ),
                 F1Session(
                     id="session-q",
                     session_key=2001,
@@ -62,6 +75,50 @@ def build_test_client(tmp_path: Path) -> TestClient:
                     meeting_id="meeting-2025",
                     session_name="Race",
                     session_code="R",
+                    is_practice=False,
+                ),
+                F1Session(
+                    id="session:11246",
+                    session_key=11246,
+                    meeting_id="meeting:1281",
+                    session_name="Practice 1",
+                    session_code="FP1",
+                    session_type="Practice",
+                    date_start_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+                    date_end_utc=datetime(2026, 3, 27, 3, 30, tzinfo=timezone.utc),
+                    is_practice=True,
+                ),
+                F1Session(
+                    id="session:11247",
+                    session_key=11247,
+                    meeting_id="meeting:1281",
+                    session_name="Practice 2",
+                    session_code="FP2",
+                    session_type="Practice",
+                    date_start_utc=datetime(2026, 3, 27, 6, 0, tzinfo=timezone.utc),
+                    date_end_utc=datetime(2026, 3, 27, 7, 0, tzinfo=timezone.utc),
+                    is_practice=True,
+                ),
+                F1Session(
+                    id="session:11248",
+                    session_key=11248,
+                    meeting_id="meeting:1281",
+                    session_name="Practice 3",
+                    session_code="FP3",
+                    session_type="Practice",
+                    date_start_utc=datetime(2026, 3, 28, 2, 30, tzinfo=timezone.utc),
+                    date_end_utc=datetime(2026, 3, 28, 3, 30, tzinfo=timezone.utc),
+                    is_practice=True,
+                ),
+                F1Session(
+                    id="session:11249",
+                    session_key=11249,
+                    meeting_id="meeting:1281",
+                    session_name="Qualifying",
+                    session_code="Q",
+                    session_type="Qualifying",
+                    date_start_utc=datetime(2026, 3, 28, 6, 0, tzinfo=timezone.utc),
+                    date_end_utc=datetime(2026, 3, 28, 7, 0, tzinfo=timezone.utc),
                     is_practice=False,
                 ),
                 PolymarketEvent(
@@ -107,6 +164,15 @@ def build_test_client(tmp_path: Path) -> TestClient:
                     mapping_type="other",
                     confidence=0.4,
                 ),
+                PaperTradeSession(
+                    id="pt-japan-pre",
+                    gp_slug="japan_pre",
+                    snapshot_id="snapshot-1",
+                    model_run_id="model-run-1",
+                    status="settled",
+                    started_at=datetime(2026, 3, 26, 9, 0, tzinfo=timezone.utc),
+                    finished_at=datetime(2026, 3, 26, 9, 5, tzinfo=timezone.utc),
+                ),
             ]
         )
         session.commit()
@@ -126,7 +192,12 @@ def test_sessions_endpoint_supports_filters(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         response = client.get(
             "/api/v1/f1/sessions",
-            params={"season": 2026, "session_code": "Q", "limit": 5},
+            params={
+                "season": 2026,
+                "meeting_id": "meeting-2026",
+                "session_code": "Q",
+                "limit": 5,
+            },
         )
 
     app.dependency_overrides.clear()
@@ -165,3 +236,192 @@ def test_mappings_endpoint_filters_by_confidence_and_session(tmp_path: Path) -> 
     assert response.status_code == 200
     payload = response.json()
     assert [row["id"] for row in payload] == ["mapping-high"]
+
+
+def test_weekend_cockpit_status_auto_selects_pre_weekend_before_fp1_end(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 27, 3, 0, tzinfo=timezone.utc),
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get("/api/v1/weekend-cockpit/status")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["auto_selected_gp_short_code"] == "japan_pre"
+    assert payload["selected_gp_short_code"] == "japan_pre"
+    assert payload["ready_to_run"] is True
+    assert payload["selected_config"]["source_session_code"] is None
+
+
+def test_weekend_cockpit_status_auto_selects_fp1_to_fp2_between_fp1_end_and_fp2_start(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 27, 4, 56, tzinfo=timezone.utc),
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get("/api/v1/weekend-cockpit/status")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["auto_selected_gp_short_code"] == "japan_fp1_fp2"
+    assert payload["selected_gp_short_code"] == "japan_fp1_fp2"
+    assert payload["selected_config"]["display_label"] == "Use FP1 results to prepare FP2"
+    assert payload["selected_config"]["display_description"] == (
+        "Use FP1 results to find FP2 markets and prepare paper trading."
+    )
+    assert payload["focus_status"] == "upcoming"
+    assert payload["focus_session"]["session_code"] == "FP2"
+    assert payload["timeline_completed_codes"] == ["FP1"]
+    assert payload["timeline_active_code"] == "FP2"
+    assert payload["primary_action_title"] == "Load FP1 results"
+    assert payload["primary_action_description"] == (
+        "This will load FP1 results first, then prepare FP2 markets."
+    )
+    assert payload["primary_action_cta"] == "Load FP1 results"
+    assert payload["explanation"] == (
+        "This stage uses FP1 results to find FP2 markets and, when ready, "
+        "continue into paper trading."
+    )
+    assert payload["steps"][2]["resource_label"] == "FP2 markets"
+    assert payload["steps"][2]["reason_code"] == "ready_to_discover"
+    assert [config["short_code"] for config in payload["available_configs"]] == [
+        "japan_pre",
+        "japan_fp1_fp2",
+        "japan_fp1",
+        "japan_fp2_q",
+        "japan_fp3",
+        "japan_q_race",
+    ]
+
+
+def test_weekend_cockpit_status_blocks_fp1_before_session_end(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 27, 3, 0, tzinfo=timezone.utc),
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/weekend-cockpit/status",
+            params={"gp_short_code": "japan_fp1"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_gp_short_code"] == "japan_fp1"
+    assert payload["ready_to_run"] is False
+    assert payload["blockers"]
+    assert payload["primary_action_title"] == "Wait for this stage"
+    assert payload["primary_action_cta"] == "Not ready yet"
+    assert payload["steps"][1]["reason_code"] == "session_in_progress"
+    assert payload["steps"][1]["actionable_after_utc"] == "2026-03-27T03:30:00Z"
+    assert payload["steps"][1]["resource_label"] == "FP1 results"
+    assert "FP1 is still in progress" in payload["blockers"][0]
+
+
+def test_weekend_cockpit_status_blocks_fp2_to_q_during_fp2_live(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 27, 6, 30, tzinfo=timezone.utc),
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get("/api/v1/weekend-cockpit/status")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["auto_selected_gp_short_code"] == "japan_fp2_q"
+    assert payload["selected_gp_short_code"] == "japan_fp2_q"
+    assert payload["focus_status"] == "live"
+    assert payload["focus_session"]["session_code"] == "FP2"
+    assert payload["timeline_completed_codes"] == ["FP1"]
+    assert payload["timeline_active_code"] == "FP2"
+    assert payload["ready_to_run"] is False
+    assert "FP2 is still in progress" in payload["blockers"][0]
+
+
+def test_run_weekend_cockpit_endpoint_serializes_worker_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.run_weekend_cockpit",
+        lambda *args, **kwargs: {
+            "action": "run-weekend-cockpit",
+            "status": "ok",
+            "message": "Weekend cockpit complete",
+            "gp_short_code": "japan_pre",
+            "snapshot_id": "snapshot-1",
+            "model_run_id": "model-run-1",
+            "pt_session_id": "pt-session-1",
+            "executed_steps": [
+                {
+                    "key": "sync_calendar",
+                    "label": "Sync calendar",
+                    "status": "completed",
+                    "detail": "Calendar sync finished.",
+                    "session_code": None,
+                    "session_key": None,
+                    "count": 5,
+                }
+            ],
+            "details": {"trades_executed": 4},
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post("/api/v1/actions/run-weekend-cockpit", json={})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["gp_short_code"] == "japan_pre"
+    assert payload["executed_steps"][0]["status"] == "completed"
+
+
+def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fail_run_weekend_cockpit(*args, **kwargs):
+        raise ValueError("FP1 ends at 2026-03-27T03:30:00+00:00")
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.run_weekend_cockpit",
+        fail_run_weekend_cockpit,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/run-weekend-cockpit",
+            json={"gp_short_code": "japan_fp1"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "FP1 ends at 2026-03-27T03:30:00+00:00" in response.text

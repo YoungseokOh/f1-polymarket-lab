@@ -20,6 +20,7 @@ from f1_polymarket_worker.gp_registry import (
     build_snapshot,
     generate_report,
     run_baseline,
+    select_model_run_id,
 )
 from f1_polymarket_worker.historical import (
     bootstrap_f1db_history,
@@ -555,11 +556,14 @@ def _register_gp_commands() -> None:
                         raise typer.Exit(1)
 
                     # Pick the requested baseline by name
-                    baseline_idx = {"market_implied": 0, "fp1_pace": 1, "hybrid": 2}.get(
-                        baseline, 2
+                    used_model_run_id, resolved_baseline = select_model_run_id(
+                        cfg,
+                        model_run_ids,
+                        baseline=baseline,
                     )
-                    used_model_run_id = model_run_ids[min(baseline_idx, len(model_run_ids) - 1)]
-                    typer.echo(f"  baseline={baseline}, model_run_id={used_model_run_id}")
+                    typer.echo(
+                        f"  baseline={resolved_baseline}, model_run_id={used_model_run_id}"
+                    )
 
                     if not execute:
                         typer.echo(

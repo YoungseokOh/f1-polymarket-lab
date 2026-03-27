@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 import polars as pl
-from f1_polymarket_lab.common import ensure_dir, stable_uuid, utc_now
+from f1_polymarket_lab.common import MarketTaxonomy, ensure_dir, stable_uuid, utc_now
 from f1_polymarket_lab.features.driver_profile import enrich_rows_with_driver_profiles
 from f1_polymarket_lab.storage.models import (
     DatasetVersionManifest,
@@ -102,6 +102,15 @@ class GPConfig:
     """``"fp1"`` for the standard FP1→target pipeline, ``"pre_weekend"`` for
     the form-based pre-weekend approach."""
 
+    source_session_code: str | None = "FP1"
+    """The session that must be available before snapshot construction."""
+
+    market_taxonomy: MarketTaxonomy = "driver_pole_position"
+    """The primary target taxonomy required for this GP variant."""
+
+    stage_rank: int = 10
+    """Ordering for weekend cockpit stage selection within the same meeting."""
+
 
 # ---------------------------------------------------------------------------
 # GP Registry — add new GPs here
@@ -154,12 +163,34 @@ GP_REGISTRY: list[GPConfig] = [
         report_slug="2026-japanese-grand-prix-q-pole-quicktest",
         pace_signal="form",
         variant="pre_weekend",
+        source_session_code=None,
         title_suffix="Q Pole Pre-Weekend Quick Test",
         notes=(
             "This is a PRE-WEEKEND prediction — no FP1 data available yet.",
             "Form signal is derived from AUS + China GP historical pace.",
             "The universe is limited to Japanese GP Qualifying pole markets.",
         ),
+        stage_rank=0,
+    ),
+    GPConfig(
+        name="Japanese Grand Prix",
+        short_code="japan_fp1_fp2",
+        meeting_key=1281,
+        season=2026,
+        target_session_code="FP2",
+        snapshot_type="japan_fp1_to_fp2_fastest_lap_quicktest",
+        snapshot_dataset="japan_fp1_to_fp2_fastest_lap_snapshot",
+        baseline_stage="japan_fp1_fp2_fastest_lap_quicktest",
+        baseline_names=("market_implied", "fp1_pace", "hybrid"),
+        report_slug="2026-japanese-grand-prix-fp1-fp2-fastest-lap-quicktest",
+        variant="fp1_to_fp2",
+        market_taxonomy="driver_fastest_lap_practice",
+        title_suffix="FP1-to-FP2 Fastest Lap Quick Test",
+        notes=(
+            "Uses FP1 pace to evaluate Practice 2 fastest-lap markets before FP2 begins.",
+            "The universe is limited to Japanese GP Practice 2 fastest-lap markets.",
+        ),
+        stage_rank=1,
     ),
     GPConfig(
         name="Japanese Grand Prix",
@@ -172,11 +203,33 @@ GP_REGISTRY: list[GPConfig] = [
         baseline_stage="japan_fp1_q_pole_quicktest",
         baseline_names=("market_implied", "fp1_pace", "hybrid"),
         report_slug="2026-japanese-grand-prix-fp1-q-pole-quicktest",
+        variant="fp1_to_q",
         title_suffix="FP1-to-Q Pole Quick Test",
         notes=(
             "This is a paper-edge quick test, not an executable orderbook backtest.",
             "The universe is limited to Japanese GP FP1 -> Qualifying pole markets.",
         ),
+        stage_rank=2,
+    ),
+    GPConfig(
+        name="Japanese Grand Prix",
+        short_code="japan_fp2_q",
+        meeting_key=1281,
+        season=2026,
+        target_session_code="Q",
+        snapshot_type="japan_fp2_to_q_pole_quicktest",
+        snapshot_dataset="japan_fp2_to_q_pole_snapshot",
+        baseline_stage="japan_fp2_q_pole_quicktest",
+        baseline_names=("market_implied", "fp2_pace", "hybrid"),
+        report_slug="2026-japanese-grand-prix-fp2-q-pole-quicktest",
+        variant="fp2_to_q",
+        source_session_code="FP2",
+        title_suffix="FP2-to-Q Pole Quick Test",
+        notes=(
+            "Uses FP2 pace as the latest practice signal before qualifying.",
+            "The universe is limited to Japanese GP FP2 -> Qualifying pole markets.",
+        ),
+        stage_rank=3,
     ),
     GPConfig(
         name="Japanese Grand Prix",
@@ -189,11 +242,14 @@ GP_REGISTRY: list[GPConfig] = [
         baseline_stage="japan_fp3_q_pole_quicktest",
         baseline_names=("market_implied", "fp3_pace", "hybrid"),
         report_slug="2026-japanese-grand-prix-fp3-q-pole-quicktest",
+        variant="fp3_to_q",
+        source_session_code="FP3",
         title_suffix="FP3-to-Q Pole Quick Test",
         notes=(
             "Uses FP3 pace (most recent before qualifying) as primary signal.",
             "The universe is limited to Japanese GP FP3 -> Qualifying pole markets.",
         ),
+        stage_rank=4,
     ),
     GPConfig(
         name="Japanese Grand Prix",
@@ -206,11 +262,15 @@ GP_REGISTRY: list[GPConfig] = [
         baseline_stage="japan_q_race_winner_quicktest",
         baseline_names=("market_implied", "fp1_pace", "hybrid"),
         report_slug="2026-japanese-grand-prix-q-race-winner-quicktest",
+        variant="q_to_race",
+        source_session_code="Q",
+        market_taxonomy="race_winner",
         title_suffix="Q-to-Race Winner Quick Test",
         notes=(
             "Paper-edge study for race winner prediction using Q pace as primary signal.",
             "Universe is limited to Japanese GP race winner markets.",
         ),
+        stage_rank=5,
     ),
     GPConfig(
         name="Bahrain Grand Prix",
@@ -325,6 +385,77 @@ def get_gp_config(short_code: str) -> GPConfig:
     raise KeyError(f"Unknown GP short_code: {short_code!r}")
 
 
+def config_stage_label(config: GPConfig) -> str:
+    if config.source_session_code is None:
+        return f"Pre-Weekend -> {config.target_session_code}"
+    return f"{config.source_session_code} -> {config.target_session_code}"
+
+
+def _session_display_name(session_code: str | None) -> str:
+    return {
+        None: "Pre-weekend",
+        "FP1": "FP1",
+        "FP2": "FP2",
+        "FP3": "FP3",
+        "Q": "Qualifying",
+        "R": "Race",
+    }.get(session_code, session_code or "Session")
+
+
+def config_display_label(config: GPConfig) -> str:
+    target_name = _session_display_name(config.target_session_code)
+    if config.source_session_code is None:
+        return f"Prepare {target_name} markets"
+    source_name = _session_display_name(config.source_session_code)
+    return f"Use {source_name} results to prepare {target_name}"
+
+
+def config_display_description(config: GPConfig) -> str:
+    if config.source_session_code is None:
+        return "Review Qualifying markets using pre-practice information only."
+    if config.target_session_code == "FP2":
+        return "Use FP1 results to find FP2 markets and prepare paper trading."
+    if config.target_session_code == "Q":
+        source_name = _session_display_name(config.source_session_code)
+        return f"Use {source_name} results to find Qualifying markets and prepare paper trading."
+    if config.target_session_code == "R":
+        return "Use Qualifying results to find Race markets and prepare paper trading."
+    source_name = _session_display_name(config.source_session_code)
+    target_name = _session_display_name(config.target_session_code)
+    return f"Use {source_name} results to find {target_name} markets and prepare paper trading."
+
+
+def resolve_baseline_name(config: GPConfig, baseline: str | None) -> str:
+    """Resolve a requested baseline name against the configured baseline tuple."""
+    if baseline and baseline in config.baseline_names:
+        return baseline
+    if (
+        baseline in {"fp1_pace", "fp2_pace", "fp3_pace", "form_pace"}
+        and len(config.baseline_names) > 1
+    ):
+        return config.baseline_names[1]
+    if "hybrid" in config.baseline_names:
+        return "hybrid"
+    return config.baseline_names[-1]
+
+
+def select_model_run_id(
+    config: GPConfig,
+    model_run_ids: list[str],
+    *,
+    baseline: str | None,
+) -> tuple[str, str]:
+    """Pick the model-run id matching the requested baseline name."""
+    if not model_run_ids:
+        raise ValueError("No model runs produced")
+    baseline_name = resolve_baseline_name(config, baseline)
+    try:
+        baseline_idx = config.baseline_names.index(baseline_name)
+    except ValueError:
+        baseline_idx = len(model_run_ids) - 1
+    return model_run_ids[min(baseline_idx, len(model_run_ids) - 1)], baseline_name
+
+
 # ---------------------------------------------------------------------------
 # Internal helpers (migrated from quicktest.py, kept private)
 # ---------------------------------------------------------------------------
@@ -348,8 +479,15 @@ def _load_sessions(
     meeting_key: int,
     season: int,
     target_session_code: str,
-) -> tuple[F1Meeting, F1Session, F1Session | None, F1Session | None, F1Session]:
-    """Load the meeting, FP1/FP2/FP3 sessions, and target session."""
+) -> tuple[
+    F1Meeting,
+    dict[str, F1Session],
+    F1Session,
+    F1Session | None,
+    F1Session | None,
+    F1Session,
+]:
+    """Load the meeting, session map, FP1/FP2/FP3 sessions, and target session."""
     meeting = ctx.db.scalar(select(F1Meeting).where(F1Meeting.meeting_key == meeting_key))
     if meeting is None:
         raise ValueError(f"meeting_key={meeting_key} not found")
@@ -371,16 +509,17 @@ def _load_sessions(
         raise ValueError(
             f"meeting_key={meeting_key} must contain FP1 and {target_session_code} sessions"
         )
-    return meeting, fp1_session, fp2_session, fp3_session, target_session
+    return meeting, sessions_by_code, fp1_session, fp2_session, fp3_session, target_session
 
 
-def _load_driver_pole_markets(
+def _load_target_markets(
     ctx: PipelineContext,
     *,
     target_session: F1Session,
     target_session_code: str,
+    market_taxonomy: MarketTaxonomy,
 ) -> list[PolymarketMarket]:
-    """Fetch driver pole-position markets mapped to a qualifying session."""
+    """Fetch mapped target-session markets for a single taxonomy."""
     market_ids = ctx.db.scalars(
         select(EntityMappingF1ToPolymarket.polymarket_market_id)
         .where(
@@ -389,7 +528,7 @@ def _load_driver_pole_markets(
         )
         .distinct()
     ).all()
-    label = "Sprint Qualifying" if target_session_code == "SQ" else "Qualifying"
+    label = target_session_code
     if not market_ids:
         raise ValueError(f"No Polymarket mappings found for {label} session")
     markets = list(
@@ -398,13 +537,14 @@ def _load_driver_pole_markets(
             .where(
                 PolymarketMarket.id.in_(market_ids),
                 PolymarketMarket.target_session_code == target_session_code,
-                PolymarketMarket.taxonomy == "driver_pole_position",
+                PolymarketMarket.taxonomy == market_taxonomy,
             )
             .order_by(PolymarketMarket.question.asc())
         ).all()
     )
     if not markets:
-        raise ValueError(f"No driver pole position markets mapped to {label} session")
+        pretty_taxonomy = market_taxonomy.replace("_", " ")
+        raise ValueError(f"No {pretty_taxonomy} markets mapped to {label} session")
     return markets
 
 
@@ -616,11 +756,11 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
     enriched: list[dict[str, Any]] = []
     for group_rows in grouped.values():
         market_probs = _normalized_market_probabilities(group_rows)
-        fp1_signals = _practice_pace_signals(group_rows)
-        fp1_probs = _softmax(fp1_signals)
+        pace_signals = _practice_pace_signals(group_rows)
+        pace_probs = _softmax(pace_signals)
         market_signals = [math.log(max(prob, EPSILON)) for prob in market_probs]
         hybrid_signals = [
-            market_signals[index] + (2.0 * fp1_signals[index])
+            market_signals[index] + (2.0 * pace_signals[index])
             for index in range(len(group_rows))
         ]
         hybrid_probs = _softmax(hybrid_signals)
@@ -629,8 +769,10 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
             row["market_normalized_prob"] = market_probs[index]
             row["market_signal"] = market_signals[index]
             row["market_implied_probability"] = market_probs[index]
-            row["fp1_pace_signal"] = fp1_signals[index]
-            row["fp1_pace_probability"] = fp1_probs[index]
+            row["pace_signal"] = pace_signals[index]
+            row["pace_probability"] = pace_probs[index]
+            row["fp1_pace_signal"] = pace_signals[index]
+            row["fp1_pace_probability"] = pace_probs[index]
             row["hybrid_signal"] = hybrid_signals[index]
             row["hybrid_probability"] = hybrid_probs[index]
             enriched.append(row)
@@ -747,31 +889,50 @@ def _evaluate_probability_rows(
     price_key: str,
     min_edge: float,
 ) -> dict[str, Any]:
-    probabilities = [float(row[probability_key]) for row in rows]
-    labels = [int(row["label_yes"]) for row in rows]
+    labeled_rows = [row for row in rows if row.get("label_yes") is not None]
+    labels = [int(row["label_yes"]) for row in labeled_rows]
     brier = (
-        sum((prob - label) ** 2 for prob, label in zip(probabilities, labels, strict=True))
-        / len(rows)
+        None
+        if not labeled_rows
+        else sum(
+            (float(row[probability_key]) - label) ** 2
+            for row, label in zip(labeled_rows, labels, strict=True)
+        )
+        / len(labeled_rows)
     )
-    log_loss = -sum(
-        label * math.log(max(prob, EPSILON))
-        + (1 - label) * math.log(max(1 - prob, EPSILON))
-        for prob, label in zip(probabilities, labels, strict=True)
-    ) / len(rows)
-    top1_hit = _top_k_hit(rows=rows, probability_key=probability_key, k=1)
-    top3_hit = _top_k_hit(rows=rows, probability_key=probability_key, k=3)
+    log_loss = (
+        None
+        if not labeled_rows
+        else -sum(
+            label * math.log(max(float(row[probability_key]), EPSILON))
+            + (1 - label) * math.log(max(1 - float(row[probability_key]), EPSILON))
+            for row, label in zip(labeled_rows, labels, strict=True)
+        )
+        / len(labeled_rows)
+    )
+    top1_hit = (
+        None
+        if not labeled_rows
+        else _top_k_hit(rows=labeled_rows, probability_key=probability_key, k=1)
+    )
+    top3_hit = (
+        None
+        if not labeled_rows
+        else _top_k_hit(rows=labeled_rows, probability_key=probability_key, k=3)
+    )
     selected = [
         row
         for row in rows
         if float(row[probability_key]) - float(row[price_key]) >= min_edge
     ]
+    labeled_selected = [row for row in selected if row.get("label_yes") is not None]
     realized_pnl = [
         (1.0 - float(row[price_key])) if int(row["label_yes"]) == 1 else -float(row[price_key])
-        for row in selected
+        for row in labeled_selected
     ]
     hit_rate = (
-        sum(int(row["label_yes"]) for row in selected) / len(selected)
-        if selected
+        sum(int(row["label_yes"]) for row in labeled_selected) / len(labeled_selected)
+        if labeled_selected
         else None
     )
     avg_edge = (
@@ -794,7 +955,7 @@ def _evaluate_probability_rows(
         "paper_edge_hit_rate": hit_rate,
         "average_edge": avg_edge,
         "average_paper_ev": paper_ev,
-        "realized_pnl_total": sum(realized_pnl) if realized_pnl else 0.0,
+        "realized_pnl_total": sum(realized_pnl) if labeled_selected else None,
         "realized_pnl_avg": (sum(realized_pnl) / len(realized_pnl)) if realized_pnl else None,
     }
 
@@ -919,7 +1080,7 @@ def build_snapshot(
             ctx, config, run=run, meeting_key=meeting_key, season=season
         )
 
-    return _build_fp1_snapshot(
+    return _build_session_to_target_snapshot(
         ctx,
         config,
         run=run,
@@ -930,7 +1091,7 @@ def build_snapshot(
     )
 
 
-def _build_fp1_snapshot(
+def _build_session_to_target_snapshot(
     ctx: PipelineContext,
     config: GPConfig,
     *,
@@ -940,14 +1101,30 @@ def _build_fp1_snapshot(
     entry_offset_min: int,
     fidelity: int,
 ) -> dict[str, Any]:
-    """Standard FP1→target session snapshot builder."""
-    meeting, fp1_session, fp2_session, fp3_session, target_session = _load_sessions(
-        ctx, meeting_key=meeting_key, season=season, target_session_code=config.target_session_code
+    """Build a snapshot for a source session and target-session market family."""
+    (
+        meeting,
+        sessions_by_code,
+        fp1_session,
+        fp2_session,
+        fp3_session,
+        target_session,
+    ) = _load_sessions(
+        ctx,
+        meeting_key=meeting_key,
+        season=season,
+        target_session_code=config.target_session_code,
     )
-    markets = _load_driver_pole_markets(
-        ctx, target_session=target_session, target_session_code=config.target_session_code
+    markets = _load_target_markets(
+        ctx,
+        target_session=target_session,
+        target_session_code=config.target_session_code,
+        market_taxonomy=config.market_taxonomy,
     )
     hydrated_markets = _hydrate_missing_market_history(ctx, markets=markets, fidelity=fidelity)
+    source_session = sessions_by_code.get(config.source_session_code or "FP1")
+    if source_session is None:
+        raise ValueError(f"Source session {config.source_session_code!r} not found")
 
     yes_tokens = _load_yes_tokens(ctx, market_ids=[m.id for m in markets])
     price_history = _load_price_history(
@@ -1013,9 +1190,14 @@ def _build_fp1_snapshot(
     )
 
     results_by_driver = {r.driver_id: r for r in fp1_results if r.driver_id is not None}
-    winner_driver_id = next(
-        (r.driver_id for r in target_results if r.driver_id is not None and r.position == 1),
-        None,
+    target_is_practice = config.target_session_code in {"FP1", "FP2", "FP3"}
+    winner_driver_id = (
+        None
+        if target_is_practice
+        else next(
+            (r.driver_id for r in target_results if r.driver_id is not None and r.position == 1),
+            None,
+        )
     )
     lap_count_by_driver = _CounterLike()
     for lap in fp1_laps:
@@ -1057,7 +1239,7 @@ def _build_fp1_snapshot(
         if stint.driver_id is not None:
             fp3_stint_count_by_driver.add_distinct(stint.driver_id, stint.stint_number)
 
-    entry_floor = _require_utc(fp1_session.date_end_utc) + timedelta(minutes=entry_offset_min)
+    entry_floor = _require_utc(source_session.date_end_utc) + timedelta(minutes=entry_offset_min)
     target_start = _require_utc(target_session.date_start_utc)
     rows: list[dict[str, Any]] = []
     exclusion_reasons = _CounterLike()
@@ -1223,7 +1405,11 @@ def _build_fp1_snapshot(
                     min(_all_positions) if _all_positions else None
                 ),
                 "latest_fp_number": 3 if fp3_results else (2 if fp2_results else 1),
-                "label_yes": 1 if winner_driver_id == driver.id else 0,
+                "label_yes": (
+                    None
+                    if winner_driver_id is None
+                    else 1 if winner_driver_id == driver.id else 0
+                ),
             }
         )
 
@@ -1383,8 +1569,11 @@ def _build_pre_weekend_snapshot(
 
     drivers = list(ctx.db.scalars(select(F1Driver)).all())
     driver_map = _build_driver_map(drivers)
-    q_markets = _load_driver_pole_markets(
-        ctx, target_session=q_session, target_session_code="Q"
+    q_markets = _load_target_markets(
+        ctx,
+        target_session=q_session,
+        target_session_code="Q",
+        market_taxonomy="driver_pole_position",
     )
 
     yes_tokens = _load_yes_tokens(ctx, market_ids=[m.id for m in q_markets])
@@ -1691,13 +1880,9 @@ def run_baseline(
     prediction_records: list[dict[str, Any]] = []
     metrics_summary: dict[str, dict[str, Any]] = {}
 
-    # Map baseline names to probability/signal keys.
-    # The second baseline uses fp1_pace keys regardless of its name
-    # (form_pace vs fp1_pace), because _enrich_snapshot_probabilities
-    # always writes fp1_pace_signal / fp1_pace_probability.
     baselines = (
         (config.baseline_names[0], "market_implied_probability", "market_signal"),
-        (config.baseline_names[1], "fp1_pace_probability", "fp1_pace_signal"),
+        (config.baseline_names[1], "pace_probability", "pace_signal"),
         (config.baseline_names[2], "hybrid_probability", "hybrid_signal"),
     )
 

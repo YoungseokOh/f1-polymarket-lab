@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     BacktestResultResponse,
@@ -21,6 +23,7 @@ from f1_polymarket_api.schemas import (
     PolymarketEventResponse,
     PolymarketMarketResponse,
     PriceHistoryResponse,
+    WeekendCockpitStatusResponse,
 )
 from f1_polymarket_lab.common import MarketTaxonomy, coerce_market_taxonomy
 from f1_polymarket_lab.storage.models import (
@@ -73,6 +76,51 @@ def _market_response(record: PolymarketMarket) -> PolymarketMarketResponse:
             "active": record.active,
             "closed": record.closed,
         }
+    )
+
+
+def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitStatusResponse:
+    return WeekendCockpitStatusResponse(
+        now=payload["now"],
+        auto_selected_gp_short_code=payload["auto_selected_gp_short_code"],
+        selected_gp_short_code=payload["selected_gp_short_code"],
+        selected_config=payload["selected_config"],
+        available_configs=payload["available_configs"],
+        meeting=(
+            None
+            if payload["meeting"] is None
+            else F1MeetingResponse.model_validate(payload["meeting"])
+        ),
+        focus_session=(
+            None
+            if payload["focus_session"] is None
+            else F1SessionResponse.model_validate(payload["focus_session"])
+        ),
+        focus_status=payload["focus_status"],
+        timeline_completed_codes=payload["timeline_completed_codes"],
+        timeline_active_code=payload["timeline_active_code"],
+        source_session=(
+            None
+            if payload["source_session"] is None
+            else F1SessionResponse.model_validate(payload["source_session"])
+        ),
+        target_session=(
+            None
+            if payload["target_session"] is None
+            else F1SessionResponse.model_validate(payload["target_session"])
+        ),
+        latest_paper_session=(
+            None
+            if payload["latest_paper_session"] is None
+            else PaperTradeSessionResponse.model_validate(payload["latest_paper_session"])
+        ),
+        steps=payload["steps"],
+        blockers=payload["blockers"],
+        ready_to_run=payload["ready_to_run"],
+        primary_action_title=payload["primary_action_title"],
+        primary_action_description=payload["primary_action_description"],
+        primary_action_cta=payload["primary_action_cta"],
+        explanation=payload["explanation"],
     )
 
 
@@ -333,7 +381,12 @@ def snapshots(db: Session = Depends(get_db_session)) -> list[FeatureSnapshotResp
 
 @router.get("/actions/gp-registry", response_model=list[GPRegistryItem])
 def gp_registry() -> list[GPRegistryItem]:
-    from f1_polymarket_worker.gp_registry import GP_REGISTRY
+    from f1_polymarket_worker.gp_registry import (
+        GP_REGISTRY,
+        config_display_description,
+        config_display_label,
+        config_stage_label,
+    )
 
     return [
         GPRegistryItem(
@@ -343,6 +396,12 @@ def gp_registry() -> list[GPRegistryItem]:
             season=gp.season,
             target_session_code=gp.target_session_code,
             variant=gp.variant,
+            source_session_code=gp.source_session_code,
+            market_taxonomy=gp.market_taxonomy,
+            stage_rank=gp.stage_rank,
+            stage_label=config_stage_label(gp),
+            display_label=config_display_label(gp),
+            display_description=config_display_description(gp),
         )
         for gp in GP_REGISTRY
     ]
@@ -364,6 +423,25 @@ def paper_trading_sessions(
         q = q.where(PaperTradeSession.gp_slug == gp_slug)
     records = db.scalars(q).all()
     return [PaperTradeSessionResponse.model_validate(r) for r in records]
+
+
+@router.get("/weekend-cockpit/status", response_model=WeekendCockpitStatusResponse)
+def weekend_cockpit_status(
+    gp_short_code: str | None = None,
+    db: Session = Depends(get_db_session),
+) -> WeekendCockpitStatusResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import get_weekend_cockpit_status
+
+    try:
+        return _weekend_cockpit_status_response(
+            get_weekend_cockpit_status(
+                PipelineContext(db=db, execute=False),
+                gp_short_code=gp_short_code,
+            )
+        )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get(

@@ -8,15 +8,12 @@ from f1_polymarket_api.schemas import (
     IngestDemoRequest,
     RunBacktestRequest,
     RunPaperTradeRequest,
+    RunWeekendCockpitRequest,
+    RunWeekendCockpitResponse,
     SyncCalendarRequest,
     SyncF1MarketsRequest,
 )
-from f1_polymarket_lab.storage.models import (
-    FeatureSnapshot,
-    ModelPrediction,
-)
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 action_router = APIRouter(prefix="/api/v1", tags=["actions"])
@@ -183,97 +180,20 @@ def action_run_paper_trade(
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
     """Run the full paper trading pipeline for a GP."""
-    from f1_polymarket_worker.gp_registry import GP_REGISTRY, build_snapshot, run_baseline
-    from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
+    from f1_polymarket_worker.gp_registry import get_gp_config
     from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import run_gp_paper_trade_pipeline
 
     try:
-        import polars as pl
-
-        config = next(
-            (g for g in GP_REGISTRY if g.short_code == body.gp_short_code), None
-        )
-        if config is None:
-            raise HTTPException(
-                status_code=404,
-                detail=f"GP '{body.gp_short_code}' not found in registry",
-            )
-
+        config = get_gp_config(body.gp_short_code)
         ctx = PipelineContext(db=db, execute=True)
-
-        # Build snapshot if not provided
-        if body.snapshot_id is None:
-            snap_result = build_snapshot(
-                ctx,
-                config,
-                meeting_key=config.meeting_key,
-                season=config.season,
-                entry_offset_min=config.entry_offset_min,
-                fidelity=config.fidelity,
-            )
-            used_snapshot_id = snap_result.get("snapshot_id")
-            if not used_snapshot_id:
-                raise HTTPException(status_code=500, detail=f"Snapshot build failed: {snap_result}")
-        else:
-            used_snapshot_id = body.snapshot_id
-
-        # Run baselines
-        baseline_result = run_baseline(
-            ctx, config, snapshot_id=used_snapshot_id, min_edge=body.min_edge
-        )
-        model_run_ids: list[str] = baseline_result.get("model_runs", [])
-        if not model_run_ids:
-            raise HTTPException(status_code=500, detail="No model runs produced")
-
-        baseline_idx = {"market_implied": 0, "fp1_pace": 1, "hybrid": 2}.get(body.baseline, 2)
-        used_model_run_id = model_run_ids[min(baseline_idx, len(model_run_ids) - 1)]
-
-        # Paper trade
-        preds = db.scalars(
-            select(ModelPrediction).where(ModelPrediction.model_run_id == used_model_run_id)
-        ).all()
-        snap = db.get(FeatureSnapshot, used_snapshot_id)
-
-        if not preds:
-            raise HTTPException(status_code=404, detail="No predictions found for model run")
-
-        snapshot_df = (
-            pl.read_parquet(snap.storage_path) if snap and snap.storage_path else None
-        )
-        price_lookup: dict[str, float] = {}
-        label_lookup: dict[str, bool] = {}
-        if snapshot_df is not None:
-            for row in snapshot_df.to_dicts():
-                mid = row.get("market_id")
-                if mid:
-                    price_lookup[mid] = float(row.get("entry_yes_price", 0.5))
-                    label = row.get("label_yes")
-                    if label is not None:
-                        label_lookup[mid] = bool(int(label))
-
-        engine = PaperTradingEngine(
-            config=PaperTradeConfig(
-                min_edge=body.min_edge,
-                bet_size=body.bet_size,
-            )
-        )
-        for pred in preds:
-            market_price = price_lookup.get(pred.market_id or "", 0.5)
-            engine.evaluate_signal(
-                market_id=pred.market_id or "",
-                token_id=pred.token_id,
-                model_prob=pred.probability_yes or 0.5,
-                market_price=market_price,
-            )
-        for mid, outcome in label_lookup.items():
-            engine.settle_position(mid, outcome)
-
-        summary = engine.summary()
-        pt_session_id = engine.persist(
-            db,
-            gp_slug=config.short_code,
-            snapshot_id=used_snapshot_id,
-            model_run_id=used_model_run_id,
+        result = run_gp_paper_trade_pipeline(
+            ctx,
+            config=config,
+            snapshot_id=body.snapshot_id,
+            baseline=body.baseline,
+            min_edge=body.min_edge,
+            bet_size=body.bet_size,
         )
         db.commit()
 
@@ -282,18 +202,50 @@ def action_run_paper_trade(
             status="ok",
             message=(
                 f"Paper trade complete for {config.name}. "
-                f"Trades: {summary['trades_executed']}, "
-                f"PnL: ${summary['total_pnl']:.2f}"
+                f"Trades: {result['trades_executed']}, "
+                f"PnL: ${result['total_pnl']:.2f}"
             ),
             details={
-                "pt_session_id": pt_session_id,
-                "snapshot_id": used_snapshot_id,
-                "model_run_id": used_model_run_id,
-                **summary,
+                **result,
             },
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except HTTPException:
         raise
     except Exception as exc:
         log.exception("run-paper-trade failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post(
+    "/actions/run-weekend-cockpit",
+    response_model=RunWeekendCockpitResponse,
+)
+def action_run_weekend_cockpit(
+    body: RunWeekendCockpitRequest,
+    db: Session = Depends(get_db_session),
+) -> RunWeekendCockpitResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import run_weekend_cockpit
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = run_weekend_cockpit(
+            ctx,
+            gp_short_code=body.gp_short_code,
+            baseline=body.baseline,
+            min_edge=body.min_edge,
+            bet_size=body.bet_size,
+            search_fallback=body.search_fallback,
+            discover_max_pages=body.discover_max_pages,
+        )
+        db.commit()
+        return RunWeekendCockpitResponse.model_validate(result)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("run-weekend-cockpit failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc

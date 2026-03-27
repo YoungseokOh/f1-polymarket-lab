@@ -264,6 +264,69 @@ class GPRegistryItem(BaseModel):
     season: int
     target_session_code: str
     variant: str
+    source_session_code: str | None
+    market_taxonomy: MarketTaxonomy
+    stage_rank: int
+    stage_label: str
+    display_label: str
+    display_description: str
+
+
+class WeekendCockpitStepResponse(BaseModel):
+    key: str
+    label: str
+    status: str
+    detail: str
+    session_code: str | None = None
+    session_key: int | None = None
+    count: int | None = None
+    reason_code: str | None = None
+    actionable_after_utc: datetime | None = None
+    resource_label: str | None = None
+
+
+class WeekendCockpitStatusResponse(BaseModel):
+    now: datetime
+    auto_selected_gp_short_code: str
+    selected_gp_short_code: str
+    selected_config: GPRegistryItem
+    available_configs: list[GPRegistryItem]
+    meeting: F1MeetingResponse | None
+    focus_session: F1SessionResponse | None
+    focus_status: str
+    timeline_completed_codes: list[str]
+    timeline_active_code: str | None
+    source_session: F1SessionResponse | None
+    target_session: F1SessionResponse | None
+    latest_paper_session: PaperTradeSessionResponse | None
+    steps: list[WeekendCockpitStepResponse]
+    blockers: list[str]
+    ready_to_run: bool
+    primary_action_title: str
+    primary_action_description: str
+    primary_action_cta: str
+    explanation: str
+
+
+class RunWeekendCockpitRequest(BaseModel):
+    gp_short_code: str | None = None
+    baseline: str = "hybrid"
+    min_edge: float = 0.05
+    bet_size: float = 10.0
+    search_fallback: bool = True
+    discover_max_pages: int = 5
+
+
+class RunWeekendCockpitResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    gp_short_code: str
+    snapshot_id: str | None
+    model_run_id: str | None
+    pt_session_id: str | None
+    executed_steps: list[WeekendCockpitStepResponse]
+    details: dict[str, object] | None = None
 
 
 class PaperTradePositionResponse(BaseModel):

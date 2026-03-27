@@ -216,6 +216,48 @@ export interface GPRegistryItem {
   season: number;
   target_session_code: string;
   variant: string;
+  source_session_code: string | null;
+  market_taxonomy: MarketTaxonomy;
+  stage_rank: number;
+  stage_label: string;
+  display_label: string;
+  display_description: string;
+}
+
+export interface WeekendCockpitStep {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+  sessionCode: string | null;
+  sessionKey: number | null;
+  count: number | null;
+  reasonCode: string | null;
+  actionableAfterUtc: string | null;
+  resourceLabel: string | null;
+}
+
+export interface WeekendCockpitStatus {
+  now: string;
+  autoSelectedGpShortCode: string;
+  selectedGpShortCode: string;
+  selectedConfig: GPRegistryItem;
+  availableConfigs: GPRegistryItem[];
+  meeting: F1Meeting | null;
+  focusSession: F1Session | null;
+  focusStatus: "upcoming" | "live" | "ended";
+  timelineCompletedCodes: string[];
+  timelineActiveCode: string | null;
+  sourceSession: F1Session | null;
+  targetSession: F1Session | null;
+  latestPaperSession: PaperTradeSession | null;
+  steps: WeekendCockpitStep[];
+  blockers: string[];
+  readyToRun: boolean;
+  primaryActionTitle: string;
+  primaryActionDescription: string;
+  primaryActionCta: string;
+  explanation: string;
 }
 
 export interface PaperTradeSession {
@@ -255,4 +297,25 @@ export interface RunPaperTradeRequest {
   baseline?: string;
   min_edge?: number;
   bet_size?: number;
+}
+
+export interface RunWeekendCockpitRequest {
+  gp_short_code?: string | null;
+  baseline?: string;
+  min_edge?: number;
+  bet_size?: number;
+  search_fallback?: boolean;
+  discover_max_pages?: number;
+}
+
+export interface RunWeekendCockpitResponse {
+  action: string;
+  status: string;
+  message: string;
+  gpShortCode: string;
+  snapshotId: string | null;
+  modelRunId: string | null;
+  ptSessionId: string | null;
+  executedSteps: WeekendCockpitStep[];
+  details?: Record<string, unknown> | null;
 }

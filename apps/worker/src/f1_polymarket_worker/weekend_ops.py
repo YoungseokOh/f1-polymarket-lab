@@ -32,7 +32,10 @@ from f1_polymarket_lab.storage.models import (
     F1TeamRadioMetadata,
     F1TelemetryIndex,
     F1Weather,
+    FeatureSnapshot,
     MappingCandidate,
+    ModelPrediction,
+    PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
     PolymarketOpenInterestHistory,
@@ -50,6 +53,17 @@ from f1_polymarket_worker.f1_backfill import (
     _normalize_validation_mode,
     _validation_requires_heavy,
 )
+from f1_polymarket_worker.gp_registry import (
+    GP_REGISTRY,
+    GPConfig,
+    build_snapshot,
+    config_display_description,
+    config_display_label,
+    config_stage_label,
+    get_gp_config,
+    run_baseline,
+    select_model_run_id,
+)
 from f1_polymarket_worker.lineage import (
     ensure_job_definition,
     finish_job_run,
@@ -63,6 +77,7 @@ from f1_polymarket_worker.market_discovery import (
     _market_session_delta_days,
     discover_session_polymarket,  # noqa: F401
 )
+from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
 from f1_polymarket_worker.pipeline import (
     PipelineContext,
     ensure_default_feature_registry,
@@ -109,6 +124,7 @@ VALID_WEEKEND_SESSION_PATTERNS = (
     SPRINT_WEEKEND_SESSION_PATTERN,
 )
 REQUIRED_WEEKEND_MAPPING_CODES = frozenset({"Q", "SQ", "R"})
+COCKPIT_TIMELINE_CODES = ("FP1", "FP2", "FP3", "Q", "R")
 
 
 def _report_slug_from_meeting(meeting: F1Meeting) -> str:
@@ -781,6 +797,979 @@ def validate_f1_weekend_subset(
         "failures": len(failures),
         "warnings": len(warnings),
         "market_probes": len(market_probes),
+    }
+
+
+def _stage_priority(config: GPConfig) -> int:
+    return config.stage_rank
+
+
+def _meeting_sort_key(meeting: F1Meeting | None, *, now: Any) -> tuple[int, float]:
+    if meeting is None:
+        return (3, float("inf"))
+    start_at = _ensure_utc(meeting.start_date_utc) if meeting.start_date_utc else None
+    end_at = _ensure_utc(meeting.end_date_utc) if meeting.end_date_utc else start_at
+    if start_at and end_at and start_at <= now <= end_at:
+        return (0, abs((now - start_at).total_seconds()))
+    if start_at and now < start_at:
+        return (1, (start_at - now).total_seconds())
+    if end_at:
+        return (2, abs((now - end_at).total_seconds()))
+    return (3, float("inf"))
+
+
+def _config_payload(config: GPConfig) -> dict[str, Any]:
+    return {
+        "name": config.name,
+        "short_code": config.short_code,
+        "meeting_key": config.meeting_key,
+        "season": config.season,
+        "target_session_code": config.target_session_code,
+        "variant": config.variant,
+        "source_session_code": config.source_session_code,
+        "market_taxonomy": config.market_taxonomy,
+        "stage_rank": config.stage_rank,
+        "stage_label": config_stage_label(config),
+        "display_label": config_display_label(config),
+        "display_description": config_display_description(config),
+    }
+
+
+def _step_payload(
+    *,
+    key: str,
+    label: str,
+    status: str,
+    detail: str,
+    session_code: str | None = None,
+    session_key: int | None = None,
+    count: int | None = None,
+    reason_code: str | None = None,
+    actionable_after_utc: Any | None = None,
+    resource_label: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "key": key,
+        "label": label,
+        "status": status,
+        "detail": detail,
+        "session_code": session_code,
+        "session_key": session_key,
+        "count": count,
+        "reason_code": reason_code,
+        "actionable_after_utc": actionable_after_utc,
+        "resource_label": resource_label,
+    }
+
+
+def _session_display_name(session_code: str | None) -> str:
+    return {
+        None: "Pre-weekend",
+        "FP1": "FP1",
+        "FP2": "FP2",
+        "FP3": "FP3",
+        "Q": "Qualifying",
+        "R": "Race",
+    }.get(session_code, session_code or "Session")
+
+
+def _resource_label_for_step(key: str, *, session_code: str | None) -> str:
+    session_name = _session_display_name(session_code)
+    return {
+        "sync_calendar": "Weekend schedule",
+        "hydrate_source_session": f"{session_name} results",
+        "discover_target_markets": f"{session_name} markets",
+        "run_paper_trade": "Paper trading",
+    }.get(key, session_name)
+
+
+def _blocked_until_detail(resource_label: str, *, until: Any) -> str:
+    return f"Check again after {until.isoformat()} to continue preparing {resource_label}."
+
+
+def _config_explanation(config: GPConfig) -> str:
+    if config.source_session_code is None:
+        return "This stage reviews Qualifying markets using pre-practice information only."
+    source_name = _session_display_name(config.source_session_code)
+    target_name = _session_display_name(config.target_session_code)
+    return (
+        f"This stage uses {source_name} results to find {target_name} markets and, "
+        "when ready, continue into paper trading."
+    )
+
+
+def _primary_action_payload(
+    *,
+    config: GPConfig,
+    sync_step: dict[str, Any],
+    hydrate_step: dict[str, Any],
+    discover_step: dict[str, Any],
+    run_step: dict[str, Any],
+    latest_paper_session: PaperTradeSession | None,
+) -> dict[str, str]:
+    source_name = _session_display_name(config.source_session_code)
+    target_name = _session_display_name(config.target_session_code)
+    if run_step["status"] == "blocked":
+        return {
+            "primary_action_title": "Wait for this stage",
+            "primary_action_description": run_step["detail"],
+            "primary_action_cta": "Not ready yet",
+        }
+    if sync_step["status"] == "ready":
+        return {
+            "primary_action_title": "Load weekend schedule",
+            "primary_action_description": (
+                "This will load the current Grand Prix schedule first, "
+                "then continue the remaining preparation steps."
+            ),
+            "primary_action_cta": "Load weekend schedule",
+        }
+    if hydrate_step["status"] == "ready":
+        return {
+            "primary_action_title": f"Load {source_name} results",
+            "primary_action_description": (
+                f"This will load {source_name} results first, then prepare {target_name} markets."
+            ),
+            "primary_action_cta": f"Load {source_name} results",
+        }
+    if discover_step["status"] == "ready":
+        return {
+            "primary_action_title": f"Find {target_name} markets",
+            "primary_action_description": (
+                f"This will discover {target_name} markets first, then continue into paper trading."
+            ),
+            "primary_action_cta": f"Find {target_name} markets",
+        }
+    rerun_label = (
+        "Run this stage again"
+        if latest_paper_session is not None
+        else "Run paper trading"
+    )
+    return {
+        "primary_action_title": f"{config_display_label(config)} is ready",
+        "primary_action_description": (
+            "All prerequisites are complete. You can run paper trading now."
+        ),
+        "primary_action_cta": rerun_label,
+    }
+
+
+def _required_session_codes(config: GPConfig) -> set[str]:
+    codes = {config.target_session_code}
+    if config.source_session_code:
+        codes.add(config.source_session_code)
+    return codes
+
+
+def _meeting_and_sessions_for_config(
+    ctx: PipelineContext,
+    *,
+    config: GPConfig,
+) -> tuple[F1Meeting | None, dict[str, F1Session]]:
+    meeting = ctx.db.scalar(
+        select(F1Meeting).where(
+            F1Meeting.meeting_key == config.meeting_key,
+            F1Meeting.season == config.season,
+        )
+    )
+    if meeting is None:
+        return None, {}
+    sessions = ctx.db.scalars(
+        select(F1Session).where(F1Session.meeting_id == meeting.id)
+    ).all()
+    return meeting, {
+        session.session_code: session
+        for session in sessions
+        if session.session_code is not None
+    }
+
+
+def _session_has_started(session: F1Session | None, *, now: Any) -> bool:
+    return bool(
+        session is not None
+        and session.date_start_utc is not None
+        and _ensure_utc(session.date_start_utc) <= now
+    )
+
+
+def _session_has_ended(session: F1Session | None, *, now: Any) -> bool:
+    return bool(
+        session is not None
+        and session.date_end_utc is not None
+        and _ensure_utc(session.date_end_utc) <= now
+    )
+
+
+def _session_is_live(session: F1Session | None, *, now: Any) -> bool:
+    return bool(
+        session is not None
+        and session.date_start_utc is not None
+        and session.date_end_utc is not None
+        and _ensure_utc(session.date_start_utc) <= now < _ensure_utc(session.date_end_utc)
+    )
+
+
+def _find_stage_config(
+    configs: list[GPConfig],
+    *,
+    source_session_code: str | None,
+    target_session_code: str,
+) -> GPConfig | None:
+    candidates = [
+        config
+        for config in configs
+        if config.source_session_code == source_session_code
+        and config.target_session_code == target_session_code
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda config: (config.stage_rank, config.short_code))
+
+
+def _focus_session_state(
+    sessions_by_code: dict[str, F1Session],
+    *,
+    now: Any,
+) -> tuple[F1Session | None, str, list[str], str | None]:
+    ordered_sessions = [
+        sessions_by_code[code]
+        for code in COCKPIT_TIMELINE_CODES
+        if code in sessions_by_code
+    ]
+    completed_codes = [
+        session.session_code
+        for session in ordered_sessions
+        if session.session_code is not None and _session_has_ended(session, now=now)
+    ]
+    live_session = next(
+        (session for session in ordered_sessions if _session_is_live(session, now=now)),
+        None,
+    )
+    if live_session is not None:
+        return live_session, "live", completed_codes, live_session.session_code
+
+    upcoming_session = next(
+        (
+            session
+            for session in ordered_sessions
+            if session.date_start_utc is not None and _ensure_utc(session.date_start_utc) > now
+        ),
+        None,
+    )
+    if upcoming_session is not None:
+        return upcoming_session, "upcoming", completed_codes, upcoming_session.session_code
+
+    if ordered_sessions:
+        last_session = ordered_sessions[-1]
+        return last_session, "ended", completed_codes, last_session.session_code
+    return None, "upcoming", [], None
+
+
+def _choose_default_config_for_meeting(
+    configs: list[GPConfig],
+    *,
+    sessions_by_code: dict[str, F1Session],
+    now: Any,
+) -> GPConfig:
+    pre_weekend_config = _find_stage_config(
+        configs,
+        source_session_code=None,
+        target_session_code="Q",
+    )
+    fp1_to_fp2_config = _find_stage_config(
+        configs,
+        source_session_code="FP1",
+        target_session_code="FP2",
+    )
+    fp2_to_q_config = _find_stage_config(
+        configs,
+        source_session_code="FP2",
+        target_session_code="Q",
+    )
+    fp3_to_q_config = _find_stage_config(
+        configs,
+        source_session_code="FP3",
+        target_session_code="Q",
+    )
+    q_to_r_config = _find_stage_config(
+        configs,
+        source_session_code="Q",
+        target_session_code="R",
+    )
+    fp1_session = sessions_by_code.get("FP1")
+    fp2_session = sessions_by_code.get("FP2")
+    fp3_session = sessions_by_code.get("FP3")
+    q_session = sessions_by_code.get("Q")
+
+    if q_to_r_config is not None and _session_has_ended(q_session, now=now):
+        return q_to_r_config
+    if fp3_to_q_config is not None and _session_has_ended(fp3_session, now=now):
+        return fp3_to_q_config
+    if fp2_to_q_config is not None and (
+        _session_is_live(fp2_session, now=now) or _session_has_ended(fp2_session, now=now)
+    ):
+        return fp2_to_q_config
+    if (
+        fp1_to_fp2_config is not None
+        and _session_has_ended(fp1_session, now=now)
+        and not _session_has_started(fp2_session, now=now)
+    ):
+        return fp1_to_fp2_config
+    if pre_weekend_config is not None and not _session_has_ended(fp1_session, now=now):
+        return pre_weekend_config
+
+    ready_configs: list[tuple[int, GPConfig]] = []
+    for config in configs:
+        if config.source_session_code is None:
+            ready_configs.append((_stage_priority(config), config))
+            continue
+        source_session = sessions_by_code.get(config.source_session_code)
+        if (
+            source_session is not None
+            and source_session.date_end_utc is not None
+            and _ensure_utc(source_session.date_end_utc) <= now
+        ):
+            ready_configs.append((_stage_priority(config), config))
+    if ready_configs:
+        return max(ready_configs, key=lambda item: (item[0], item[1].short_code))[1]
+    pre_weekend = [config for config in configs if config.source_session_code is None]
+    if pre_weekend:
+        return sorted(
+            pre_weekend,
+            key=lambda config: (config.stage_rank, config.short_code),
+        )[0]
+    return min(configs, key=lambda config: (_stage_priority(config), config.short_code))
+
+
+def _auto_select_gp_config(ctx: PipelineContext, *, now: Any) -> GPConfig:
+    configs_by_meeting: dict[tuple[int, int], list[GPConfig]] = defaultdict(list)
+    for config in GP_REGISTRY:
+        configs_by_meeting[(config.meeting_key, config.season)].append(config)
+
+    scored: list[tuple[tuple[int, float], tuple[int, int], F1Meeting | None]] = []
+    for key in configs_by_meeting:
+        meeting = ctx.db.scalar(
+            select(F1Meeting).where(
+                F1Meeting.meeting_key == key[0],
+                F1Meeting.season == key[1],
+            )
+        )
+        scored.append((_meeting_sort_key(meeting, now=now), key, meeting))
+
+    _, selected_key, _ = min(scored, key=lambda item: (item[0], item[1]))
+    representative = configs_by_meeting[selected_key][0]
+    _, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=representative)
+    return _choose_default_config_for_meeting(
+        configs_by_meeting[selected_key],
+        sessions_by_code=sessions_by_code,
+        now=now,
+    )
+
+
+def _session_result_count(ctx: PipelineContext, *, session_id: str | None) -> int:
+    if session_id is None:
+        return 0
+    return int(
+        ctx.db.scalar(
+            select(func.count())
+            .select_from(F1SessionResult)
+            .where(F1SessionResult.session_id == session_id)
+        )
+        or 0
+    )
+
+
+def _mapping_count_for_config(
+    ctx: PipelineContext,
+    *,
+    config: GPConfig,
+    target_session_id: str | None,
+) -> int:
+    if target_session_id is None:
+        return 0
+    return int(
+        ctx.db.scalar(
+            select(func.count(func.distinct(EntityMappingF1ToPolymarket.polymarket_market_id)))
+            .select_from(EntityMappingF1ToPolymarket)
+            .join(
+                PolymarketMarket,
+                PolymarketMarket.id == EntityMappingF1ToPolymarket.polymarket_market_id,
+            )
+            .where(
+                EntityMappingF1ToPolymarket.f1_session_id == target_session_id,
+                PolymarketMarket.taxonomy == config.market_taxonomy,
+                PolymarketMarket.target_session_code == config.target_session_code,
+            )
+        )
+        or 0
+    )
+
+
+def get_weekend_cockpit_status(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str | None = None,
+) -> dict[str, Any]:
+    now = _ensure_utc(utc_now())
+    auto_config = _auto_select_gp_config(ctx, now=now)
+    selected_config = get_gp_config(gp_short_code) if gp_short_code else auto_config
+    meeting, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=selected_config)
+    focus_session, focus_status, timeline_completed_codes, timeline_active_code = (
+        _focus_session_state(sessions_by_code, now=now)
+    )
+    source_session = (
+        None
+        if selected_config.source_session_code is None
+        else sessions_by_code.get(selected_config.source_session_code)
+    )
+    target_session = sessions_by_code.get(selected_config.target_session_code)
+    required_codes = _required_session_codes(selected_config)
+    calendar_completed = meeting is not None and required_codes.issubset(sessions_by_code.keys())
+    source_result_count = _session_result_count(
+        ctx,
+        session_id=None if source_session is None else source_session.id,
+    )
+    target_mapping_count = _mapping_count_for_config(
+        ctx,
+        config=selected_config,
+        target_session_id=None if target_session is None else target_session.id,
+    )
+    latest_paper_session = ctx.db.scalars(
+        select(PaperTradeSession)
+        .where(PaperTradeSession.gp_slug == selected_config.short_code)
+        .order_by(PaperTradeSession.started_at.desc())
+        .limit(1)
+    ).first()
+
+    source_name = _session_display_name(selected_config.source_session_code)
+    target_name = _session_display_name(selected_config.target_session_code)
+    sync_resource = _resource_label_for_step("sync_calendar", session_code=None)
+    hydrate_resource = _resource_label_for_step(
+        "hydrate_source_session",
+        session_code=selected_config.source_session_code,
+    )
+    discover_resource = _resource_label_for_step(
+        "discover_target_markets",
+        session_code=selected_config.target_session_code,
+    )
+    run_resource = _resource_label_for_step("run_paper_trade", session_code=None)
+
+    if calendar_completed:
+        sync_step = _step_payload(
+            key="sync_calendar",
+            label="Load weekend schedule",
+            status="completed",
+            detail="Loaded the Grand Prix schedule and the sessions required for this stage.",
+            reason_code="already_loaded",
+            resource_label=sync_resource,
+        )
+    else:
+        sync_step = _step_payload(
+            key="sync_calendar",
+            label="Load weekend schedule",
+            status="ready",
+            detail="The Grand Prix schedule and required sessions need to be loaded first.",
+            reason_code="calendar_required",
+            resource_label=sync_resource,
+        )
+
+    if selected_config.source_session_code is None:
+        hydrate_step = _step_payload(
+            key="hydrate_source_session",
+            label="Check prior session results",
+            status="skipped",
+            detail="This stage does not require results from an earlier session.",
+            reason_code="not_required",
+            resource_label=hydrate_resource,
+        )
+    elif not calendar_completed:
+        hydrate_step = _step_payload(
+            key="hydrate_source_session",
+            label=f"Load {source_name} results",
+            status="pending",
+            detail=(
+                f"Once the weekend schedule is loaded, {source_name} results "
+                "can be loaded next."
+            ),
+            session_code=selected_config.source_session_code,
+            reason_code="waiting_for_calendar",
+            resource_label=hydrate_resource,
+        )
+    elif source_session is None:
+        hydrate_step = _step_payload(
+            key="hydrate_source_session",
+            label=f"Load {source_name} results",
+            status="blocked",
+            detail=f"{source_name} session details are unavailable, so results cannot be loaded.",
+            session_code=selected_config.source_session_code,
+            reason_code="missing_source_session",
+            resource_label=hydrate_resource,
+        )
+    elif source_session.date_end_utc is None:
+        hydrate_step = _step_payload(
+            key="hydrate_source_session",
+            label=f"Load {source_name} results",
+            status="blocked",
+            detail=(
+                f"{source_name} end time is missing, so the automatic run "
+                "window cannot be determined."
+            ),
+            session_code=selected_config.source_session_code,
+            session_key=source_session.session_key,
+            reason_code="missing_session_end_time",
+            resource_label=hydrate_resource,
+        )
+    else:
+        source_end = _ensure_utc(source_session.date_end_utc)
+        if source_end > now:
+            hydrate_step = _step_payload(
+                key="hydrate_source_session",
+                label=f"Load {source_name} results",
+                status="blocked",
+                detail=(
+                    f"{source_name} is still in progress. This stage becomes available after "
+                    f"{source_end.isoformat()}."
+                ),
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                reason_code="session_in_progress",
+                actionable_after_utc=source_end,
+                resource_label=hydrate_resource,
+            )
+        elif source_result_count > 0:
+            hydrate_step = _step_payload(
+                key="hydrate_source_session",
+                label=f"Load {source_name} results",
+                status="completed",
+                detail=f"{source_name} results are already available.",
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                count=source_result_count,
+                reason_code="already_loaded",
+                resource_label=hydrate_resource,
+            )
+        else:
+            hydrate_step = _step_payload(
+                key="hydrate_source_session",
+                label=f"Load {source_name} results",
+                status="ready",
+                detail=f"{source_name} has finished, so results can be loaded now.",
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                reason_code="ready_to_hydrate",
+                resource_label=hydrate_resource,
+            )
+
+    if not calendar_completed:
+        discover_step = _step_payload(
+            key="discover_target_markets",
+            label=f"Find {target_name} markets",
+            status="pending",
+            detail=(
+                f"Once the weekend schedule is loaded, {target_name} markets "
+                "can be searched next."
+            ),
+            session_code=selected_config.target_session_code,
+            reason_code="waiting_for_calendar",
+            resource_label=discover_resource,
+        )
+    elif target_session is None:
+        discover_step = _step_payload(
+            key="discover_target_markets",
+            label=f"Find {target_name} markets",
+            status="blocked",
+            detail=(
+                f"{target_name} session details are unavailable, so market "
+                "discovery cannot start."
+            ),
+            session_code=selected_config.target_session_code,
+            reason_code="missing_target_session",
+            resource_label=discover_resource,
+        )
+    elif target_mapping_count > 0:
+        discover_step = _step_payload(
+            key="discover_target_markets",
+            label=f"Find {target_name} markets",
+            status="completed",
+            detail=f"{target_mapping_count} {target_name} markets are already linked.",
+            session_code=selected_config.target_session_code,
+            session_key=target_session.session_key,
+            count=target_mapping_count,
+            reason_code="already_loaded",
+            resource_label=discover_resource,
+        )
+    else:
+        discover_step = _step_payload(
+            key="discover_target_markets",
+            label=f"Find {target_name} markets",
+            status="ready",
+            detail=f"{target_name} markets have not been found yet. Discovery can run now.",
+            session_code=selected_config.target_session_code,
+            session_key=target_session.session_key,
+            reason_code="ready_to_discover",
+            resource_label=discover_resource,
+        )
+
+    blockers = [
+        step["detail"]
+        for step in (hydrate_step, discover_step)
+        if step["status"] == "blocked"
+    ]
+    if blockers:
+        run_step = _step_payload(
+            key="run_paper_trade",
+            label="Run paper trading",
+            status="blocked",
+            detail=blockers[0],
+            reason_code="blocked_by_prerequisite",
+            resource_label=run_resource,
+        )
+    else:
+        latest_detail = (
+            f"A previous run already exists ({latest_paper_session.id[:8]}...)."
+            if latest_paper_session is not None
+            else "No paper-trading run exists for this stage yet."
+        )
+        run_step = _step_payload(
+            key="run_paper_trade",
+            label="Run paper trading",
+            status="ready",
+            detail=(
+                "All prerequisites are complete. "
+                f"You can run paper trading now. {latest_detail}"
+            ),
+            reason_code="ready_to_run",
+            resource_label=run_resource,
+        )
+
+    available_configs = [
+        _config_payload(config)
+        for config in GP_REGISTRY
+        if (
+            config.meeting_key == selected_config.meeting_key
+            and config.season == selected_config.season
+        )
+    ]
+    available_configs.sort(
+        key=lambda config: (config["stage_rank"], config["short_code"])
+    )
+    primary_action = _primary_action_payload(
+        config=selected_config,
+        sync_step=sync_step,
+        hydrate_step=hydrate_step,
+        discover_step=discover_step,
+        run_step=run_step,
+        latest_paper_session=latest_paper_session,
+    )
+
+    return {
+        "now": now,
+        "auto_selected_gp_short_code": auto_config.short_code,
+        "selected_gp_short_code": selected_config.short_code,
+        "selected_config": _config_payload(selected_config),
+        "available_configs": available_configs,
+        "meeting": meeting,
+        "focus_session": focus_session,
+        "focus_status": focus_status,
+        "timeline_completed_codes": timeline_completed_codes,
+        "timeline_active_code": timeline_active_code,
+        "source_session": source_session,
+        "target_session": target_session,
+        "latest_paper_session": latest_paper_session,
+        "steps": [sync_step, hydrate_step, discover_step, run_step],
+        "blockers": blockers,
+        "ready_to_run": not blockers,
+        "primary_action_title": primary_action["primary_action_title"],
+        "primary_action_description": primary_action["primary_action_description"],
+        "primary_action_cta": primary_action["primary_action_cta"],
+        "explanation": _config_explanation(selected_config),
+    }
+
+
+def run_gp_paper_trade_pipeline(
+    ctx: PipelineContext,
+    *,
+    config: GPConfig,
+    snapshot_id: str | None = None,
+    baseline: str = "hybrid",
+    min_edge: float = 0.05,
+    bet_size: float = 10.0,
+    max_daily_loss: float = 100.0,
+) -> dict[str, Any]:
+    import polars as pl
+
+    ensure_default_feature_registry(ctx)
+
+    if snapshot_id is None:
+        snap_result = build_snapshot(
+            ctx,
+            config,
+            meeting_key=config.meeting_key,
+            season=config.season,
+            entry_offset_min=config.entry_offset_min,
+            fidelity=config.fidelity,
+        )
+        used_snapshot_id = snap_result.get("snapshot_id")
+        if not used_snapshot_id:
+            raise ValueError(f"Snapshot build failed: {snap_result}")
+    else:
+        used_snapshot_id = snapshot_id
+
+    baseline_result = run_baseline(
+        ctx,
+        config,
+        snapshot_id=used_snapshot_id,
+        min_edge=min_edge,
+    )
+    model_run_ids: list[str] = baseline_result.get("model_runs", [])
+    used_model_run_id, resolved_baseline = select_model_run_id(
+        config,
+        model_run_ids,
+        baseline=baseline,
+    )
+
+    predictions = ctx.db.scalars(
+        select(ModelPrediction).where(ModelPrediction.model_run_id == used_model_run_id)
+    ).all()
+    snapshot = None if used_snapshot_id is None else ctx.db.get(FeatureSnapshot, used_snapshot_id)
+    if not predictions:
+        raise ValueError("No predictions found for model run")
+
+    snapshot_df = (
+        pl.read_parquet(snapshot.storage_path)
+        if snapshot is not None and snapshot.storage_path
+        else None
+    )
+    price_lookup: dict[str, float] = {}
+    label_lookup: dict[str, bool] = {}
+    if snapshot_df is not None:
+        for row in snapshot_df.to_dicts():
+            market_id = row.get("market_id")
+            if market_id:
+                price_lookup[market_id] = float(row.get("entry_yes_price", 0.5))
+                label = row.get("label_yes")
+                if label is not None:
+                    label_lookup[market_id] = bool(int(label))
+
+    engine = PaperTradingEngine(
+        config=PaperTradeConfig(
+            min_edge=min_edge,
+            bet_size=bet_size,
+            max_daily_loss=max_daily_loss,
+        )
+    )
+    for prediction in predictions:
+        market_price = price_lookup.get(prediction.market_id or "", 0.5)
+        engine.evaluate_signal(
+            market_id=prediction.market_id or "",
+            token_id=prediction.token_id,
+            model_prob=prediction.probability_yes or 0.5,
+            market_price=market_price,
+        )
+    for market_id, outcome in label_lookup.items():
+        engine.settle_position(market_id, outcome)
+
+    summary = engine.summary()
+    log_path = (
+        ctx.settings.data_root
+        / "reports"
+        / "paper_trading"
+        / f"{config.short_code}_{used_model_run_id}.json"
+    )
+    engine.save_log(log_path)
+    pt_session_id = engine.persist(
+        ctx.db,
+        gp_slug=config.short_code,
+        snapshot_id=used_snapshot_id,
+        model_run_id=used_model_run_id,
+        log_path=log_path,
+    )
+    return {
+        "snapshot_id": used_snapshot_id,
+        "model_run_id": used_model_run_id,
+        "baseline": resolved_baseline,
+        "pt_session_id": pt_session_id,
+        "log_path": str(log_path),
+        **summary,
+    }
+
+
+def run_weekend_cockpit(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str | None = None,
+    baseline: str = "hybrid",
+    min_edge: float = 0.05,
+    bet_size: float = 10.0,
+    search_fallback: bool = True,
+    discover_max_pages: int = 5,
+) -> dict[str, Any]:
+    status = get_weekend_cockpit_status(ctx, gp_short_code=gp_short_code)
+    if not status["ready_to_run"]:
+        raise ValueError("; ".join(status["blockers"]) or "Weekend cockpit is blocked")
+
+    config = get_gp_config(status["selected_gp_short_code"])
+    executed_steps: list[dict[str, Any]] = []
+
+    sync_step = next(step for step in status["steps"] if step["key"] == "sync_calendar")
+    if sync_step["status"] == "completed":
+        executed_steps.append(
+            _step_payload(
+                key="sync_calendar",
+                label="Sync calendar",
+                status="skipped",
+                detail="Calendar already loaded.",
+            )
+        )
+    else:
+        sync_result = sync_f1_calendar(ctx, season=config.season)
+        executed_steps.append(
+            _step_payload(
+                key="sync_calendar",
+                label="Sync calendar",
+                status="completed",
+                detail=f"Calendar sync finished for season {config.season}.",
+                count=int(sync_result.get("sessions", 0)),
+            )
+        )
+        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+
+    hydrate_step = next(step for step in status["steps"] if step["key"] == "hydrate_source_session")
+    source_session = status["source_session"]
+    if hydrate_step["status"] == "skipped":
+        executed_steps.append(
+            _step_payload(
+                key="hydrate_source_session",
+                label="Hydrate source session",
+                status="skipped",
+                detail=hydrate_step["detail"],
+            )
+        )
+    elif hydrate_step["status"] == "completed":
+        executed_steps.append(
+            _step_payload(
+                key="hydrate_source_session",
+                label="Hydrate source session",
+                status="skipped",
+                detail=hydrate_step["detail"],
+                session_code=hydrate_step["session_code"],
+                session_key=hydrate_step["session_key"],
+                count=hydrate_step["count"],
+            )
+        )
+    else:
+        if source_session is None:
+            raise ValueError("Source session unavailable after calendar sync")
+        hydrate_result = hydrate_f1_session(
+            ctx,
+            session_key=source_session.session_key,
+            include_extended=True,
+            include_heavy=source_session.session_code in {"Q", "SQ", "R"},
+        )
+        executed_steps.append(
+            _step_payload(
+                key="hydrate_source_session",
+                label="Hydrate source session",
+                status="completed",
+                detail=f"Hydrated {source_session.session_code} session data.",
+                session_code=source_session.session_code,
+                session_key=source_session.session_key,
+                count=int(hydrate_result.get("records_written", 0))
+                if hydrate_result.get("records_written") is not None
+                else None,
+            )
+        )
+        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+        hydrate_step = next(
+            step for step in status["steps"] if step["key"] == "hydrate_source_session"
+        )
+        if hydrate_step["status"] != "completed":
+            raise ValueError(hydrate_step["detail"])
+
+    discover_step = next(
+        step for step in status["steps"] if step["key"] == "discover_target_markets"
+    )
+    target_session = status["target_session"]
+    if discover_step["status"] == "completed":
+        executed_steps.append(
+            _step_payload(
+                key="discover_target_markets",
+                label="Discover target markets",
+                status="skipped",
+                detail=discover_step["detail"],
+                session_code=discover_step["session_code"],
+                session_key=discover_step["session_key"],
+                count=discover_step["count"],
+            )
+        )
+    else:
+        if target_session is None:
+            raise ValueError("Target session unavailable after calendar sync")
+        discovery_result = discover_session_polymarket(
+            ctx,
+            session_key=target_session.session_key,
+            max_pages=discover_max_pages,
+            search_fallback=search_fallback,
+        )
+        executed_steps.append(
+            _step_payload(
+                key="discover_target_markets",
+                label="Discover target markets",
+                status="completed",
+                detail=(
+                    f"Discovered Polymarket markets for {target_session.session_code}."
+                ),
+                session_code=target_session.session_code,
+                session_key=target_session.session_key,
+                count=int(discovery_result.get("auto_mappings", 0))
+                if discovery_result.get("auto_mappings") is not None
+                else None,
+            )
+        )
+        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+        discover_step = next(
+            step for step in status["steps"] if step["key"] == "discover_target_markets"
+        )
+        if discover_step["status"] != "completed":
+            raise ValueError(discover_step["detail"])
+
+    if status["blockers"]:
+        raise ValueError("; ".join(status["blockers"]))
+
+    paper_result = run_gp_paper_trade_pipeline(
+        ctx,
+        config=config,
+        baseline=baseline,
+        min_edge=min_edge,
+        bet_size=bet_size,
+    )
+    executed_steps.append(
+        _step_payload(
+            key="run_paper_trade",
+            label="Run paper trade",
+            status="completed",
+            detail=(
+                f"Paper trade complete. Trades: {paper_result['trades_executed']}, "
+                f"PnL: ${paper_result['total_pnl']:.2f}"
+            ),
+            count=int(paper_result["trades_executed"]),
+        )
+    )
+
+    return {
+        "action": "run-weekend-cockpit",
+        "status": "ok",
+        "message": (
+            f"Weekend cockpit complete for {config.name} ({config.short_code}). "
+            f"Trades: {paper_result['trades_executed']}, "
+            f"PnL: ${paper_result['total_pnl']:.2f}"
+        ),
+        "gp_short_code": config.short_code,
+        "snapshot_id": paper_result["snapshot_id"],
+        "model_run_id": paper_result["model_run_id"],
+        "pt_session_id": paper_result["pt_session_id"],
+        "executed_steps": executed_steps,
+        "details": paper_result,
     }
 
 

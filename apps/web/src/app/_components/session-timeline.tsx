@@ -1,3 +1,5 @@
+import React from "react";
+
 const stages = [
   { code: "FP1", label: "FP1" },
   { code: "FP2", label: "FP2" },

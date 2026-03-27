@@ -13,6 +13,9 @@ from f1_polymarket_worker.market_discovery import (
 )
 from f1_polymarket_worker.weekend_ops import (
     capture_live_weekend,
+    get_weekend_cockpit_status,
+    run_gp_paper_trade_pipeline,
+    run_weekend_cockpit,
     validate_f1_weekend_subset,
 )
 
@@ -21,7 +24,10 @@ __all__ = [
     "backfill_f1_history_all",
     "capture_live_weekend",
     "discover_session_polymarket",
+    "get_weekend_cockpit_status",
     "hydrate_polymarket_f1_history",
+    "run_gp_paper_trade_pipeline",
+    "run_weekend_cockpit",
     "sync_polymarket_f1_catalog",
     "validate_f1_weekend_subset",
 ]

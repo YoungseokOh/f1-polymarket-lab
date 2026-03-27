@@ -22,8 +22,12 @@ import type {
   PricePoint,
   RunBacktestRequest,
   RunPaperTradeRequest,
+  RunWeekendCockpitRequest,
+  RunWeekendCockpitResponse,
   SyncCalendarRequest,
   SyncF1MarketsRequest,
+  WeekendCockpitStatus,
+  WeekendCockpitStep,
 } from "@f1/shared-types";
 
 type QueryValue = boolean | number | string | null | undefined;
@@ -405,6 +409,20 @@ export const sdk = {
       "/api/v1/actions/sync-f1-markets",
       body ?? {},
     ),
+  weekendCockpitStatus: async (
+    gpShortCode?: string,
+  ): Promise<WeekendCockpitStatus> => {
+    const path = gpShortCode
+      ? `/api/v1/weekend-cockpit/status?gp_short_code=${encodeURIComponent(gpShortCode)}`
+      : "/api/v1/weekend-cockpit/status";
+    const record = await apiGet<WeekendCockpitStatusApi>(path);
+    return mapWeekendCockpitStatus(record);
+  },
+  runWeekendCockpit: (body?: RunWeekendCockpitRequest) =>
+    apiPost<RunWeekendCockpitRequest, RunWeekendCockpitResponseApi>(
+      "/api/v1/actions/run-weekend-cockpit",
+      body ?? {},
+    ).then(mapRunWeekendCockpitResponse),
 
   // Paper trading
   paperTradeSessions: async (gpSlug?: string): Promise<PaperTradeSession[]> => {
@@ -634,6 +652,54 @@ type PaperTradePositionApi = {
   realized_pnl: number | null;
 };
 
+type WeekendCockpitStepApi = {
+  key: string;
+  label: string;
+  status: string;
+  detail: string;
+  session_code: string | null;
+  session_key: number | null;
+  count: number | null;
+  reason_code: string | null;
+  actionable_after_utc: string | null;
+  resource_label: string | null;
+};
+
+type WeekendCockpitStatusApi = {
+  now: string;
+  auto_selected_gp_short_code: string;
+  selected_gp_short_code: string;
+  selected_config: GPRegistryItem;
+  available_configs: GPRegistryItem[];
+  meeting: F1MeetingApi | null;
+  focus_session: F1SessionApi | null;
+  focus_status: WeekendCockpitStatus["focusStatus"];
+  timeline_completed_codes: string[];
+  timeline_active_code: string | null;
+  source_session: F1SessionApi | null;
+  target_session: F1SessionApi | null;
+  latest_paper_session: PaperTradeSessionApi | null;
+  steps: WeekendCockpitStepApi[];
+  blockers: string[];
+  ready_to_run: boolean;
+  primary_action_title: string;
+  primary_action_description: string;
+  primary_action_cta: string;
+  explanation: string;
+};
+
+type RunWeekendCockpitResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  gp_short_code: string;
+  snapshot_id: string | null;
+  model_run_id: string | null;
+  pt_session_id: string | null;
+  executed_steps: WeekendCockpitStepApi[];
+  details: Record<string, unknown> | null;
+};
+
 function mapPaperTradeSession(record: PaperTradeSessionApi): PaperTradeSession {
   return {
     id: record.id,
@@ -668,5 +734,67 @@ function mapPaperTradePosition(
     exitPrice: record.exit_price,
     exitTime: record.exit_time,
     realizedPnl: record.realized_pnl,
+  };
+}
+
+function mapWeekendCockpitStep(
+  record: WeekendCockpitStepApi,
+): WeekendCockpitStep {
+  return {
+    key: record.key,
+    label: record.label,
+    status: record.status,
+    detail: record.detail,
+    sessionCode: record.session_code,
+    sessionKey: record.session_key,
+    count: record.count,
+    reasonCode: record.reason_code,
+    actionableAfterUtc: record.actionable_after_utc,
+    resourceLabel: record.resource_label,
+  };
+}
+
+function mapWeekendCockpitStatus(
+  record: WeekendCockpitStatusApi,
+): WeekendCockpitStatus {
+  return {
+    now: record.now,
+    autoSelectedGpShortCode: record.auto_selected_gp_short_code,
+    selectedGpShortCode: record.selected_gp_short_code,
+    selectedConfig: record.selected_config,
+    availableConfigs: record.available_configs,
+    meeting: record.meeting ? mapMeeting(record.meeting) : null,
+    focusSession: record.focus_session ? mapSession(record.focus_session) : null,
+    focusStatus: record.focus_status,
+    timelineCompletedCodes: record.timeline_completed_codes,
+    timelineActiveCode: record.timeline_active_code,
+    sourceSession: record.source_session ? mapSession(record.source_session) : null,
+    targetSession: record.target_session ? mapSession(record.target_session) : null,
+    latestPaperSession: record.latest_paper_session
+      ? mapPaperTradeSession(record.latest_paper_session)
+      : null,
+    steps: record.steps.map(mapWeekendCockpitStep),
+    blockers: record.blockers,
+    readyToRun: record.ready_to_run,
+    primaryActionTitle: record.primary_action_title,
+    primaryActionDescription: record.primary_action_description,
+    primaryActionCta: record.primary_action_cta,
+    explanation: record.explanation,
+  };
+}
+
+function mapRunWeekendCockpitResponse(
+  record: RunWeekendCockpitResponseApi,
+): RunWeekendCockpitResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    gpShortCode: record.gp_short_code,
+    snapshotId: record.snapshot_id,
+    modelRunId: record.model_run_id,
+    ptSessionId: record.pt_session_id,
+    executedSteps: record.executed_steps.map(mapWeekendCockpitStep),
+    details: record.details,
   };
 }
