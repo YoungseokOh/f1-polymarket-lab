@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -43,6 +44,63 @@ BACKTEST_STAGE = "pole_position_backtest"
 DEFAULT_BET_SIZE = 10.0
 DEFAULT_MIN_EDGE = 0.05
 FEE_RATE = 0.02  # Polymarket taker fee ~2%
+
+
+@dataclass(frozen=True, slots=True)
+class CheckpointPolicyConfig:
+    open_edge: float = 0.05
+    add_edge: float = 0.08
+    reduce_edge: float = 0.03
+    close_edge: float = 0.0
+    bet_size: float = DEFAULT_BET_SIZE
+
+
+def _decide_checkpoint_action(
+    *,
+    current_edge: float,
+    current_position: float,
+    config: CheckpointPolicyConfig,
+) -> str:
+    if current_position <= 0.0 and current_edge >= config.open_edge:
+        return "open"
+    if current_position > 0.0 and current_edge >= config.add_edge:
+        return "add"
+    if current_position > 0.0 and current_edge <= config.close_edge:
+        return "close"
+    if current_position > 0.0 and current_edge <= config.reduce_edge:
+        return "reduce"
+    return "hold"
+
+
+def settle_stateful_checkpoint_backtest(
+    checkpoint_rows: list[dict[str, Any]],
+    *,
+    policy: CheckpointPolicyConfig,
+) -> list[dict[str, Any]]:
+    state: dict[str, float] = {}
+    decisions: list[dict[str, Any]] = []
+
+    for row in checkpoint_rows:
+        market_id = str(row["market_id"])
+        current_position = state.get(market_id, 0.0)
+        action = _decide_checkpoint_action(
+            current_edge=float(row["edge"]),
+            current_position=current_position,
+            config=policy,
+        )
+        if action == "open":
+            current_position = policy.bet_size
+        elif action == "add":
+            current_position += policy.bet_size
+        elif action == "reduce":
+            current_position = max(0.0, current_position - policy.bet_size)
+        elif action == "close":
+            current_position = 0.0
+
+        state[market_id] = current_position
+        decisions.append({**row, "action": action, "position_after": current_position})
+
+    return decisions
 
 
 # ---------------------------------------------------------------------------
