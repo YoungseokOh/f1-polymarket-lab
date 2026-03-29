@@ -203,6 +203,7 @@ def backfill_f1_history_command(
     execute: bool = typer.Option(False, "--execute/--plan-only"),
     include_extended: bool = typer.Option(True, "--extended/--core-only"),
     heavy_mode: str = typer.Option("weekend", "--heavy-mode"),
+    linked_markets_only: bool = typer.Option(False, "--linked-markets-only/--all-sessions"),
 ) -> None:
     settings = get_settings()
     with db_session(settings.database_url) as session:
@@ -213,6 +214,7 @@ def backfill_f1_history_command(
             season_end=season_end,
             include_extended=include_extended,
             heavy_mode=heavy_mode,
+            linked_markets_only=linked_markets_only,
         )
     typer.echo(result)
 
@@ -305,6 +307,7 @@ def backfill_f1_history_all_command(
     execute: bool = typer.Option(False, "--execute/--plan-only"),
     include_extended: bool = typer.Option(True, "--extended/--core-only"),
     heavy_mode: str = typer.Option("weekend", "--heavy-mode"),
+    linked_markets_only: bool = typer.Option(False, "--linked-markets-only/--all-sessions"),
 ) -> None:
     settings = get_settings()
     with db_session(settings.database_url) as session:
@@ -315,6 +318,7 @@ def backfill_f1_history_all_command(
             season_end=season_end,
             include_extended=include_extended,
             heavy_mode=heavy_mode,
+            linked_markets_only=linked_markets_only,
         )
     typer.echo(result)
 
@@ -842,6 +846,7 @@ def train_multitask_walk_forward_command(
 ) -> None:
     """Train the shared-encoder multitask model across walk-forward GP splits."""
     import json
+    from datetime import datetime
     from pathlib import Path
 
     import polars as pl_module
@@ -853,6 +858,20 @@ def train_multitask_walk_forward_command(
     )
     from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
     from f1_polymarket_lab.storage.repository import upsert_records
+
+    def load_snapshot_frames(paths: list[str]) -> list[pl_module.DataFrame]:
+        frames: list[pl_module.DataFrame] = []
+        for path in paths:
+            frame = pl_module.read_parquet(path)
+            if frame.height == 0 or frame.width == 0:
+                continue
+            frames.append(frame)
+        return frames
+
+    def serialize_timestamp(value: object) -> str:
+        if isinstance(value, datetime):
+            return value.isoformat()
+        return str(value)
 
     manifest_payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
     grouped: dict[int, list[dict[str, object]]] = {}
@@ -897,10 +916,23 @@ def train_multitask_walk_forward_command(
                 typer.echo(f"Skipping test meeting_key={split.test_meeting_key}: no test data")
                 continue
 
-            train_df = pl_module.concat([pl_module.read_parquet(path) for path in train_paths])
-            test_df = pl_module.concat(
-                [pl_module.read_parquet(str(row["path"])) for row in test_snapshots]
-            )
+            train_frames = load_snapshot_frames(train_paths)
+            test_frames = load_snapshot_frames([str(row["path"]) for row in test_snapshots])
+            if not train_frames:
+                typer.echo(
+                    f"Skipping test meeting_key={split.test_meeting_key}: "
+                    "no non-empty training rows"
+                )
+                continue
+            if not test_frames:
+                typer.echo(
+                    f"Skipping test meeting_key={split.test_meeting_key}: "
+                    "no non-empty test rows"
+                )
+                continue
+
+            train_df = pl_module.concat(train_frames)
+            test_df = pl_module.concat(test_frames)
 
             model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
             result = train_multitask_split(
@@ -911,26 +943,46 @@ def train_multitask_walk_forward_command(
                 config=MultitaskTrainerConfig(),
             )
 
-            run_record = ModelRun(
-                id=result.model_run_id,
-                stage=stage,
-                model_family="torch_multitask",
-                model_name="shared_encoder_multitask_v1",
-                dataset_version="multitask_v1",
-                feature_snapshot_id=None,
-                test_start=None,
-                test_end=None,
-                config_json=result.config,
-                metrics_json=result.metrics,
-            )
-            upsert_records(session, ModelRun, [run_record], key_columns=["id"])
+            test_timestamps = [
+                value
+                for value in test_df["as_of_ts"].to_list()
+                if isinstance(value, datetime)
+            ] if "as_of_ts" in test_df.columns else []
 
-            pred_records = [ModelPrediction(**row) for row in result.predictions]
+            run_record = {
+                "id": result.model_run_id,
+                "stage": stage,
+                "model_family": "torch_multitask",
+                "model_name": "shared_encoder_multitask_v1",
+                "dataset_version": "multitask_v1",
+                "feature_snapshot_id": None,
+                "test_start": min(test_timestamps) if test_timestamps else None,
+                "test_end": max(test_timestamps) if test_timestamps else None,
+                "config_json": result.config,
+                "metrics_json": result.metrics,
+            }
+            upsert_records(session, ModelRun, [run_record], conflict_columns=["id"])
+
+            pred_records: list[dict[str, object]] = []
+            for row in result.predictions:
+                checkpoint = str((row.get("explanation_json") or {}).get("as_of_checkpoint", "NA"))
+                pred_records.append(
+                    {
+                        **row,
+                        "id": stable_uuid(
+                            "multitask-prediction",
+                            result.model_run_id,
+                            row.get("market_id"),
+                            row.get("token_id"),
+                            checkpoint,
+                            serialize_timestamp(row.get("as_of_ts")),
+                        ),
+                    }
+                )
             upsert_records(
                 session,
                 ModelPrediction,
                 pred_records,
-                key_columns=["model_run_id", "market_id"],
             )
 
             session.commit()

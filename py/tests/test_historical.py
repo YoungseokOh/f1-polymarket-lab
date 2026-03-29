@@ -528,6 +528,59 @@ def test_backfill_f1_history_all_splits_historical_and_openf1_ranges(
         session.close()
 
 
+def test_backfill_f1_history_all_forwards_linked_market_filter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, context = build_context(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_openf1(
+        ctx: PipelineContext,
+        *,
+        season_start: int,
+        season_end: int,
+        include_extended: bool,
+        heavy_mode: str,
+        linked_markets_only: bool,
+    ) -> dict[str, object]:
+        observed.update(
+            {
+                "season_start": season_start,
+                "season_end": season_end,
+                "include_extended": include_extended,
+                "heavy_mode": heavy_mode,
+                "linked_markets_only": linked_markets_only,
+            }
+        )
+        return {"status": "completed", "sessions_hydrated": 2}
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.f1_backfill.backfill_f1_history",
+        fake_openf1,
+    )
+
+    try:
+        result = backfill_f1_history_all(
+            context,
+            season_start=2023,
+            season_end=2024,
+            linked_markets_only=True,
+        )
+        session.commit()
+
+        assert result["status"] == "completed"
+        assert observed == {
+            "season_start": 2023,
+            "season_end": 2024,
+            "include_extended": True,
+            "heavy_mode": "weekend",
+            "linked_markets_only": True,
+        }
+    finally:
+        session.close()
+
+
 # ---------------------------------------------------------------------------
 # sync_openf1_season_range
 # ---------------------------------------------------------------------------

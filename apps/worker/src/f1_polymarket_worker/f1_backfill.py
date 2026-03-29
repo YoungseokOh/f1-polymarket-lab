@@ -112,6 +112,7 @@ def backfill_f1_history(
     season_end: int | None = None,
     include_extended: bool = True,
     heavy_mode: str = "weekend",
+    linked_markets_only: bool = False,
 ) -> dict[str, Any]:
     season_end = season_end or utc_now().year
     heavy_mode = _normalize_heavy_mode(heavy_mode)
@@ -139,6 +140,7 @@ def backfill_f1_history(
             "season_end": season_end,
             "include_extended": include_extended,
             "heavy_mode": heavy_mode,
+            "linked_markets_only": linked_markets_only,
         },
         cursor_before=None if cursor_state is None else cursor_state.cursor_value,
     )
@@ -155,6 +157,7 @@ def backfill_f1_history(
     ensure_default_feature_registry(ctx)
     sessions_hydrated = 0
     sessions_skipped = 0
+    sessions_filtered_no_markets = 0
     historical_cutoff = utc_now() - timedelta(minutes=30)
     for season in range(season_start, season_end + 1):
         sync_f1_calendar(ctx, season=season)
@@ -166,12 +169,26 @@ def backfill_f1_history(
             .where(F1Session.session_code.in_(tuple(MODERN_WEEKEND_SESSION_CODES)))
             .order_by(F1Session.date_start_utc.asc())
         ).all()
+        eligible_meeting_ids: set[str] | None = None
+        if linked_markets_only:
+            eligible_meeting_ids = {
+                session.meeting_id
+                for session in season_sessions
+                if session.meeting_id is not None and _session_has_linked_markets(ctx, session)
+            }
         for session in season_sessions:
             if (
                 session.date_end_utc is None
                 or _ensure_utc(session.date_end_utc) > historical_cutoff
             ):
                 sessions_skipped += 1
+                continue
+            if linked_markets_only and (
+                session.meeting_id is None
+                or eligible_meeting_ids is None
+                or session.meeting_id not in eligible_meeting_ids
+            ):
+                sessions_filtered_no_markets += 1
                 continue
             include_heavy = heavy_mode == "weekend"
             hydrate_f1_session(
@@ -193,6 +210,7 @@ def backfill_f1_history(
             "season_end": season_end,
             "sessions_hydrated": sessions_hydrated,
             "sessions_skipped": sessions_skipped,
+            "sessions_filtered_no_markets": sessions_filtered_no_markets,
             "synced_at": utc_now().isoformat(),
         },
     )
@@ -205,6 +223,7 @@ def backfill_f1_history(
             "season_end": season_end,
             "sessions_hydrated": sessions_hydrated,
             "sessions_skipped": sessions_skipped,
+            "sessions_filtered_no_markets": sessions_filtered_no_markets,
             "synced_at": utc_now().isoformat(),
         },
         records_written=sessions_hydrated,
@@ -215,6 +234,7 @@ def backfill_f1_history(
         "seasons": season_end - season_start + 1,
         "sessions_hydrated": sessions_hydrated,
         "sessions_skipped": sessions_skipped,
+        "sessions_filtered_no_markets": sessions_filtered_no_markets,
     }
 
 
@@ -226,6 +246,7 @@ def backfill_f1_history_all(
     include_extended: bool = True,
     heavy_mode: str = "weekend",
     jolpica_resources: tuple[str, ...] = JOLPICA_DEFAULT_RESOURCES,
+    linked_markets_only: bool = False,
 ) -> dict[str, Any]:
     season_end = season_end or utc_now().year
     heavy_mode = _normalize_heavy_mode(heavy_mode)
@@ -254,6 +275,7 @@ def backfill_f1_history_all(
             "season_end": season_end,
             "include_extended": include_extended,
             "heavy_mode": heavy_mode,
+            "linked_markets_only": linked_markets_only,
             "jolpica_resources": list(jolpica_resources),
         },
         cursor_before=None if cursor_state is None else cursor_state.cursor_value,
@@ -300,6 +322,7 @@ def backfill_f1_history_all(
             season_end=season_end,
             include_extended=include_extended,
             heavy_mode=heavy_mode,
+            linked_markets_only=linked_markets_only,
         )
         child_runs["openf1"] = openf1_result
         records_written += int(openf1_result.get("sessions_hydrated", 0))

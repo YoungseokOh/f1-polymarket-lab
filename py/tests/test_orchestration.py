@@ -2116,6 +2116,104 @@ def test_backfill_f1_history_enables_heavy_for_weekend_sessions(
         session.close()
 
 
+def test_backfill_f1_history_filters_to_linked_market_weekends(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, context = build_context(tmp_path)
+    hydrated: list[int] = []
+
+    def fake_sync(ctx: PipelineContext, *, season: int) -> dict[str, object]:
+        linked_meeting = F1Meeting(
+            id=f"meeting:{season}:linked",
+            meeting_key=season,
+            season=season,
+            meeting_name=f"Linked {season}",
+        )
+        linked_practice = F1Session(
+            id=f"session:{season}:fp1",
+            session_key=season * 10 + 1,
+            meeting_id=linked_meeting.id,
+            session_name="Practice 1",
+            session_code="FP1",
+            date_start_utc=utc_now(),
+            date_end_utc=datetime(2025, 3, 1, 2, 0, tzinfo=timezone.utc),
+            is_practice=True,
+            raw_payload={"meeting_key": season},
+        )
+        linked_target = F1Session(
+            id=f"session:{season}:q",
+            session_key=season * 10 + 2,
+            meeting_id=linked_meeting.id,
+            session_name="Qualifying",
+            session_code="Q",
+            date_start_utc=utc_now(),
+            date_end_utc=datetime(2025, 3, 1, 4, 0, tzinfo=timezone.utc),
+            is_practice=False,
+            raw_payload={"meeting_key": season},
+        )
+        unlinked_meeting = F1Meeting(
+            id=f"meeting:{season}:unlinked",
+            meeting_key=season + 1,
+            season=season,
+            meeting_name=f"Unlinked {season}",
+        )
+        unlinked_race = F1Session(
+            id=f"session:{season}:r",
+            session_key=season * 10 + 3,
+            meeting_id=unlinked_meeting.id,
+            session_name="Race",
+            session_code="R",
+            date_start_utc=utc_now(),
+            date_end_utc=datetime(2025, 3, 1, 6, 0, tzinfo=timezone.utc),
+            is_practice=False,
+            raw_payload={"meeting_key": season + 1},
+        )
+        session.merge(linked_meeting)
+        session.merge(linked_practice)
+        session.merge(linked_target)
+        session.merge(unlinked_meeting)
+        session.merge(unlinked_race)
+        session.flush()
+        return {"status": "completed"}
+
+    def fake_hydrate(
+        ctx: PipelineContext,
+        *,
+        session_key: int,
+        include_extended: bool,
+        include_heavy: bool,
+    ) -> dict[str, object]:
+        hydrated.append(session_key)
+        return {"status": "completed", "records_written": 1}
+
+    monkeypatch.setattr("f1_polymarket_worker.f1_backfill.sync_f1_calendar", fake_sync)
+    monkeypatch.setattr("f1_polymarket_worker.f1_backfill.hydrate_f1_session", fake_hydrate)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.f1_backfill._session_has_linked_markets",
+        lambda _ctx, session_row: session_row.session_key == 20252,
+    )
+
+    try:
+        result = backfill_f1_history(
+            context,
+            season_start=2025,
+            season_end=2025,
+            include_extended=True,
+            heavy_mode="none",
+            linked_markets_only=True,
+        )
+        session.commit()
+
+        assert result["status"] == "completed"
+        assert hydrated == [20251, 20252]
+        assert result["sessions_hydrated"] == 2
+        assert result["sessions_skipped"] == 0
+        assert result["sessions_filtered_no_markets"] == 1
+    finally:
+        session.close()
+
+
 def test_discover_session_polymarket_search_fallback_maps_race_head_to_head(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

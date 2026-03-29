@@ -1,16 +1,23 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import polars as pl
+import pytest
 import torch
+from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.models.multitask_model import MultitaskModelConfig, MultitaskTabularModel
 from f1_polymarket_lab.models.multitask_trainer import (
     MultitaskTrainerConfig,
     train_multitask_split,
 )
+from f1_polymarket_lab.storage.db import Base
+from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
 from f1_polymarket_worker.cli import app
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 
@@ -64,6 +71,19 @@ def build_multitask_df(meeting_key: int) -> pl.DataFrame:
                 }
             )
     return pl.DataFrame(rows)
+
+
+def build_multitask_df_for_checkpoint(meeting_key: int, checkpoint: str) -> pl.DataFrame:
+    checkpoint_ordinal = {"FP1": 1, "FP2": 2, "FP3": 3, "Q": 4}[checkpoint]
+    df = build_multitask_df(meeting_key)
+    return df.with_columns(
+        pl.lit(checkpoint).alias("as_of_checkpoint"),
+        pl.lit(int(checkpoint_ordinal >= 1)).alias("has_fp1"),
+        pl.lit(int(checkpoint_ordinal >= 2)).alias("has_fp2"),
+        pl.lit(int(checkpoint_ordinal >= 3)).alias("has_fp3"),
+        pl.lit(int(checkpoint_ordinal >= 4)).alias("has_q"),
+        pl.lit(checkpoint_ordinal).alias("checkpoint_ordinal"),
+    )
 
 
 def test_train_multitask_split_returns_predictions_for_each_head() -> None:
@@ -126,3 +146,88 @@ def test_train_multitask_walk_forward_cli_plan_only(tmp_path: Path) -> None:
 
     assert result.exit_code == 0
     assert "[plan]" in result.stdout
+
+
+def test_train_multitask_walk_forward_cli_execute_persists_all_checkpoints(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+
+    train_path = tmp_path / "1280_q.parquet"
+    fp1_test_path = tmp_path / "1281_fp1.parquet"
+    empty_test_path = tmp_path / "1281_fp2.parquet"
+    q_test_path = tmp_path / "1281_q.parquet"
+    build_multitask_df_for_checkpoint(1280, "Q").write_parquet(train_path)
+    build_multitask_df_for_checkpoint(1281, "FP1").write_parquet(fp1_test_path)
+    pl.DataFrame().write_parquet(empty_test_path)
+    build_multitask_df_for_checkpoint(1281, "Q").write_parquet(q_test_path)
+
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "meeting_key": 1280,
+                        "season": 2026,
+                        "checkpoint": "Q",
+                        "snapshot_id": "s0",
+                        "path": str(train_path),
+                    },
+                    {
+                        "meeting_key": 1281,
+                        "season": 2026,
+                        "checkpoint": "FP1",
+                        "snapshot_id": "s1",
+                        "path": str(fp1_test_path),
+                    },
+                    {
+                        "meeting_key": 1281,
+                        "season": 2026,
+                        "checkpoint": "FP2",
+                        "snapshot_id": "s2",
+                        "path": str(empty_test_path),
+                    },
+                    {
+                        "meeting_key": 1281,
+                        "season": 2026,
+                        "checkpoint": "Q",
+                        "snapshot_id": "s3",
+                        "path": str(q_test_path),
+                    },
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    @contextmanager
+    def fake_db_session(_: str) -> Session:
+        yield session
+
+    monkeypatch.setattr("f1_polymarket_worker.cli.get_settings", lambda: Settings())
+    monkeypatch.setattr("f1_polymarket_worker.cli.db_session", fake_db_session)
+
+    runner = CliRunner()
+    result = runner.invoke(
+        app,
+        [
+            "train-multitask-walk-forward",
+            "--manifest",
+            str(manifest),
+            "--min-train-gps",
+            "1",
+            "--execute",
+        ],
+    )
+
+    runs = session.scalars(select(ModelRun)).all()
+    predictions = session.scalars(select(ModelPrediction)).all()
+
+    assert result.exit_code == 0
+    assert len(runs) == 1
+    assert len(predictions) == len(build_multitask_df(1281)) * 2
+    assert {row.explanation_json["as_of_checkpoint"] for row in predictions} == {"FP1", "Q"}

@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import os
+import sqlite3
+import subprocess
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 import typer
@@ -70,3 +75,41 @@ def test_worker_command_fails_fast() -> None:
         cli.worker()
 
     assert exc_info.value.exit_code == 2
+
+
+def test_bootstrap_db_creates_lineage_tables(tmp_path: Path) -> None:
+    db_path = tmp_path / "bootstrap.db"
+    repo_root = Path(__file__).resolve().parents[2]
+    pythonpath_entries = [
+        "apps/worker/src",
+        "py/common/src",
+        "py/connectors/src",
+        "py/storage/src",
+        "py/features/src",
+        "py/models/src",
+        "py/experiments/src",
+        "py/agent/src",
+    ]
+    env = os.environ.copy()
+    env["DATABASE_URL_OVERRIDE"] = f"sqlite+pysqlite:///{db_path}"
+    env["PYTHONPATH"] = os.pathsep.join(
+        pythonpath_entries + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-m", "f1_polymarket_worker.cli", "bootstrap-db"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+    conn = sqlite3.connect(db_path)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_job_runs'"
+    )
+    assert cur.fetchone() == ("ingestion_job_runs",)
