@@ -9,6 +9,7 @@ from f1_polymarket_lab.storage.db import Base
 from f1_polymarket_lab.storage.models import (
     F1Driver,
     F1Lap,
+    IngestionJobRun,
     F1Meeting,
     F1Session,
     F1SessionResult,
@@ -19,7 +20,7 @@ from f1_polymarket_worker.driver_affinity import (
     refresh_driver_affinity,
 )
 from f1_polymarket_worker.pipeline import PipelineContext
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 
@@ -286,5 +287,72 @@ def test_refresh_driver_affinity_blocks_without_credentials_when_fp2_is_missing(
         assert result["status"] == "blocked"
         assert result["report"] is None
         assert result["source_max_session_end_utc"] == "2026-03-27T07:00:00+00:00"
+    finally:
+        session.close()
+
+
+def test_refresh_driver_affinity_skips_fresh_report_without_writing_lineage_runs(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting-2026-japan",
+            meeting_key=1281,
+            season=2026,
+            meeting_name="Japanese Grand Prix",
+            circuit_short_name="Suzuka",
+            start_date_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+            end_date_utc=datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc),
+        )
+        fp3 = F1Session(
+            id="session-2026-fp3",
+            meeting_id=meeting.id,
+            session_key=11248,
+            session_name="Practice 3",
+            session_code="FP3",
+            session_type="Practice",
+            date_start_utc=datetime(2026, 3, 28, 2, 30, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 28, 3, 30, tzinfo=timezone.utc),
+            is_practice=True,
+        )
+        session.add_all([meeting, fp3])
+        session.commit()
+
+        report_path = (
+            tmp_path / "reports" / "driver_affinity" / "2026" / "1281" / "latest.json"
+        )
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
+            """
+{
+  "season": 2026,
+  "meeting_key": 1281,
+  "computed_at_utc": "2026-03-28T05:03:33.080174Z",
+  "as_of_utc": "2026-03-28T05:03:33.080174Z",
+  "lookback_start_season": 2024,
+  "session_code_weights": {"FP1": 0.4, "FP2": 0.6, "FP3": 0.8, "Q": 1.0},
+  "season_weights": {"2024": 0.4, "2025": 0.65, "2026": 1.0},
+  "track_weights": {"s1_fraction": 0.3333333333, "s2_fraction": 0.3333333333, "s3_fraction": 0.3333333333},
+  "source_session_codes_included": ["FP3"],
+  "source_max_session_end_utc": "2026-03-28T03:30:00+00:00",
+  "latest_ended_relevant_session_code": "FP3",
+  "latest_ended_relevant_session_end_utc": "2026-03-28T03:30:00+00:00",
+  "entry_count": 0,
+  "entries": []
+}
+            """.strip(),
+            encoding="utf-8",
+        )
+
+        result = refresh_driver_affinity(
+            context,
+            season=2026,
+            meeting_key=1281,
+        )
+
+        runs = list(session.scalars(select(IngestionJobRun)).all())
+        assert result["status"] == "skipped"
+        assert runs == []
     finally:
         session.close()

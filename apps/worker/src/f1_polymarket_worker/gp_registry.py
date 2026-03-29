@@ -260,14 +260,14 @@ GP_REGISTRY: list[GPConfig] = [
         snapshot_type="japan_q_to_race_winner_snapshot",
         snapshot_dataset="japan_q_to_race_winner_snapshot",
         baseline_stage="japan_q_race_winner_quicktest",
-        baseline_names=("market_implied", "fp1_pace", "hybrid"),
+        baseline_names=("market_implied", "pre_race_pace", "hybrid"),
         report_slug="2026-japanese-grand-prix-q-race-winner-quicktest",
         variant="q_to_race",
         source_session_code="Q",
         market_taxonomy="race_winner",
         title_suffix="Q-to-Race Winner Quick Test",
         notes=(
-            "Paper-edge study for race winner prediction using Q pace as primary signal.",
+            "Paper-edge study for race winner prediction using FP1 through Q signals.",
             "Universe is limited to Japanese GP race winner markets.",
         ),
         stage_rank=5,
@@ -419,7 +419,7 @@ def config_display_description(config: GPConfig) -> str:
         source_name = _session_display_name(config.source_session_code)
         return f"Use {source_name} results to find Qualifying markets and prepare paper trading."
     if config.target_session_code == "R":
-        return "Use Qualifying results to find Race markets and prepare paper trading."
+        return "Use FP1 through Qualifying results to find Race markets and prepare paper trading."
     source_name = _session_display_name(config.source_session_code)
     target_name = _session_display_name(config.target_session_code)
     return f"Use {source_name} results to find {target_name} markets and prepare paper trading."
@@ -430,7 +430,7 @@ def resolve_baseline_name(config: GPConfig, baseline: str | None) -> str:
     if baseline and baseline in config.baseline_names:
         return baseline
     if (
-        baseline in {"fp1_pace", "fp2_pace", "fp3_pace", "form_pace"}
+        baseline in {"fp1_pace", "fp2_pace", "fp3_pace", "form_pace", "pre_race_pace"}
         and len(config.baseline_names) > 1
     ):
         return config.baseline_names[1]
@@ -756,7 +756,12 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
     enriched: list[dict[str, Any]] = []
     for group_rows in grouped.values():
         market_probs = _normalized_market_probabilities(group_rows)
-        pace_signals = _practice_pace_signals(group_rows)
+        target_session_code = str(group_rows[0].get("target_session_code") or "")
+        pace_signals = (
+            _pre_race_pace_signals(group_rows)
+            if target_session_code == "R"
+            else _practice_pace_signals(group_rows)
+        )
         pace_probs = _softmax(pace_signals)
         market_signals = [math.log(max(prob, EPSILON)) for prob in market_probs]
         hybrid_signals = [
@@ -842,6 +847,50 @@ def _practice_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
                 continue
             contributions.append(sign * zscore)
         signals.append(sum(contributions) / len(contributions) if contributions else 0.0)
+    return signals
+
+
+def _pre_race_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
+    """Weighted pre-race signal using every available session from FP1 through Q."""
+    feature_weights = (
+        ("fp1", 0.3),
+        ("fp2", 0.5),
+        ("fp3", 0.8),
+        ("q", 5.0),
+    )
+    sign_specs: list[tuple[str, float, float]] = []
+    for prefix, weight in feature_weights:
+        sign_specs.extend(
+            [
+                (f"{prefix}_position", -1.0, weight),
+                (f"{prefix}_gap_to_leader_seconds", -1.0, weight),
+                (f"{prefix}_teammate_gap_seconds", -1.0, weight),
+            ]
+        )
+        if prefix.startswith("fp"):
+            sign_specs.extend(
+                [
+                    (f"{prefix}_lap_count", 1.0, weight),
+                    (f"{prefix}_stint_count", 1.0, weight),
+                ]
+            )
+
+    zscore_by_feature = {
+        feature_name: _zscore_map(rows, feature_name)
+        for feature_name, _sign, _weight in sign_specs
+    }
+    signals: list[float] = []
+    for row in rows:
+        weighted_sum = 0.0
+        total_weight = 0.0
+        row_id = str(row["row_id"])
+        for feature_name, sign, weight in sign_specs:
+            zscore = zscore_by_feature[feature_name].get(row_id)
+            if zscore is None:
+                continue
+            weighted_sum += sign * zscore * weight
+            total_weight += weight
+        signals.append(weighted_sum / total_weight if total_weight > 0 else 0.0)
     return signals
 
 
@@ -1125,6 +1174,11 @@ def _build_session_to_target_snapshot(
     source_session = sessions_by_code.get(config.source_session_code or "FP1")
     if source_session is None:
         raise ValueError(f"Source session {config.source_session_code!r} not found")
+    q_session = (
+        sessions_by_code.get("Q")
+        if config.target_session_code == "R"
+        else None
+    )
 
     yes_tokens = _load_yes_tokens(ctx, market_ids=[m.id for m in markets])
     price_history = _load_price_history(
@@ -1188,6 +1242,12 @@ def _build_session_to_target_snapshot(
         ).all())
         if fp3_session else []
     )
+    q_results = (
+        list(ctx.db.scalars(
+            select(F1SessionResult).where(F1SessionResult.session_id == q_session.id)
+        ).all())
+        if q_session else []
+    )
 
     results_by_driver = {r.driver_id: r for r in fp1_results if r.driver_id is not None}
     target_is_practice = config.target_session_code in {"FP1", "FP2", "FP3"}
@@ -1213,6 +1273,7 @@ def _build_session_to_target_snapshot(
 
     fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
     fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
+    q_results_by_driver = {r.driver_id: r for r in q_results if r.driver_id is not None}
     fp2_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=fp2_results)
         if fp2_results else {}
@@ -1220,6 +1281,10 @@ def _build_session_to_target_snapshot(
     fp3_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=fp3_results)
         if fp3_results else {}
+    )
+    q_team_best_gap = (
+        _team_best_gap_to_leader(drivers=drivers, fp1_results=q_results)
+        if q_results else {}
     )
 
     fp2_lap_count_by_driver = _CounterLike()
@@ -1295,6 +1360,14 @@ def _build_session_to_target_snapshot(
             if _fp3_gap is not None and _fp3_tg is not None
             else None
         )
+        _q_r = q_results_by_driver.get(driver.id) if q_results else None
+        _q_gap = _result_gap_seconds(_q_r) if _q_r is not None else None
+        _q_tg = q_team_best_gap.get(driver.team_id or "") if q_results else None
+        _q_teammate = (
+            (_q_gap - _q_tg)
+            if _q_gap is not None and _q_tg is not None
+            else None
+        )
 
         # Best-practice aggregates
         _all_gaps = [g for g in [driver_gap, _fp2_gap, _fp3_gap] if g is not None]
@@ -1330,6 +1403,8 @@ def _build_session_to_target_snapshot(
                 "market_slug": market.slug,
                 "market_question": market.question,
                 "market_taxonomy": market.taxonomy,
+                "source_session_code": config.source_session_code,
+                "target_session_code": config.target_session_code,
                 "token_id": token.id,
                 "driver_id": driver.id,
                 "driver_name": (
@@ -1397,6 +1472,14 @@ def _build_session_to_target_snapshot(
                     len(fp3_stint_count_by_driver.distinct_counts.get(driver.id, set()))
                     if fp3_results else None
                 ),
+                # Q features
+                "q_position": _q_r.position if _q_r is not None else None,
+                "q_result_time_seconds": (
+                    _q_r.result_time_seconds if _q_r is not None else None
+                ),
+                "q_gap_to_leader_seconds": _q_gap,
+                "q_teammate_gap_seconds": _q_teammate,
+                "q_team_best_gap_to_leader_seconds": _q_tg,
                 # Best practice features (best across all available FP sessions)
                 "best_practice_gap_to_leader_seconds": (
                     min(_all_gaps) if _all_gaps else None
@@ -1405,6 +1488,9 @@ def _build_session_to_target_snapshot(
                     min(_all_positions) if _all_positions else None
                 ),
                 "latest_fp_number": 3 if fp3_results else (2 if fp2_results else 1),
+                "latest_pre_race_session_code": "Q" if q_results else (
+                    "FP3" if fp3_results else ("FP2" if fp2_results else "FP1")
+                ),
                 "label_yes": (
                     None
                     if winner_driver_id is None

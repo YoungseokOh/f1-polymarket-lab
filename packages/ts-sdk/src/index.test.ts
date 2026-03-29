@@ -214,6 +214,232 @@ describe("sdk", () => {
     );
   });
 
+  it("posts latest session refresh requests and maps the response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "refresh-latest-session",
+        status: "ok",
+        message: "Updated latest ended session Q for Japanese Grand Prix.",
+        meeting_id: "meeting:1281",
+        meeting_name: "Japanese Grand Prix",
+        refreshed_session: {
+          id: "session:11249",
+          session_key: 11249,
+          session_code: "Q",
+          session_name: "Qualifying",
+          date_end_utc: "2026-03-28T07:00:00Z",
+        },
+        f1_records_written: 12,
+        markets_discovered: 4,
+        mappings_written: 2,
+        markets_hydrated: 3,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await sdk.refreshLatestSession({
+      meeting_id: "meeting:1281",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/refresh-latest-session",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ meeting_id: "meeting:1281" }),
+      }),
+    );
+    expect(result).toEqual(
+      expect.objectContaining({
+        meetingId: "meeting:1281",
+        meetingName: "Japanese Grand Prix",
+        f1RecordsWritten: 12,
+        marketsDiscovered: 4,
+        mappingsWritten: 2,
+        marketsHydrated: 3,
+        refreshedSession: expect.objectContaining({
+          sessionCode: "Q",
+          sessionKey: 11249,
+        }),
+      }),
+    );
+  });
+
+  it("posts live capture requests and maps the response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "capture-live-weekend",
+        status: "ok",
+        message:
+          "Captured 20s of live data for Qualifying across 12 market(s).",
+        job_run_id: "job-live-1",
+        session_key: 11249,
+        capture_seconds: 20,
+        openf1_messages: 14,
+        polymarket_messages: 9,
+        market_count: 12,
+        polymarket_market_ids: ["market-1", "market-2"],
+        records_written: 31,
+        summary: {
+          openf1_topics: [{ key: "v1/laps", count: 14 }],
+          polymarket_event_types: [{ key: "book", count: 9 }],
+          observed_market_count: 1,
+          observed_token_count: 1,
+          market_quotes: [
+            {
+              market_id: "market-1",
+              token_id: "token-1",
+              outcome: "Yes",
+              event_type: "best_bid_ask",
+              observed_at_utc: "2026-03-28T06:20:00Z",
+              price: 0.41,
+              best_bid: 0.4,
+              best_ask: 0.42,
+              midpoint: 0.41,
+              spread: 0.02,
+              size: 12,
+              side: "buy",
+            },
+          ],
+        },
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await sdk.captureLiveWeekend({
+      session_key: 11249,
+      capture_seconds: 20,
+      message_limit: 250,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/capture-live-weekend",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          session_key: 11249,
+          capture_seconds: 20,
+          message_limit: 250,
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      action: "capture-live-weekend",
+      status: "ok",
+      message: "Captured 20s of live data for Qualifying across 12 market(s).",
+      jobRunId: "job-live-1",
+      sessionKey: 11249,
+      captureSeconds: 20,
+      openf1Messages: 14,
+      polymarketMessages: 9,
+      marketCount: 12,
+      polymarketMarketIds: ["market-1", "market-2"],
+      recordsWritten: 31,
+      summary: {
+        openf1Topics: [{ key: "v1/laps", count: 14 }],
+        polymarketEventTypes: [{ key: "book", count: 9 }],
+        observedMarketCount: 1,
+        observedTokenCount: 1,
+        marketQuotes: [
+          {
+            marketId: "market-1",
+            tokenId: "token-1",
+            outcome: "Yes",
+            eventType: "best_bid_ask",
+            observedAtUtc: "2026-03-28T06:20:00Z",
+            price: 0.41,
+            bestBid: 0.4,
+            bestAsk: 0.42,
+            midpoint: 0.41,
+            spread: 0.02,
+            size: 12,
+            side: "buy",
+          },
+        ],
+      },
+    });
+  });
+
+  it("posts manual live paper-trade requests and maps the response", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "execute-manual-live-paper-trade",
+        status: "ok",
+        message: "Opened manual YES paper trade.",
+        gp_short_code: "japan_fp1_fp2",
+        market_id: "market-1",
+        pt_session_id: "pt-live-1",
+        signal_action: "buy_yes",
+        quantity: 10,
+        entry_price: 0.41,
+        stake_cost: 4.1,
+        market_price: 0.41,
+        model_prob: 0.62,
+        edge: 0.21,
+        side_label: "YES",
+        reason: "signal_accepted",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await sdk.executeManualLivePaperTrade({
+      gp_short_code: "japan_fp1_fp2",
+      market_id: "market-1",
+      token_id: "token-1",
+      model_run_id: "model-run-live",
+      snapshot_id: "snapshot-live",
+      model_prob: 0.62,
+      market_price: 0.41,
+      observed_at_utc: "2026-03-27T06:20:00Z",
+      observed_spread: 0.02,
+      source_event_type: "best_bid_ask",
+      min_edge: 0.07,
+      max_spread: 0.03,
+      bet_size: 12,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/execute-manual-live-paper-trade",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          gp_short_code: "japan_fp1_fp2",
+          market_id: "market-1",
+          token_id: "token-1",
+          model_run_id: "model-run-live",
+          snapshot_id: "snapshot-live",
+          model_prob: 0.62,
+          market_price: 0.41,
+          observed_at_utc: "2026-03-27T06:20:00Z",
+          observed_spread: 0.02,
+          source_event_type: "best_bid_ask",
+          min_edge: 0.07,
+          max_spread: 0.03,
+          bet_size: 12,
+        }),
+      }),
+    );
+    expect(result).toEqual({
+      action: "execute-manual-live-paper-trade",
+      status: "ok",
+      message: "Opened manual YES paper trade.",
+      gpShortCode: "japan_fp1_fp2",
+      marketId: "market-1",
+      ptSessionId: "pt-live-1",
+      signalAction: "buy_yes",
+      quantity: 10,
+      entryPrice: 0.41,
+      stakeCost: 4.1,
+      marketPrice: 0.41,
+      modelProb: 0.62,
+      edge: 0.21,
+      sideLabel: "YES",
+      reason: "signal_accepted",
+    });
+  });
+
   it("serializes driver affinity queries and maps the report payload", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

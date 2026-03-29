@@ -707,6 +707,11 @@ def _build_market_records(
     return event_rows, market_rows, token_rows, rule_rows, status_rows, label_rows
 
 
+def _flush_polymarket_catalog_dependencies(ctx: PipelineContext) -> None:
+    """Persist parent market rows before child tables in SQLite fallback mode."""
+    ctx.db.flush()
+
+
 def sync_polymarket_f1_catalog(
     ctx: PipelineContext,
     *,
@@ -857,7 +862,9 @@ def sync_polymarket_f1_catalog(
     upsert_records(ctx.db, PolymarketToken, token_rows.values())
     upsert_records(ctx.db, PolymarketMarketRule, rule_rows.values())
     upsert_records(ctx.db, PolymarketMarketStatusHistory, status_rows.values())
+    _flush_polymarket_catalog_dependencies(ctx)
     upsert_records(ctx.db, MarketTaxonomyLabel, label_rows.values())
+    _flush_polymarket_catalog_dependencies(ctx)
     persist_silver(
         ctx,
         job_run_id=run.id,
@@ -1086,7 +1093,9 @@ def discover_session_polymarket(
     upsert_records(ctx.db, PolymarketToken, token_rows.values())
     upsert_records(ctx.db, PolymarketMarketRule, rule_rows.values())
     upsert_records(ctx.db, PolymarketMarketStatusHistory, status_rows.values())
+    _flush_polymarket_catalog_dependencies(ctx)
     upsert_records(ctx.db, MarketTaxonomyLabel, label_rows.values())
+    _flush_polymarket_catalog_dependencies(ctx)
     persist_silver(
         ctx,
         job_run_id=run.id,
@@ -1175,6 +1184,8 @@ def discover_session_polymarket(
         upsert_records(ctx.db, MappingCandidate, candidate_rows)
     if mapping_rows:
         upsert_records(ctx.db, EntityMappingF1ToPolymarket, mapping_rows)
+    if candidate_rows or mapping_rows:
+        _flush_polymarket_catalog_dependencies(ctx)
 
     finish_job_run(
         ctx.db,

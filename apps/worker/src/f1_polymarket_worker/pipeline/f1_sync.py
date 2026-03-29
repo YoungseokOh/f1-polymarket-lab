@@ -877,7 +877,7 @@ def hydrate_f1_session(
             )
 
     upsert_records(ctx.db, F1Driver, driver_rows.values())
-    upsert_records(ctx.db, F1Team, team_rows.values())
+    upsert_records(ctx.db, F1Team, team_rows.values(), conflict_columns=["team_name"])
     upsert_records(ctx.db, F1SessionResult, result_rows)
     upsert_records(ctx.db, F1Lap, lap_rows)
     upsert_records(ctx.db, F1Stint, stint_rows)

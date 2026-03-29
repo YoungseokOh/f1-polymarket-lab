@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import date
+from datetime import date, datetime, timezone
 from typing import Any, cast
 
 from f1_polymarket_lab.common import (
@@ -94,6 +94,14 @@ __all__ = [
 ]
 
 
+def _ensure_utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) -> dict[str, Any]:
     definition = ensure_job_definition(
         ctx.db,
@@ -111,7 +119,9 @@ def reconcile_mappings(ctx: PipelineContext, *, min_confidence: float = 0.65) ->
     )
 
     sessions = ctx.db.scalars(
-        select(F1Session).where(F1Session.session_code.in_(["FP1", "FP2", "FP3", "Q", "S", "R"]))
+        select(F1Session).where(
+            F1Session.session_code.in_(["FP1", "FP2", "FP3", "Q", "SQ", "S", "R"])
+        )
     ).all()
     markets = ctx.db.scalars(
         select(PolymarketMarket).where(PolymarketMarket.taxonomy != "other")
@@ -346,9 +356,14 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
         .limit(1)
     )
     freshness_hours = None
-    if latest_polymarket_fetch is not None and latest_polymarket_fetch.finished_at is not None:
+    latest_polymarket_finished_at = (
+        None
+        if latest_polymarket_fetch is None
+        else _ensure_utc_datetime(latest_polymarket_fetch.finished_at)
+    )
+    if latest_polymarket_finished_at is not None:
         freshness_hours = round(
-            (utc_now() - latest_polymarket_fetch.finished_at).total_seconds() / 3600,
+            (utc_now() - latest_polymarket_finished_at).total_seconds() / 3600,
             3,
         )
     result_rows.append(

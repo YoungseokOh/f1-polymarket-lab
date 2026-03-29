@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, cast
@@ -45,7 +46,24 @@ def parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     text = str(value).replace("Z", "+00:00")
-    return datetime.fromisoformat(text)
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        match = re.match(
+            r"^(?P<prefix>.+T\d{2}:\d{2}:\d{2})(?P<fraction>\.\d+)?(?P<tz>[+-]\d{2}:\d{2}(?::\d{2})?)?$",
+            text,
+        )
+        if match is None:
+            raise
+        fraction = match.group("fraction") or ""
+        timezone_text = match.group("tz") or ""
+        normalized_fraction = ""
+        if fraction:
+            normalized_fraction = f".{fraction[1:7].ljust(6, '0')}"
+        if timezone_text.count(":") == 2 and timezone_text.endswith(":00"):
+            timezone_text = timezone_text[:-3]
+        normalized = f"{match.group('prefix')}{normalized_fraction}{timezone_text}"
+        return datetime.fromisoformat(normalized)
 
 
 def normalize_float(value: Any) -> float | None:

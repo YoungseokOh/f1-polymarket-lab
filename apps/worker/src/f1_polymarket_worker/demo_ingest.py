@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any
@@ -53,7 +54,24 @@ def parse_dt(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value
     text = str(value).replace("Z", "+00:00")
-    return datetime.fromisoformat(text)
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        match = re.match(
+            r"^(?P<prefix>.+T\d{2}:\d{2}:\d{2})(?P<fraction>\.\d+)?(?P<tz>[+-]\d{2}:\d{2}(?::\d{2})?)?$",
+            text,
+        )
+        if match is None:
+            raise
+        fraction = match.group("fraction") or ""
+        timezone_text = match.group("tz") or ""
+        normalized_fraction = ""
+        if fraction:
+            normalized_fraction = f".{fraction[1:7].ljust(6, '0')}"
+        if timezone_text.count(":") == 2 and timezone_text.endswith(":00"):
+            timezone_text = timezone_text[:-3]
+        normalized = f"{match.group('prefix')}{normalized_fraction}{timezone_text}"
+        return datetime.fromisoformat(normalized)
 
 
 def session_code_from_name(name: str) -> str | None:
@@ -432,7 +450,7 @@ def ingest_f1_demo(
     upsert_records(db, F1Meeting, meeting_rows)
     upsert_records(db, F1Session, session_rows)
     upsert_records(db, F1Driver, driver_rows.values())
-    upsert_records(db, F1Team, team_rows.values())
+    upsert_records(db, F1Team, team_rows.values(), conflict_columns=["team_name"])
     upsert_records(db, F1SessionResult, result_rows)
     upsert_records(db, F1Lap, lap_rows)
     upsert_records(db, F1Stint, stint_rows)

@@ -37,7 +37,15 @@ class PolymarketLiveConnector:
         message_count = 0
         connect = _ws_connect()
         async with connect(self.market_ws_url) as websocket:
-            await websocket.send(json.dumps({"assets_ids": list(asset_ids), "type": "market"}))
+            await websocket.send(
+                json.dumps(
+                    {
+                        "assets_ids": list(asset_ids),
+                        "type": "market",
+                        "custom_feature_enabled": True,
+                    }
+                )
+            )
             deadline = asyncio.get_running_loop().time() + max(0.0, stop_after_seconds)
             while asyncio.get_running_loop().time() < deadline:
                 remaining = deadline - asyncio.get_running_loop().time()

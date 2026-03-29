@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from f1_polymarket_lab.common import MarketTaxonomy
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ApiHealthResponse(BaseModel):
@@ -26,13 +26,13 @@ class F1MeetingResponse(BaseModel):
     id: str
     meeting_key: int
     season: int
-    round_number: int | None
+    round_number: int | None = None
     meeting_name: str
-    circuit_short_name: str | None
-    country_name: str | None
-    location: str | None
-    start_date_utc: datetime | None
-    end_date_utc: datetime | None
+    circuit_short_name: str | None = None
+    country_name: str | None = None
+    location: str | None = None
+    start_date_utc: datetime | None = None
+    end_date_utc: datetime | None = None
 
 
 class F1SessionResponse(BaseModel):
@@ -251,6 +251,120 @@ class SyncF1MarketsRequest(BaseModel):
     end_year: int | None = None
 
 
+class RefreshLatestSessionRequest(BaseModel):
+    meeting_id: str
+    search_fallback: bool = True
+    discover_max_pages: int = 5
+    hydrate_market_history: bool = True
+
+
+class RefreshedSessionResponse(BaseModel):
+    id: str
+    session_key: int
+    session_code: str | None
+    session_name: str
+    date_end_utc: datetime | None
+
+
+class RefreshLatestSessionResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    meeting_id: str
+    meeting_name: str
+    refreshed_session: RefreshedSessionResponse
+    f1_records_written: int
+    markets_discovered: int
+    mappings_written: int
+    markets_hydrated: int
+
+
+class CaptureLiveWeekendRequest(BaseModel):
+    session_key: int
+    market_ids: list[str] | None = None
+    capture_seconds: int = Field(default=20, ge=1, le=300)
+    start_buffer_min: int = Field(default=0, ge=0, le=60)
+    stop_buffer_min: int = Field(default=0, ge=0, le=60)
+    message_limit: int | None = Field(default=250, ge=1, le=5000)
+
+
+class CaptureLiveWeekendCountResponse(BaseModel):
+    key: str
+    count: int
+
+
+class CaptureLiveWeekendMarketQuoteResponse(BaseModel):
+    market_id: str
+    token_id: str | None = None
+    outcome: str | None = None
+    event_type: str
+    observed_at_utc: datetime
+    price: float | None = None
+    best_bid: float | None = None
+    best_ask: float | None = None
+    midpoint: float | None = None
+    spread: float | None = None
+    size: float | None = None
+    side: str | None = None
+
+
+class CaptureLiveWeekendSummaryResponse(BaseModel):
+    openf1_topics: list[CaptureLiveWeekendCountResponse] = Field(default_factory=list)
+    polymarket_event_types: list[CaptureLiveWeekendCountResponse] = Field(default_factory=list)
+    observed_market_count: int
+    observed_token_count: int
+    market_quotes: list[CaptureLiveWeekendMarketQuoteResponse] = Field(default_factory=list)
+
+
+class CaptureLiveWeekendResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    job_run_id: str
+    session_key: int
+    capture_seconds: int
+    openf1_messages: int
+    polymarket_messages: int
+    market_count: int
+    polymarket_market_ids: list[str]
+    records_written: int
+    summary: CaptureLiveWeekendSummaryResponse
+
+
+class ExecuteManualLivePaperTradeRequest(BaseModel):
+    gp_short_code: str
+    market_id: str
+    token_id: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    model_prob: float = Field(ge=0.0, le=1.0)
+    market_price: float = Field(ge=0.0, le=1.0)
+    observed_at_utc: datetime | None = None
+    observed_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+    source_event_type: str | None = None
+    min_edge: float = Field(default=0.05, ge=0.0, le=1.0)
+    max_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+    bet_size: float = Field(default=10.0, gt=0.0, le=1000.0)
+
+
+class ExecuteManualLivePaperTradeResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    gp_short_code: str
+    market_id: str
+    pt_session_id: str | None = None
+    signal_action: str
+    quantity: float | None = None
+    entry_price: float | None = None
+    stake_cost: float | None = None
+    market_price: float
+    model_prob: float
+    edge: float
+    side_label: str | None = None
+    reason: str | None = None
+
+
 class RunBacktestRequest(BaseModel):
     gp_short_code: str
     min_edge: float = 0.05
@@ -332,6 +446,16 @@ class DriverAffinityEntryResponse(BaseModel):
     latest_contributing_session_end_utc: datetime | None = None
 
 
+class DriverAffinitySegmentResponse(BaseModel):
+    key: str
+    title: str
+    description: str
+    source_session_codes_included: list[str] = Field(default_factory=list)
+    source_seasons_included: list[int] = Field(default_factory=list)
+    entry_count: int
+    entries: list[DriverAffinityEntryResponse] = Field(default_factory=list)
+
+
 class DriverAffinityReportResponse(BaseModel):
     season: int
     meeting_key: int
@@ -342,6 +466,8 @@ class DriverAffinityReportResponse(BaseModel):
     session_code_weights: dict[str, float]
     season_weights: dict[str, float]
     track_weights: dict[str, float]
+    default_segment_key: str | None = None
+    segments: list[DriverAffinitySegmentResponse] = Field(default_factory=list)
     source_session_codes_included: list[str]
     source_max_session_end_utc: datetime | None
     latest_ended_relevant_session_code: str | None = None
@@ -361,6 +487,34 @@ class RunWeekendCockpitRequest(BaseModel):
     discover_max_pages: int = 5
 
 
+class WeekendCockpitSettlementSummaryResponse(BaseModel):
+    settled_session_ids: list[str] = Field(default_factory=list)
+    settled_gp_slugs: list[str] = Field(default_factory=list)
+    settled_positions: int = 0
+    manual_positions_settled: int = 0
+    unresolved_positions: int = 0
+    unresolved_session_ids: list[str] = Field(default_factory=list)
+    winner_driver_id: str | None = None
+
+
+class RunWeekendCockpitDetailsResponse(BaseModel):
+    snapshot_id: str | None = None
+    model_run_id: str | None = None
+    baseline: str | None = None
+    pt_session_id: str | None = None
+    log_path: str | None = None
+    total_signals: int | None = None
+    trades_executed: int | None = None
+    open_positions: int | None = None
+    settled_positions: int | None = None
+    win_count: int | None = None
+    loss_count: int | None = None
+    win_rate: float | None = None
+    total_pnl: float | None = None
+    daily_pnl: float | None = None
+    settlement: WeekendCockpitSettlementSummaryResponse | None = None
+
+
 class RunWeekendCockpitResponse(BaseModel):
     action: str
     status: str
@@ -370,7 +524,7 @@ class RunWeekendCockpitResponse(BaseModel):
     model_run_id: str | None
     pt_session_id: str | None
     executed_steps: list[WeekendCockpitStepResponse]
-    details: dict[str, object] | None = None
+    details: RunWeekendCockpitDetailsResponse | None = None
 
 
 class RefreshDriverAffinityRequest(BaseModel):

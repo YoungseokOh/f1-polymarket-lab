@@ -5,6 +5,8 @@ import { Badge, StatCard } from "@f1/ui";
 
 import { PageStatusBanner } from "../../components/page-status-banner";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { latestEndedSessionForMeeting } from "../../lib/session-refresh";
+import { MeetingRefreshButton } from "../_components/meeting-refresh-button";
 
 export const revalidate = 300;
 
@@ -106,6 +108,10 @@ export default async function SessionsPage() {
                   b.dateStartUtc ?? "",
                 );
               });
+            const latestEndedSession = latestEndedSessionForMeeting(
+              mSessions,
+              now,
+            );
 
             const startMs = m.startDateUtc
               ? new Date(m.startDateUtc).getTime()
@@ -155,12 +161,18 @@ export default async function SessionsPage() {
                       )}
                     </div>
                   </div>
-                  <Link
-                    href={`/gp/${m.id}`}
-                    className="shrink-0 rounded-md border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs text-[#9ca3af] transition-colors hover:border-[#e10600]/30 hover:text-white"
-                  >
-                    View detail →
-                  </Link>
+                  <div className="flex shrink-0 flex-col items-end gap-2">
+                    <MeetingRefreshButton
+                      meetingId={m.id}
+                      latestEndedSession={latestEndedSession}
+                    />
+                    <Link
+                      href={`/gp/${m.id}`}
+                      className="rounded-md border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs text-[#9ca3af] transition-colors hover:border-[#e10600]/30 hover:text-white"
+                    >
+                      View detail →
+                    </Link>
+                  </div>
                 </div>
 
                 {/* Sessions tiles */}

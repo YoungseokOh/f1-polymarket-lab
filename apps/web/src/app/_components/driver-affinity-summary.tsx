@@ -1,6 +1,7 @@
 import type { DriverAffinityReport } from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
 import React from "react";
+import { getDriverAffinitySegments } from "../../lib/driver-affinity";
 
 function formatDateTime(value: string | null | undefined) {
   if (!value) return "—";
@@ -32,9 +33,10 @@ export function DriverAffinitySummary({
   report: DriverAffinityReport | null;
   refreshMessage?: string | null;
 }) {
+  const segments = report ? getDriverAffinitySegments(report) : [];
   return (
-    <Panel title="Driver affinity" eyebrow="Current meeting">
-      <div className="space-y-4">
+    <Panel title="Driver affinity" eyebrow="Three lenses">
+      <div className="space-y-3">
         <div className="flex items-center gap-2">
           <Badge tone={tone(report)}>{statusLabel(report)}</Badge>
           <p className="text-xs text-[#6b7280]">
@@ -44,37 +46,55 @@ export function DriverAffinitySummary({
 
         {report ? (
           <>
-            <div>
-              <p className="text-sm font-semibold text-white">
+            <div className="space-y-1">
+              <p className="text-[13px] font-semibold text-white">
                 {report.meeting.meetingName}
               </p>
-              <p className="text-xs text-[#6b7280]">
-                {report.meeting.circuitShortName ?? "Circuit unavailable"} ·
-                Coverage:{" "}
-                {report.sourceSessionCodesIncluded.length > 0
-                  ? report.sourceSessionCodesIncluded.join(", ")
-                  : "historical only"}
+              <p className="text-[11px] text-[#6b7280]">
+                {report.meeting.circuitShortName ?? "Circuit unavailable"} track
+                view. Current GP, season-to-date, and 2024-2026 all-time lenses.
               </p>
             </div>
 
             <div className="space-y-2">
-              {report.entries.slice(0, 5).map((entry) => (
+              {segments.slice(0, 3).map((segment) => (
                 <div
-                  key={entry.canonicalDriverKey}
-                  className="flex items-center justify-between rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2"
+                  key={segment.key}
+                  className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2"
                 >
-                  <div>
-                    <p className="text-sm font-medium text-white">
-                      {entry.rank}. {entry.displayName}
-                    </p>
-                    <p className="text-[11px] text-[#6b7280]">
-                      {entry.teamName ?? entry.teamId ?? "Team unavailable"} ·{" "}
-                      {entry.contributingSessionCodes.join(", ")}
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.2em] text-[#d1d5db]">
+                        {segment.title}
+                      </p>
+                      <p className="mt-1 text-[10px] text-[#6b7280]">
+                        {segment.description}
+                      </p>
+                    </div>
+                    <p className="text-[10px] text-[#6b7280]">
+                      {segment.entryCount} drivers
                     </p>
                   </div>
-                  <p className="text-sm font-semibold text-white">
-                    {entry.affinityScore.toFixed(3)}
-                  </p>
+                  <div className="mt-2 space-y-1.5">
+                    {segment.entries.slice(0, 2).map((entry) => (
+                      <div
+                        key={`${segment.key}:${entry.canonicalDriverKey}`}
+                        className="flex items-center justify-between gap-3"
+                      >
+                        <div>
+                          <p className="text-[13px] font-medium text-white">
+                            {entry.rank}. {entry.displayName}
+                          </p>
+                          <p className="text-[10px] text-[#6b7280]">
+                            {entry.teamName ?? entry.teamId ?? "Team unavailable"}
+                          </p>
+                        </div>
+                        <p className="text-[13px] font-semibold text-white">
+                          {entry.affinityScore.toFixed(3)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               ))}
             </div>

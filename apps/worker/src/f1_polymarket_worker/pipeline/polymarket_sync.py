@@ -68,6 +68,11 @@ def ensure_taxonomy_version(ctx: PipelineContext) -> MarketTaxonomyVersion:
     return version
 
 
+def _flush_polymarket_catalog_dependencies(ctx: PipelineContext) -> None:
+    """Persist parent market rows before child tables in SQLite fallback mode."""
+    ctx.db.flush()
+
+
 def sync_polymarket_catalog(
     ctx: PipelineContext,
     *,
@@ -285,7 +290,9 @@ def sync_polymarket_catalog(
     upsert_records(ctx.db, PolymarketToken, token_rows)
     upsert_records(ctx.db, PolymarketMarketRule, rule_rows)
     upsert_records(ctx.db, PolymarketMarketStatusHistory, status_rows)
+    _flush_polymarket_catalog_dependencies(ctx)
     upsert_records(ctx.db, MarketTaxonomyLabel, label_rows)
+    _flush_polymarket_catalog_dependencies(ctx)
     persist_silver(
         ctx, job_run_id=run.id, dataset="polymarket_events", records=list(event_rows.values())
     )
@@ -370,8 +377,19 @@ def hydrate_polymarket_market(
     trade_rows: list[dict[str, Any]] = []
     open_interest_rows: list[dict[str, Any]] = []
     resolution_rows: list[dict[str, Any]] = []
+    fetch_errors: list[dict[str, str]] = []
 
-    open_interest = connector.get_open_interest(market.condition_id)
+    def _safe_fetch(label: str, fetcher: Any, fallback: Any = None) -> Any:
+        try:
+            return fetcher()
+        except Exception as exc:
+            fetch_errors.append({"source": label, "error": str(exc)})
+            return fallback
+
+    open_interest = _safe_fetch(
+        "open_interest",
+        lambda: connector.get_open_interest(market.condition_id),
+    )
     if open_interest is not None:
         open_interest_rows.append(
             {
@@ -388,10 +406,23 @@ def hydrate_polymarket_market(
         )
 
     for token in tokens:
-        book = connector.get_order_book(token.id)
-        midpoint = connector.get_midpoint(token.id)
-        spread = connector.get_spread(token.id)
-        last_trade_price = connector.get_last_trade_price(token.id)
+        token_source = f"token:{token.id}"
+        book = _safe_fetch(
+            f"{token_source}:order_book",
+            lambda token_id=token.id: connector.get_order_book(token_id),
+        )
+        midpoint = _safe_fetch(
+            f"{token_source}:midpoint",
+            lambda token_id=token.id: connector.get_midpoint(token_id),
+        )
+        spread = _safe_fetch(
+            f"{token_source}:spread",
+            lambda token_id=token.id: connector.get_spread(token_id),
+        )
+        last_trade_price = _safe_fetch(
+            f"{token_source}:last_trade_price",
+            lambda token_id=token.id: connector.get_last_trade_price(token_id),
+        )
         if book is not None:
             observed_at = datetime.fromtimestamp(
                 int(book["timestamp"]) / 1000,
@@ -428,7 +459,11 @@ def hydrate_polymarket_market(
                             "size": float(level["size"]),
                         }
                     )
-        for point in connector.get_price_history(token.id, fidelity=fidelity):
+        for point in _safe_fetch(
+            f"{token_source}:price_history",
+            lambda token_id=token.id: connector.get_price_history(token_id, fidelity=fidelity),
+            [],
+        ):
             history_rows.append(
                 {
                     "id": f"{market_id}:{token.id}:{point['t']}",
@@ -447,7 +482,11 @@ def hydrate_polymarket_market(
                 }
             )
 
-    for trade in connector.get_trades(market.condition_id, limit=500):
+    for trade in _safe_fetch(
+        "trades",
+        lambda: connector.get_trades(market.condition_id, limit=500),
+        [],
+    ):
         trade_rows.append(
             {
                 "id": f"{market_id}:{trade.get('transactionHash') or payload_checksum(trade)[:16]}",
@@ -532,7 +571,11 @@ def hydrate_polymarket_market(
         source="polymarket",
         dataset="market_history",
         cursor_key=market_id,
-        cursor_value={"market_id": market_id, "synced_at": utc_now().isoformat()},
+        cursor_value={
+            "market_id": market_id,
+            "synced_at": utc_now().isoformat(),
+            "fetch_errors": fetch_errors,
+        },
     )
     records_written = (
         len(orderbook_rows)
@@ -546,7 +589,11 @@ def hydrate_polymarket_market(
         ctx.db,
         run,
         status="completed",
-        cursor_after={"market_id": market_id, "synced_at": utc_now().isoformat()},
+        cursor_after={
+            "market_id": market_id,
+            "synced_at": utc_now().isoformat(),
+            "fetch_errors": fetch_errors,
+        },
         records_written=records_written,
     )
     return {
@@ -554,4 +601,5 @@ def hydrate_polymarket_market(
         "status": "completed",
         "market_id": market_id,
         "records_written": records_written,
+        "fetch_errors": fetch_errors,
     }

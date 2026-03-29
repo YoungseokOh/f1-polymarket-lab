@@ -23,6 +23,7 @@ from f1_polymarket_lab.storage.models import (
     F1SessionResult,
     F1StartingGrid,
     F1Team,
+    IngestionJobRun,
 )
 from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy import inspect, select
@@ -691,13 +692,14 @@ def bootstrap_f1db_history(
         )
         return {"job_run_id": run.id, "status": "planned"}
 
+    run_id = run.id
     connector = F1DBConnector(ctx.settings.data_root / "cache" / "f1db")
     driver_rows = _build_f1db_driver_rows(connector.fetch_drivers())
     constructor_rows = _build_f1db_team_rows(connector.fetch_constructors())
 
     persist_fetch(
         ctx,
-        job_run_id=run.id,
+        job_run_id=run_id,
         batch=FetchBatch(
             source="f1db",
             dataset="drivers",
@@ -710,7 +712,7 @@ def bootstrap_f1db_history(
     )
     persist_fetch(
         ctx,
-        job_run_id=run.id,
+        job_run_id=run_id,
         batch=FetchBatch(
             source="f1db",
             dataset="constructors",
@@ -722,9 +724,11 @@ def bootstrap_f1db_history(
         ),
     )
     upsert_records(ctx.db, F1Driver, driver_rows)
-    upsert_records(ctx.db, F1Team, constructor_rows)
-    persist_silver(ctx, job_run_id=run.id, dataset="f1_drivers", records=driver_rows)
-    persist_silver(ctx, job_run_id=run.id, dataset="f1_teams", records=constructor_rows)
+    upsert_records(ctx.db, F1Team, constructor_rows, conflict_columns=["team_name"])
+    persist_silver(ctx, job_run_id=run_id, dataset="f1_drivers", records=driver_rows)
+    persist_silver(ctx, job_run_id=run_id, dataset="f1_teams", records=constructor_rows)
+    ctx.db.commit()
+    ctx.db.expunge_all()
 
     meetings_written = 0
     sessions_written = 0
@@ -737,7 +741,7 @@ def bootstrap_f1db_history(
         race_data = connector.fetch_race_data(season)
         persist_fetch(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             batch=FetchBatch(
                 source="f1db",
                 dataset="races",
@@ -751,7 +755,7 @@ def bootstrap_f1db_history(
         )
         persist_fetch(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             batch=FetchBatch(
                 source="f1db",
                 dataset="race_data",
@@ -796,21 +800,21 @@ def bootstrap_f1db_history(
         season_partition = {"season": str(season)}
         persist_silver(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             dataset="f1_meetings",
             records=meeting_rows,
             partition=season_partition,
         )
         persist_silver(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             dataset="f1_sessions",
             records=session_rows,
             partition=season_partition,
         )
         persist_silver(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             dataset="f1_session_results",
             records=result_rows,
             partition=season_partition,
@@ -818,7 +822,7 @@ def bootstrap_f1db_history(
         if pit_rows:
             persist_silver(
                 ctx,
-                job_run_id=run.id,
+                job_run_id=run_id,
                 dataset="f1_pit",
                 records=pit_rows,
                 partition=season_partition,
@@ -826,7 +830,7 @@ def bootstrap_f1db_history(
         if grid_rows:
             persist_silver(
                 ctx,
-                job_run_id=run.id,
+                job_run_id=run_id,
                 dataset="f1_starting_grid",
                 records=grid_rows,
                 partition=season_partition,
@@ -837,6 +841,8 @@ def bootstrap_f1db_history(
         results_written += len(result_rows)
         pit_written += len(pit_rows)
         grid_written += len(grid_rows)
+        ctx.db.commit()
+        ctx.db.expunge_all()
 
     cursor_after = {
         "season_start": season_start,
@@ -851,6 +857,7 @@ def bootstrap_f1db_history(
         cursor_key=cursor_key,
         cursor_value=cursor_after,
     )
+    run = ctx.db.get(IngestionJobRun, run_id) or run
     finish_job_run(
         ctx.db,
         run,
@@ -867,7 +874,7 @@ def bootstrap_f1db_history(
         ),
     )
     return {
-        "job_run_id": run.id,
+        "job_run_id": run_id,
         "status": "completed",
         "drivers": len(driver_rows),
         "teams": len(constructor_rows),
@@ -1188,6 +1195,7 @@ def sync_jolpica_history(
         )
         return {"job_run_id": run.id, "status": "planned"}
 
+    run_id = run.id
     connector = JolpicaConnector()
     meetings_written = 0
     sessions_written = 0
@@ -1199,7 +1207,7 @@ def sync_jolpica_history(
         races = connector.fetch_races(season)
         persist_fetch(
             ctx,
-            job_run_id=run.id,
+            job_run_id=run_id,
             batch=FetchBatch(
                 source="jolpica",
                 dataset="races",
@@ -1222,7 +1230,7 @@ def sync_jolpica_history(
             upsert_records(ctx.db, F1Meeting, meeting_rows)
             persist_silver(
                 ctx,
-                job_run_id=run.id,
+                job_run_id=run_id,
                 dataset="f1_meetings",
                 records=meeting_rows,
                 partition={"season": str(season)},
@@ -1232,7 +1240,7 @@ def sync_jolpica_history(
             upsert_records(ctx.db, F1Session, session_rows)
             persist_silver(
                 ctx,
-                job_run_id=run.id,
+                job_run_id=run_id,
                 dataset="f1_sessions",
                 records=session_rows,
                 partition={"season": str(season)},
@@ -1245,7 +1253,7 @@ def sync_jolpica_history(
                 results_payload = connector.fetch_results(season, round_number)
                 persist_fetch(
                     ctx,
-                    job_run_id=run.id,
+                    job_run_id=run_id,
                     batch=FetchBatch(
                         source="jolpica",
                         dataset="results",
@@ -1272,11 +1280,11 @@ def sync_jolpica_history(
                         _merge_with_existing(ctx, F1SessionResult, row) for row in result_rows
                     ]
                     upsert_records(ctx.db, F1Driver, merged_drivers)
-                    upsert_records(ctx.db, F1Team, merged_teams)
+                    upsert_records(ctx.db, F1Team, merged_teams, conflict_columns=["team_name"])
                     upsert_records(ctx.db, F1SessionResult, merged_results)
                     persist_silver(
                         ctx,
-                        job_run_id=run.id,
+                        job_run_id=run_id,
                         dataset="f1_session_results",
                         records=merged_results,
                         partition={"season": str(season)},
@@ -1287,7 +1295,7 @@ def sync_jolpica_history(
                 qualifying_payload = connector.fetch_qualifying(season, round_number)
                 persist_fetch(
                     ctx,
-                    job_run_id=run.id,
+                    job_run_id=run_id,
                     batch=FetchBatch(
                         source="jolpica",
                         dataset="qualifying",
@@ -1314,11 +1322,11 @@ def sync_jolpica_history(
                         _merge_with_existing(ctx, F1SessionResult, row) for row in result_rows
                     ]
                     upsert_records(ctx.db, F1Driver, merged_drivers)
-                    upsert_records(ctx.db, F1Team, merged_teams)
+                    upsert_records(ctx.db, F1Team, merged_teams, conflict_columns=["team_name"])
                     upsert_records(ctx.db, F1SessionResult, merged_results)
                     persist_silver(
                         ctx,
-                        job_run_id=run.id,
+                        job_run_id=run_id,
                         dataset="f1_session_results",
                         records=merged_results,
                         partition={"season": str(season)},
@@ -1329,7 +1337,7 @@ def sync_jolpica_history(
                 sprint_payload = connector.fetch_sprint(season, round_number)
                 persist_fetch(
                     ctx,
-                    job_run_id=run.id,
+                    job_run_id=run_id,
                     batch=FetchBatch(
                         source="jolpica",
                         dataset="sprint",
@@ -1356,11 +1364,11 @@ def sync_jolpica_history(
                         _merge_with_existing(ctx, F1SessionResult, row) for row in result_rows
                     ]
                     upsert_records(ctx.db, F1Driver, merged_drivers)
-                    upsert_records(ctx.db, F1Team, merged_teams)
+                    upsert_records(ctx.db, F1Team, merged_teams, conflict_columns=["team_name"])
                     upsert_records(ctx.db, F1SessionResult, merged_results)
                     persist_silver(
                         ctx,
-                        job_run_id=run.id,
+                        job_run_id=run_id,
                         dataset="f1_session_results",
                         records=merged_results,
                         partition={"season": str(season)},
@@ -1371,7 +1379,7 @@ def sync_jolpica_history(
                 pit_payload = connector.fetch_pitstops(season, round_number)
                 persist_fetch(
                     ctx,
-                    job_run_id=run.id,
+                    job_run_id=run_id,
                     batch=FetchBatch(
                         source="jolpica",
                         dataset="pitstops",
@@ -1392,7 +1400,7 @@ def sync_jolpica_history(
                         upsert_records(ctx.db, F1Pit, pit_rows)
                         persist_silver(
                             ctx,
-                            job_run_id=run.id,
+                            job_run_id=run_id,
                             dataset="f1_pit",
                             records=pit_rows,
                             partition={"season": str(season)},
@@ -1403,7 +1411,7 @@ def sync_jolpica_history(
                 lap_payload = connector.fetch_laps(season, round_number)
                 persist_fetch(
                     ctx,
-                    job_run_id=run.id,
+                    job_run_id=run_id,
                     batch=FetchBatch(
                         source="jolpica",
                         dataset="laps",
@@ -1424,12 +1432,15 @@ def sync_jolpica_history(
                         upsert_records(ctx.db, F1Lap, lap_rows)
                         persist_silver(
                             ctx,
-                            job_run_id=run.id,
+                            job_run_id=run_id,
                             dataset="f1_laps",
                             records=lap_rows,
                             partition={"season": str(season)},
                         )
                         lap_written += len(lap_rows)
+
+        ctx.db.commit()
+        ctx.db.expunge_all()
 
     cursor_after = {
         "season_start": season_start,
@@ -1444,6 +1455,7 @@ def sync_jolpica_history(
         cursor_key=cursor_key,
         cursor_value=cursor_after,
     )
+    run = ctx.db.get(IngestionJobRun, run_id) or run
     finish_job_run(
         ctx.db,
         run,
@@ -1454,7 +1466,7 @@ def sync_jolpica_history(
         ),
     )
     return {
-        "job_run_id": run.id,
+        "job_run_id": run_id,
         "status": "completed",
         "meetings": meetings_written,
         "sessions": sessions_written,

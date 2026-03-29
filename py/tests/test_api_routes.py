@@ -286,17 +286,19 @@ def test_weekend_cockpit_status_auto_selects_fp1_to_fp2_between_fp1_end_and_fp2_
     assert payload["focus_session"]["session_code"] == "FP2"
     assert payload["timeline_completed_codes"] == ["FP1"]
     assert payload["timeline_active_code"] == "FP2"
-    assert payload["primary_action_title"] == "Load FP1 results"
+    assert payload["primary_action_title"] == "Update to latest"
     assert payload["primary_action_description"] == (
-        "This will load FP1 results first, then prepare FP2 markets."
+        "This latest update will load FP1 results first and prepare FP2 markets."
     )
-    assert payload["primary_action_cta"] == "Load FP1 results"
+    assert payload["primary_action_cta"] == "Update to latest"
     assert payload["explanation"] == (
-        "This stage uses FP1 results to find FP2 markets and, when ready, "
-        "continue into paper trading."
+        "This stage uses FP1 results to settle finished FP1 tickets, find FP2 markets, "
+        "and when ready continue into paper trading."
     )
-    assert payload["steps"][2]["resource_label"] == "FP2 markets"
-    assert payload["steps"][2]["reason_code"] == "ready_to_discover"
+    assert payload["steps"][2]["resource_label"] == "FP1 tickets"
+    assert payload["steps"][2]["reason_code"] == "waiting_for_source_results"
+    assert payload["steps"][3]["resource_label"] == "FP2 markets"
+    assert payload["steps"][3]["reason_code"] == "ready_to_discover"
     assert [config["short_code"] for config in payload["available_configs"]] == [
         "japan_pre",
         "japan_fp1_fp2",
@@ -388,7 +390,18 @@ def test_run_weekend_cockpit_endpoint_serializes_worker_result(
                     "count": 5,
                 }
             ],
-            "details": {"trades_executed": 4},
+            "details": {
+                "trades_executed": 4,
+                "settlement": {
+                    "settled_session_ids": ["pt-prev"],
+                    "settled_gp_slugs": ["japan_fp3"],
+                    "settled_positions": 2,
+                    "manual_positions_settled": 1,
+                    "unresolved_positions": 0,
+                    "unresolved_session_ids": [],
+                    "winner_driver_id": "driver:12",
+                },
+            },
         },
     )
 
@@ -401,6 +414,7 @@ def test_run_weekend_cockpit_endpoint_serializes_worker_result(
     payload = response.json()
     assert payload["gp_short_code"] == "japan_pre"
     assert payload["executed_steps"][0]["status"] == "completed"
+    assert payload["details"]["settlement"]["settled_positions"] == 2
 
 
 def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
@@ -427,6 +441,252 @@ def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
     assert "FP1 ends at 2026-03-27T03:30:00+00:00" in response.text
 
 
+def test_refresh_latest_session_endpoint_serializes_worker_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.refresh_latest_session_for_meeting",
+        lambda *args, **kwargs: {
+            "action": "refresh-latest-session",
+            "status": "ok",
+            "message": "Updated latest ended session Q for Japanese Grand Prix.",
+            "meeting_id": "meeting:1281",
+            "meeting_name": "Japanese Grand Prix",
+            "refreshed_session": {
+                "id": "session:11249",
+                "session_key": 11249,
+                "session_code": "Q",
+                "session_name": "Qualifying",
+                "date_end_utc": "2026-03-28T07:00:00Z",
+            },
+            "f1_records_written": 42,
+            "markets_discovered": 3,
+            "mappings_written": 1,
+            "markets_hydrated": 2,
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/refresh-latest-session",
+            json={"meeting_id": "meeting:1281"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["meeting_id"] == "meeting:1281"
+    assert payload["refreshed_session"]["session_code"] == "Q"
+    assert payload["markets_hydrated"] == 2
+
+
+def test_refresh_latest_session_endpoint_returns_404_for_missing_meeting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fail_refresh(*args, **kwargs):
+        raise KeyError("Meeting not found: missing-meeting")
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.refresh_latest_session_for_meeting",
+        fail_refresh,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/refresh-latest-session",
+            json={"meeting_id": "missing-meeting"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert "Meeting not found: missing-meeting" in response.text
+
+
+def test_refresh_latest_session_endpoint_returns_409_for_unfinished_meeting(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fail_refresh(*args, **kwargs):
+        raise ValueError("No ended sessions are available yet for Japanese Grand Prix.")
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.refresh_latest_session_for_meeting",
+        fail_refresh,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/refresh-latest-session",
+            json={"meeting_id": "meeting:1281"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "No ended sessions are available yet for Japanese Grand Prix." in response.text
+
+
+def test_capture_live_weekend_endpoint_serializes_worker_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.capture_live_weekend",
+        lambda *args, **kwargs: {
+            "job_run_id": "job-live-1",
+            "status": "completed",
+            "message": "Captured 20s of live data for Qualifying across 12 market(s).",
+            "session_key": 11249,
+            "capture_seconds": 20,
+            "openf1_messages": 14,
+            "polymarket_messages": 9,
+            "market_count": 12,
+            "polymarket_market_ids": ["market-1", "market-2"],
+            "records_written": 31,
+            "summary": {
+                "openf1_topics": [{"key": "v1/laps", "count": 14}],
+                "polymarket_event_types": [{"key": "book", "count": 9}],
+                "observed_market_count": 1,
+                "observed_token_count": 1,
+                "market_quotes": [
+                    {
+                        "market_id": "market-1",
+                        "token_id": "token-1",
+                        "outcome": "Yes",
+                        "event_type": "best_bid_ask",
+                        "observed_at_utc": "2026-03-28T06:20:00Z",
+                        "price": 0.41,
+                        "best_bid": 0.4,
+                        "best_ask": 0.42,
+                        "midpoint": 0.41,
+                        "spread": 0.02,
+                        "size": 12.0,
+                        "side": "buy",
+                    }
+                ],
+            },
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/capture-live-weekend",
+            json={"session_key": 11249, "capture_seconds": 20},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "capture-live-weekend"
+    assert payload["session_key"] == 11249
+    assert payload["capture_seconds"] == 20
+    assert payload["polymarket_messages"] == 9
+    assert payload["market_count"] == 12
+    assert payload["summary"]["openf1_topics"] == [{"key": "v1/laps", "count": 14}]
+    assert payload["summary"]["polymarket_event_types"] == [{"key": "book", "count": 9}]
+    assert payload["summary"]["market_quotes"][0]["market_id"] == "market-1"
+    assert payload["summary"]["market_quotes"][0]["event_type"] == "best_bid_ask"
+
+
+def test_capture_live_weekend_endpoint_returns_409_when_session_not_live(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fail_capture(*args, **kwargs):
+        raise ValueError(
+            "Qualifying live capture is available only between "
+            "2026-03-28T06:00:00+00:00 and 2026-03-28T07:00:00+00:00."
+        )
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.capture_live_weekend",
+        fail_capture,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/capture-live-weekend",
+            json={"session_key": 11249, "capture_seconds": 20},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "Qualifying live capture is available only between" in response.text
+
+
+def test_execute_manual_live_paper_trade_endpoint_serializes_worker_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_execute(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "action": "execute-manual-live-paper-trade",
+            "status": "ok",
+            "message": "Opened manual YES paper trade.",
+            "gp_short_code": "japan_fp1_fp2",
+            "market_id": "market-1",
+            "pt_session_id": "pt-live-1",
+            "signal_action": "buy_yes",
+            "quantity": 10.0,
+            "entry_price": 0.41,
+            "stake_cost": 4.1,
+            "market_price": 0.41,
+            "model_prob": 0.62,
+            "edge": 0.21,
+            "side_label": "YES",
+            "reason": "signal_accepted",
+        }
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.execute_manual_live_paper_trade",
+        fake_execute,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/execute-manual-live-paper-trade",
+            json={
+                "gp_short_code": "japan_fp1_fp2",
+                "market_id": "market-1",
+                "token_id": "token-1",
+                "model_run_id": "model-run-live",
+                "snapshot_id": "snapshot-live",
+                "model_prob": 0.62,
+                "market_price": 0.41,
+                "observed_at_utc": "2026-03-27T06:20:00Z",
+                "observed_spread": 0.02,
+                "source_event_type": "best_bid_ask",
+                "min_edge": 0.07,
+                "max_spread": 0.03,
+                "bet_size": 12,
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "execute-manual-live-paper-trade"
+    assert payload["gp_short_code"] == "japan_fp1_fp2"
+    assert payload["market_id"] == "market-1"
+    assert payload["pt_session_id"] == "pt-live-1"
+    assert payload["signal_action"] == "buy_yes"
+    assert payload["stake_cost"] == 4.1
+    assert captured["observed_spread"] == 0.02
+    assert captured["min_edge"] == 0.07
+    assert captured["max_spread"] == 0.03
+    assert captured["bet_size"] == 12
+
+
 def test_driver_affinity_report_endpoint_serializes_worker_payload(
     tmp_path: Path,
     monkeypatch,
@@ -440,7 +700,6 @@ def test_driver_affinity_report_endpoint_serializes_worker_payload(
                 "id": "meeting:1281",
                 "meeting_key": 1281,
                 "season": 2026,
-                "round_number": 3,
                 "meeting_name": "Japanese Grand Prix",
                 "circuit_short_name": "Suzuka",
                 "country_name": "Japan",
@@ -505,6 +764,7 @@ def test_driver_affinity_report_endpoint_serializes_worker_payload(
     payload = response.json()
     assert payload["meeting_key"] == 1281
     assert payload["is_fresh"] is True
+    assert payload["meeting"]["round_number"] is None
     assert payload["entries"][0]["display_name"] == "Lando NORRIS"
 
 
@@ -542,3 +802,92 @@ def test_refresh_driver_affinity_endpoint_returns_blocked_payload(
     payload = response.json()
     assert payload["status"] == "blocked"
     assert payload["meeting_key"] == 1281
+
+
+def test_refresh_driver_affinity_endpoint_accepts_report_without_round_number(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.driver_affinity.refresh_driver_affinity",
+        lambda *args, **kwargs: {
+            "action": "refresh-driver-affinity",
+            "status": "refreshed",
+            "message": "Driver affinity refreshed.",
+            "season": 2026,
+            "meeting_key": 1281,
+            "computed_at_utc": "2026-03-28T04:30:00Z",
+            "source_max_session_end_utc": "2026-03-28T03:30:00Z",
+            "hydrated_session_keys": [],
+            "report": {
+                "season": 2026,
+                "meeting_key": 1281,
+                "meeting": {
+                    "id": "meeting:1281",
+                    "meeting_key": 1281,
+                    "season": 2026,
+                    "meeting_name": "Japanese Grand Prix",
+                    "circuit_short_name": "Suzuka",
+                    "country_name": "Japan",
+                    "location": "Suzuka",
+                    "start_date_utc": "2026-03-27T02:30:00Z",
+                    "end_date_utc": "2026-03-29T07:00:00Z",
+                },
+                "computed_at_utc": "2026-03-28T04:30:00Z",
+                "as_of_utc": "2026-03-28T04:30:00Z",
+                "lookback_start_season": 2024,
+                "session_code_weights": {"Q": 1.0, "FP3": 0.8, "FP2": 0.6, "FP1": 0.4},
+                "season_weights": {"2026": 1.0, "2025": 0.65, "2024": 0.4},
+                "track_weights": {
+                    "s1_fraction": 0.35,
+                    "s2_fraction": 0.44,
+                    "s3_fraction": 0.21,
+                },
+                "source_session_codes_included": ["FP1", "FP2", "FP3"],
+                "source_max_session_end_utc": "2026-03-28T03:30:00Z",
+                "latest_ended_relevant_session_code": "FP3",
+                "latest_ended_relevant_session_end_utc": "2026-03-28T03:30:00Z",
+                "entry_count": 1,
+                "is_fresh": True,
+                "stale_reason": None,
+                "entries": [
+                    {
+                        "canonical_driver_key": "kimi antonelli",
+                        "display_driver_id": "driver:12",
+                        "display_name": "Kimi ANTONELLI",
+                        "display_broadcast_name": "K ANTONELLI",
+                        "driver_number": 12,
+                        "team_id": "team:mercedes",
+                        "team_name": "Mercedes",
+                        "country_code": "ITA",
+                        "headshot_url": None,
+                        "rank": 1,
+                        "affinity_score": 1.5,
+                        "s1_strength": 1.2,
+                        "s2_strength": 1.4,
+                        "s3_strength": 1.3,
+                        "track_s1_fraction": 0.35,
+                        "track_s2_fraction": 0.44,
+                        "track_s3_fraction": 0.21,
+                        "contributing_session_count": 6,
+                        "contributing_session_codes": ["Q", "FP3"],
+                        "latest_contributing_session_code": "FP3",
+                        "latest_contributing_session_end_utc": "2026-03-28T03:30:00Z",
+                    }
+                ],
+            },
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/refresh-driver-affinity",
+            json={"season": 2026, "meeting_key": 1281},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "refreshed"
+    assert payload["report"]["meeting"]["round_number"] is None

@@ -209,6 +209,120 @@ export interface SyncF1MarketsRequest {
   end_year?: number | null;
 }
 
+export interface RefreshLatestSessionRequest {
+  meeting_id: string;
+  search_fallback?: boolean;
+  discover_max_pages?: number;
+  hydrate_market_history?: boolean;
+}
+
+export interface RefreshedSessionSummary {
+  id: string;
+  sessionKey: number;
+  sessionCode: string | null;
+  sessionName: string;
+  dateEndUtc: string | null;
+}
+
+export interface RefreshLatestSessionResponse {
+  action: string;
+  status: string;
+  message: string;
+  meetingId: string;
+  meetingName: string;
+  refreshedSession: RefreshedSessionSummary;
+  f1RecordsWritten: number;
+  marketsDiscovered: number;
+  mappingsWritten: number;
+  marketsHydrated: number;
+}
+
+export interface CaptureLiveWeekendRequest {
+  session_key: number;
+  market_ids?: string[] | null;
+  capture_seconds?: number;
+  start_buffer_min?: number;
+  stop_buffer_min?: number;
+  message_limit?: number | null;
+}
+
+export interface CaptureLiveWeekendCount {
+  key: string;
+  count: number;
+}
+
+export interface CaptureLiveWeekendMarketQuote {
+  marketId: string;
+  tokenId: string | null;
+  outcome: string | null;
+  eventType: string;
+  observedAtUtc: string;
+  price: number | null;
+  bestBid: number | null;
+  bestAsk: number | null;
+  midpoint: number | null;
+  spread: number | null;
+  size: number | null;
+  side: string | null;
+}
+
+export interface CaptureLiveWeekendSummary {
+  openf1Topics: CaptureLiveWeekendCount[];
+  polymarketEventTypes: CaptureLiveWeekendCount[];
+  observedMarketCount: number;
+  observedTokenCount: number;
+  marketQuotes: CaptureLiveWeekendMarketQuote[];
+}
+
+export interface CaptureLiveWeekendResponse {
+  action: string;
+  status: string;
+  message: string;
+  jobRunId: string;
+  sessionKey: number;
+  captureSeconds: number;
+  openf1Messages: number;
+  polymarketMessages: number;
+  marketCount: number;
+  polymarketMarketIds: string[];
+  recordsWritten: number;
+  summary: CaptureLiveWeekendSummary;
+}
+
+export interface ExecuteManualLivePaperTradeRequest {
+  gp_short_code: string;
+  market_id: string;
+  token_id?: string | null;
+  model_run_id?: string | null;
+  snapshot_id?: string | null;
+  model_prob: number;
+  market_price: number;
+  observed_at_utc?: string | null;
+  observed_spread?: number | null;
+  source_event_type?: string | null;
+  min_edge?: number;
+  max_spread?: number | null;
+  bet_size?: number;
+}
+
+export interface ExecuteManualLivePaperTradeResponse {
+  action: string;
+  status: string;
+  message: string;
+  gpShortCode: string;
+  marketId: string;
+  ptSessionId: string | null;
+  signalAction: string;
+  quantity: number | null;
+  entryPrice: number | null;
+  stakeCost: number | null;
+  marketPrice: number;
+  modelProb: number;
+  edge: number;
+  sideLabel: string | null;
+  reason: string | null;
+}
+
 export interface GPRegistryItem {
   name: string;
   short_code: string;
@@ -284,6 +398,16 @@ export interface DriverAffinityEntry {
   latestContributingSessionEndUtc: string | null;
 }
 
+export interface DriverAffinitySegment {
+  key: string;
+  title: string;
+  description: string;
+  sourceSessionCodesIncluded: string[];
+  sourceSeasonsIncluded: number[];
+  entryCount: number;
+  entries: DriverAffinityEntry[];
+}
+
 export interface DriverAffinityReport {
   season: number;
   meetingKey: number;
@@ -294,6 +418,8 @@ export interface DriverAffinityReport {
   sessionCodeWeights: Record<string, number>;
   seasonWeights: Record<string, number>;
   trackWeights: Record<string, number>;
+  defaultSegmentKey: string | null;
+  segments: DriverAffinitySegment[];
   sourceSessionCodesIncluded: string[];
   sourceMaxSessionEndUtc: string | null;
   latestEndedRelevantSessionCode: string | null;
@@ -352,6 +478,34 @@ export interface RunWeekendCockpitRequest {
   discover_max_pages?: number;
 }
 
+export interface WeekendCockpitSettlementSummary {
+  settledSessionIds: string[];
+  settledGpSlugs: string[];
+  settledPositions: number;
+  manualPositionsSettled: number;
+  unresolvedPositions: number;
+  unresolvedSessionIds: string[];
+  winnerDriverId: string | null;
+}
+
+export interface RunWeekendCockpitDetails {
+  snapshotId: string | null;
+  modelRunId: string | null;
+  baseline: string | null;
+  ptSessionId: string | null;
+  logPath: string | null;
+  totalSignals: number | null;
+  tradesExecuted: number | null;
+  openPositions: number | null;
+  settledPositions: number | null;
+  winCount: number | null;
+  lossCount: number | null;
+  winRate: number | null;
+  totalPnl: number | null;
+  dailyPnl: number | null;
+  settlement: WeekendCockpitSettlementSummary | null;
+}
+
 export interface RunWeekendCockpitResponse {
   action: string;
   status: string;
@@ -361,7 +515,7 @@ export interface RunWeekendCockpitResponse {
   modelRunId: string | null;
   ptSessionId: string | null;
   executedSteps: WeekendCockpitStep[];
-  details?: Record<string, unknown> | null;
+  details: RunWeekendCockpitDetails | null;
 }
 
 export interface RefreshDriverAffinityRequest {

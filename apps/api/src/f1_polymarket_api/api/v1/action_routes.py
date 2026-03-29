@@ -5,9 +5,15 @@ import logging
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
+    CaptureLiveWeekendRequest,
+    CaptureLiveWeekendResponse,
+    ExecuteManualLivePaperTradeRequest,
+    ExecuteManualLivePaperTradeResponse,
     IngestDemoRequest,
     RefreshDriverAffinityRequest,
     RefreshDriverAffinityResponse,
+    RefreshLatestSessionRequest,
+    RefreshLatestSessionResponse,
     RunBacktestRequest,
     RunPaperTradeRequest,
     RunWeekendCockpitRequest,
@@ -173,6 +179,188 @@ def action_sync_f1_markets(
         )
     except Exception as exc:
         log.exception("sync-f1-markets failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post(
+    "/actions/refresh-latest-session",
+    response_model=RefreshLatestSessionResponse,
+)
+def action_refresh_latest_session(
+    body: RefreshLatestSessionRequest,
+    db: Session = Depends(get_db_session),
+) -> RefreshLatestSessionResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import refresh_latest_session_for_meeting
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = refresh_latest_session_for_meeting(
+            ctx,
+            meeting_id=body.meeting_id,
+            search_fallback=body.search_fallback,
+            discover_max_pages=body.discover_max_pages,
+            hydrate_market_history=body.hydrate_market_history,
+        )
+        db.commit()
+        return RefreshLatestSessionResponse.model_validate(result)
+    except KeyError as exc:
+        detail = str(exc.args[0]) if exc.args else str(exc)
+        raise HTTPException(status_code=404, detail=detail) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("refresh-latest-session failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post(
+    "/actions/capture-live-weekend",
+    response_model=CaptureLiveWeekendResponse,
+)
+def action_capture_live_weekend(
+    body: CaptureLiveWeekendRequest,
+    db: Session = Depends(get_db_session),
+) -> CaptureLiveWeekendResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import capture_live_weekend
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = capture_live_weekend(
+            ctx,
+            session_key=body.session_key,
+            market_ids=body.market_ids,
+            start_buffer_min=body.start_buffer_min,
+            stop_buffer_min=body.stop_buffer_min,
+            message_limit=body.message_limit,
+            capture_seconds=body.capture_seconds,
+        )
+        db.commit()
+        summary = result.get("summary") or {}
+        return CaptureLiveWeekendResponse(
+            action="capture-live-weekend",
+            status="ok",
+            message=str(result.get("message") or "Live capture complete."),
+            job_run_id=str(result["job_run_id"]),
+            session_key=int(result["session_key"]),
+            capture_seconds=int(result["capture_seconds"]),
+            openf1_messages=int(result.get("openf1_messages", 0) or 0),
+            polymarket_messages=int(result.get("polymarket_messages", 0) or 0),
+            market_count=int(result.get("market_count", 0) or 0),
+            polymarket_market_ids=[
+                str(market_id)
+                for market_id in result.get("polymarket_market_ids", [])
+                if market_id is not None
+            ],
+            records_written=int(result.get("records_written", 0) or 0),
+            summary={
+                "openf1_topics": [
+                    {
+                        "key": str(item.get("key") or "unknown"),
+                        "count": int(item.get("count", 0) or 0),
+                    }
+                    for item in summary.get("openf1_topics", [])
+                ],
+                "polymarket_event_types": [
+                    {
+                        "key": str(item.get("key") or "unknown"),
+                        "count": int(item.get("count", 0) or 0),
+                    }
+                    for item in summary.get("polymarket_event_types", [])
+                ],
+                "observed_market_count": int(summary.get("observed_market_count", 0) or 0),
+                "observed_token_count": int(summary.get("observed_token_count", 0) or 0),
+                "market_quotes": [
+                    {
+                        "market_id": str(item.get("market_id") or ""),
+                        "token_id": (
+                            str(item.get("token_id"))
+                            if item.get("token_id") is not None
+                            else None
+                        ),
+                        "outcome": (
+                            str(item.get("outcome"))
+                            if item.get("outcome") is not None
+                            else None
+                        ),
+                        "event_type": str(item.get("event_type") or "unknown"),
+                        "observed_at_utc": item.get("observed_at_utc"),
+                        "price": (
+                            float(item["price"]) if item.get("price") is not None else None
+                        ),
+                        "best_bid": (
+                            float(item["best_bid"])
+                            if item.get("best_bid") is not None
+                            else None
+                        ),
+                        "best_ask": (
+                            float(item["best_ask"])
+                            if item.get("best_ask") is not None
+                            else None
+                        ),
+                        "midpoint": (
+                            float(item["midpoint"])
+                            if item.get("midpoint") is not None
+                            else None
+                        ),
+                        "spread": (
+                            float(item["spread"])
+                            if item.get("spread") is not None
+                            else None
+                        ),
+                        "size": float(item["size"]) if item.get("size") is not None else None,
+                        "side": str(item.get("side")) if item.get("side") is not None else None,
+                    }
+                    for item in summary.get("market_quotes", [])
+                    if item.get("market_id") is not None
+                ],
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("capture-live-weekend failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post(
+    "/actions/execute-manual-live-paper-trade",
+    response_model=ExecuteManualLivePaperTradeResponse,
+)
+def action_execute_manual_live_paper_trade(
+    body: ExecuteManualLivePaperTradeRequest,
+    db: Session = Depends(get_db_session),
+) -> ExecuteManualLivePaperTradeResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import execute_manual_live_paper_trade
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = execute_manual_live_paper_trade(
+            ctx,
+            gp_short_code=body.gp_short_code,
+            market_id=body.market_id,
+            token_id=body.token_id,
+            model_run_id=body.model_run_id,
+            snapshot_id=body.snapshot_id,
+            model_prob=body.model_prob,
+            market_price=body.market_price,
+            observed_at_utc=body.observed_at_utc,
+            observed_spread=body.observed_spread,
+            source_event_type=body.source_event_type,
+            min_edge=body.min_edge,
+            max_spread=body.max_spread,
+            bet_size=body.bet_size,
+        )
+        db.commit()
+        return ExecuteManualLivePaperTradeResponse.model_validate(result)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except Exception as exc:
+        log.exception("execute-manual-live-paper-trade failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

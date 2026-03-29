@@ -80,6 +80,8 @@ def compute_driver_sector_profiles(
     *,
     circuit_key: int | None = None,
     circuit_short_name: str | None = None,
+    meeting_key: int | None = None,
+    season_exact: int | None = None,
     session_codes: tuple[str, ...] = DEFAULT_AFFINITY_SESSION_CODES,
     min_season: int = 2024,
     n_sessions: int = 12,
@@ -105,6 +107,8 @@ def compute_driver_sector_profiles(
         JOIN f1_meetings m ON m.id = s.meeting_id
         WHERE s.session_code IN ({session_codes_sql})
           AND m.season >= :min_season
+          AND (:season_exact IS NULL OR m.season = :season_exact)
+          AND (:meeting_key IS NULL OR m.meeting_key = :meeting_key)
           AND (:as_of_utc IS NULL OR s.date_end_utc <= :as_of_utc)
           AND l.sector_1_seconds IS NOT NULL
           AND l.sector_1_seconds > 5
@@ -120,6 +124,8 @@ def compute_driver_sector_profiles(
         query,
         {
             "min_season": min_season,
+            "season_exact": season_exact,
+            "meeting_key": meeting_key,
             "as_of_utc": as_of_utc,
         },
     ).fetchall()

@@ -22,6 +22,7 @@ class F1DBConnector:
         self.client = httpx.Client(
             timeout=60.0,
             headers={"User-Agent": "f1-polymarket-lab/0.1.0"},
+            follow_redirects=True,
         )
 
     @retry(wait=wait_exponential(min=2, max=30), stop=stop_after_attempt(5), reraise=True)
@@ -56,7 +57,7 @@ class F1DBConnector:
             raise ValueError("F1DB asset did not include a browser_download_url")
 
         archive_path = self.cache_dir / self.asset_name
-        with self.client.stream("GET", download_url) as response:
+        with self.client.stream("GET", download_url, follow_redirects=True) as response:
             response.raise_for_status()
             with archive_path.open("wb") as handle:
                 for chunk in response.iter_bytes():

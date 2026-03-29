@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter, defaultdict
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -20,6 +20,7 @@ from f1_polymarket_lab.connectors.base import FetchBatch
 from f1_polymarket_lab.storage.models import (
     DataQualityResult,
     EntityMappingF1ToPolymarket,
+    F1Driver,
     F1Interval,
     F1Lap,
     F1Meeting,
@@ -35,6 +36,7 @@ from f1_polymarket_lab.storage.models import (
     FeatureSnapshot,
     MappingCandidate,
     ModelPrediction,
+    PaperTradePosition,
     PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
@@ -878,6 +880,7 @@ def _resource_label_for_step(key: str, *, session_code: str | None) -> str:
     return {
         "sync_calendar": "Weekend schedule",
         "hydrate_source_session": f"{session_name} results",
+        "settle_finished_stage": f"{session_name} tickets",
         "discover_target_markets": f"{session_name} markets",
         "run_paper_trade": "Paper trading",
     }.get(key, session_name)
@@ -893,8 +896,8 @@ def _config_explanation(config: GPConfig) -> str:
     source_name = _session_display_name(config.source_session_code)
     target_name = _session_display_name(config.target_session_code)
     return (
-        f"This stage uses {source_name} results to find {target_name} markets and, "
-        "when ready, continue into paper trading."
+        f"This stage uses {source_name} results to settle finished {source_name} tickets, "
+        f"find {target_name} markets, and when ready continue into paper trading."
     )
 
 
@@ -903,6 +906,7 @@ def _primary_action_payload(
     config: GPConfig,
     sync_step: dict[str, Any],
     hydrate_step: dict[str, Any],
+    settle_step: dict[str, Any],
     discover_step: dict[str, Any],
     run_step: dict[str, Any],
     latest_paper_session: PaperTradeSession | None,
@@ -917,38 +921,54 @@ def _primary_action_payload(
         }
     if sync_step["status"] == "ready":
         return {
-            "primary_action_title": "Load weekend schedule",
+            "primary_action_title": "Update to latest",
             "primary_action_description": (
-                "This will load the current Grand Prix schedule first, "
+                "This latest update will load the current Grand Prix schedule first, "
                 "then continue the remaining preparation steps."
             ),
-            "primary_action_cta": "Load weekend schedule",
+            "primary_action_cta": "Update to latest",
         }
     if hydrate_step["status"] == "ready":
+        continuation = (
+            f", then settle finished {source_name} tickets and prepare {target_name} markets."
+            if settle_step["status"] == "ready"
+            else f" and prepare {target_name} markets."
+        )
         return {
-            "primary_action_title": f"Load {source_name} results",
+            "primary_action_title": "Update to latest",
             "primary_action_description": (
-                f"This will load {source_name} results first, then prepare {target_name} markets."
+                f"This latest update will load {source_name} results first"
+                f"{continuation}"
             ),
-            "primary_action_cta": f"Load {source_name} results",
+            "primary_action_cta": "Update to latest",
+        }
+    if settle_step["status"] == "ready":
+        return {
+            "primary_action_title": "Update to latest",
+            "primary_action_description": (
+                f"This latest update will settle finished {source_name} tickets, "
+                f"prepare {target_name} markets, and continue into paper trading."
+            ),
+            "primary_action_cta": "Update to latest",
         }
     if discover_step["status"] == "ready":
         return {
-            "primary_action_title": f"Find {target_name} markets",
+            "primary_action_title": "Update to latest",
             "primary_action_description": (
-                f"This will discover {target_name} markets first, then continue into paper trading."
+                f"This latest update will discover {target_name} markets first, "
+                "then continue into paper trading."
             ),
-            "primary_action_cta": f"Find {target_name} markets",
+            "primary_action_cta": "Update to latest",
         }
     rerun_label = (
-        "Run this stage again"
+        "Update to latest"
         if latest_paper_session is not None
-        else "Run paper trading"
+        else "Update to latest"
     )
     return {
-        "primary_action_title": f"{config_display_label(config)} is ready",
+        "primary_action_title": "Update to latest",
         "primary_action_description": (
-            "All prerequisites are complete. You can run paper trading now."
+            "All prerequisites are complete. You can run the next paper-trading stage now."
         ),
         "primary_action_cta": rerun_label,
     }
@@ -1205,6 +1225,517 @@ def _mapping_count_for_config(
     )
 
 
+def _gp_config_for_slug(gp_slug: str) -> GPConfig | None:
+    for config in GP_REGISTRY:
+        if config.short_code == gp_slug:
+            return config
+    return None
+
+
+def _session_winner_driver_id(ctx: PipelineContext, *, session_id: str | None) -> str | None:
+    if session_id is None:
+        return None
+    return ctx.db.scalar(
+        select(F1SessionResult.driver_id).where(
+            F1SessionResult.session_id == session_id,
+            F1SessionResult.position == 1,
+        )
+    )
+
+
+def _open_paper_trade_positions(
+    ctx: PipelineContext,
+    *,
+    paper_session_id: str,
+) -> list[PaperTradePosition]:
+    return list(
+        ctx.db.scalars(
+            select(PaperTradePosition)
+            .where(
+                PaperTradePosition.session_id == paper_session_id,
+                PaperTradePosition.status == "open",
+            )
+            .order_by(PaperTradePosition.entry_time.asc(), PaperTradePosition.id.asc())
+        ).all()
+    )
+
+
+def _market_within_meeting_window(
+    *,
+    market: PolymarketMarket,
+    meeting: F1Meeting | None,
+) -> bool:
+    if meeting is None:
+        return True
+    window_start = (
+        None
+        if meeting.start_date_utc is None
+        else _ensure_utc(meeting.start_date_utc) - timedelta(days=7)
+    )
+    window_end = (
+        None
+        if meeting.end_date_utc is None
+        else _ensure_utc(meeting.end_date_utc) + timedelta(days=2)
+    )
+    market_start = None if market.start_at_utc is None else _ensure_utc(market.start_at_utc)
+    market_end = None if market.end_at_utc is None else _ensure_utc(market.end_at_utc)
+    if window_end is not None and market_start is not None and market_start > window_end:
+        return False
+    if window_start is not None and market_end is not None and market_end < window_start:
+        return False
+    return True
+
+
+def _paper_trade_session_targets_completed_session(
+    ctx: PipelineContext,
+    *,
+    paper_session: PaperTradeSession,
+    open_positions: list[PaperTradePosition],
+    completed_session: F1Session,
+    meeting: F1Meeting | None,
+) -> bool:
+    gp_config = _gp_config_for_slug(paper_session.gp_slug)
+    if (
+        gp_config is not None
+        and meeting is not None
+        and gp_config.meeting_key == meeting.meeting_key
+        and gp_config.season == meeting.season
+        and gp_config.target_session_code == completed_session.session_code
+    ):
+        return True
+
+    market_ids = sorted({position.market_id for position in open_positions if position.market_id})
+    if not market_ids:
+        return False
+
+    mapped_market_ids = set(
+        ctx.db.scalars(
+            select(EntityMappingF1ToPolymarket.polymarket_market_id).where(
+                EntityMappingF1ToPolymarket.f1_session_id == completed_session.id,
+                EntityMappingF1ToPolymarket.polymarket_market_id.in_(market_ids),
+            )
+        ).all()
+    )
+    if mapped_market_ids:
+        return True
+
+    markets = ctx.db.scalars(
+        select(PolymarketMarket).where(PolymarketMarket.id.in_(market_ids))
+    ).all()
+    return any(
+        market.target_session_code == completed_session.session_code
+        and _market_within_meeting_window(market=market, meeting=meeting)
+        for market in markets
+    )
+
+
+def _candidate_paper_trade_sessions_for_completed_session(
+    ctx: PipelineContext,
+    *,
+    completed_session: F1Session,
+    meeting: F1Meeting | None,
+) -> list[dict[str, Any]]:
+    open_sessions = ctx.db.scalars(
+        select(PaperTradeSession)
+        .where(PaperTradeSession.status == "open")
+        .order_by(PaperTradeSession.started_at.asc(), PaperTradeSession.id.asc())
+    ).all()
+
+    candidates: list[dict[str, Any]] = []
+    for paper_session in open_sessions:
+        open_positions = _open_paper_trade_positions(ctx, paper_session_id=paper_session.id)
+        if not open_positions:
+            continue
+        if not _paper_trade_session_targets_completed_session(
+            ctx,
+            paper_session=paper_session,
+            open_positions=open_positions,
+            completed_session=completed_session,
+            meeting=meeting,
+        ):
+            continue
+        config_json = paper_session.config_json or {}
+        gp_config = _gp_config_for_slug(paper_session.gp_slug)
+        candidates.append(
+            {
+                "session": paper_session,
+                "open_positions": open_positions,
+                "gp_config": gp_config,
+                "manual_trade": bool(config_json.get("manual_trade")) or gp_config is None,
+            }
+        )
+    return candidates
+
+
+def _settlement_preview(
+    ctx: PipelineContext,
+    *,
+    completed_session: F1Session,
+    meeting: F1Meeting | None,
+) -> dict[str, Any]:
+    candidates = _candidate_paper_trade_sessions_for_completed_session(
+        ctx,
+        completed_session=completed_session,
+        meeting=meeting,
+    )
+    return {
+        "candidate_session_ids": [item["session"].id for item in candidates],
+        "candidate_gp_slugs": [item["session"].gp_slug for item in candidates],
+        "candidate_sessions": len(candidates),
+        "candidate_positions": sum(len(item["open_positions"]) for item in candidates),
+        "candidate_manual_positions": sum(
+            len(item["open_positions"]) for item in candidates if item["manual_trade"]
+        ),
+    }
+
+
+def _normalize_driver_alias(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = slugify(str(value).strip())
+    return normalized or None
+
+
+def _driver_alias_variants(*, driver_id: str, driver: F1Driver | None) -> set[str]:
+    aliases: set[str] = set()
+
+    def add(value: Any) -> None:
+        normalized = _normalize_driver_alias(value)
+        if normalized is not None:
+            aliases.add(normalized)
+
+    add(driver_id)
+    if driver is None:
+        return aliases
+
+    add(driver.full_name)
+    add(driver.broadcast_name)
+    add(driver.first_name)
+    add(driver.last_name)
+    add(driver.name_acronym)
+    if driver.first_name and driver.last_name:
+        add(f"{driver.first_name} {driver.last_name}")
+
+    normalized_full_name = _normalize_driver_alias(driver.full_name)
+    if normalized_full_name is not None:
+        tokens = [token for token in normalized_full_name.split("-") if token]
+        if len(tokens) >= 2:
+            aliases.add("-".join(tokens[:2]))
+            aliases.add("-".join(tokens[-2:]))
+            aliases.add("-".join(tokens[:-1]))
+            aliases.add("-".join(tokens[1:]))
+            aliases.add(f"{tokens[0]}-{tokens[-1]}")
+            for start in range(len(tokens)):
+                aliases.add("-".join(tokens[start:]))
+    return {alias for alias in aliases if alias}
+
+
+def _session_driver_alias_index(
+    ctx: PipelineContext,
+    *,
+    session_id: str,
+) -> dict[str, set[str]]:
+    alias_to_driver_ids: dict[str, set[str]] = defaultdict(set)
+    rows = ctx.db.execute(
+        select(F1SessionResult.driver_id, F1Driver)
+        .select_from(F1SessionResult)
+        .outerjoin(F1Driver, F1Driver.id == F1SessionResult.driver_id)
+        .where(F1SessionResult.session_id == session_id)
+    ).all()
+    for driver_id, driver in rows:
+        if driver_id is None:
+            continue
+        for alias in _driver_alias_variants(driver_id=driver_id, driver=driver):
+            alias_to_driver_ids[alias].add(driver_id)
+    return alias_to_driver_ids
+
+
+def _exact_driver_alias_match(
+    *,
+    value: Any,
+    alias_index: dict[str, set[str]],
+) -> str | None:
+    normalized = _normalize_driver_alias(value)
+    if normalized is None:
+        return None
+    matches = alias_index.get(normalized)
+    if not matches or len(matches) != 1:
+        return None
+    return next(iter(matches))
+
+
+def _driver_alias_match_from_text(
+    *,
+    value: Any,
+    alias_index: dict[str, set[str]],
+) -> str | None:
+    normalized_text = _normalize_driver_alias(value)
+    if normalized_text is None:
+        return None
+
+    candidates: list[tuple[int, int, str]] = []
+    for alias, driver_ids in alias_index.items():
+        if len(driver_ids) != 1 or alias not in normalized_text:
+            continue
+        alias_length = len(alias.replace("-", ""))
+        alias_token_count = len([token for token in alias.split("-") if token])
+        if alias_token_count == 1 and alias_length < 5:
+            continue
+        candidates.append((alias_token_count, alias_length, next(iter(driver_ids))))
+
+    if not candidates:
+        return None
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    top_token_count, top_alias_length, top_driver_id = candidates[0]
+    top_driver_ids = {
+        driver_id
+        for token_count, alias_length, driver_id in candidates
+        if token_count == top_token_count and alias_length == top_alias_length
+    }
+    if len(top_driver_ids) != 1:
+        return None
+    return top_driver_id
+
+
+def _load_snapshot_market_driver_map(
+    ctx: PipelineContext,
+    *,
+    paper_session: PaperTradeSession,
+) -> dict[str, str]:
+    if not paper_session.snapshot_id:
+        return {}
+
+    snapshot = ctx.db.get(FeatureSnapshot, paper_session.snapshot_id)
+    if snapshot is None or not snapshot.storage_path:
+        return {}
+
+    storage_path = Path(snapshot.storage_path)
+    if not storage_path.exists():
+        return {}
+
+    import polars as pl  # noqa: PLC0415
+
+    try:
+        rows = pl.read_parquet(storage_path).select(["market_id", "driver_id"]).to_dicts()
+    except Exception:
+        return {}
+
+    market_driver_map: dict[str, str] = {}
+    for row in rows:
+        market_id = row.get("market_id")
+        driver_id = row.get("driver_id")
+        if market_id and driver_id:
+            market_driver_map[str(market_id)] = str(driver_id)
+    return market_driver_map
+
+
+def _resolve_position_driver_id(
+    *,
+    position: PaperTradePosition,
+    paper_session: PaperTradeSession,
+    market_driver_map: dict[str, str],
+    markets_by_id: dict[str, PolymarketMarket],
+    alias_index: dict[str, set[str]],
+) -> str | None:
+    snapshot_driver_id = market_driver_map.get(position.market_id or "")
+    if snapshot_driver_id:
+        return snapshot_driver_id
+
+    config_json = paper_session.config_json or {}
+    summary_json = paper_session.summary_json or {}
+    for hint in (
+        summary_json.get("selected_driver"),
+        config_json.get("driver"),
+    ):
+        matched_driver_id = _exact_driver_alias_match(value=hint, alias_index=alias_index)
+        if matched_driver_id is not None:
+            return matched_driver_id
+
+    market = markets_by_id.get(position.market_id)
+    for text_hint in (
+        config_json.get("market_question"),
+        market.question if market is not None else None,
+        market.slug if market is not None else None,
+    ):
+        matched_driver_id = _driver_alias_match_from_text(
+            value=text_hint,
+            alias_index=alias_index,
+        )
+        if matched_driver_id is not None:
+            return matched_driver_id
+    return None
+
+
+def _paper_trade_position_pnl(
+    position: PaperTradePosition,
+    *,
+    outcome_yes: bool,
+    fee_rate: float,
+) -> float:
+    if position.side == "buy_no":
+        pnl = (
+            position.quantity * (1.0 - position.entry_price)
+            if not outcome_yes
+            else -position.quantity * position.entry_price
+        )
+    else:
+        pnl = (
+            position.quantity * (1.0 - position.entry_price)
+            if outcome_yes
+            else -position.quantity * position.entry_price
+        )
+    return pnl - (position.quantity * fee_rate)
+
+
+def _refresh_paper_trade_session_summary(
+    ctx: PipelineContext,
+    *,
+    paper_session: PaperTradeSession,
+    settled_at: datetime,
+) -> None:
+    positions = list(
+        ctx.db.scalars(
+            select(PaperTradePosition).where(PaperTradePosition.session_id == paper_session.id)
+        ).all()
+    )
+    settled_positions = [position for position in positions if position.status == "settled"]
+    open_positions = [position for position in positions if position.status == "open"]
+    win_count = len(
+        [
+            position
+            for position in settled_positions
+            if (position.realized_pnl or 0.0) > 0
+        ]
+    )
+    total_pnl = sum(position.realized_pnl or 0.0 for position in settled_positions)
+    existing_summary = dict(paper_session.summary_json or {})
+    existing_summary.update(
+        {
+            "open_positions": len(open_positions),
+            "settled_positions": len(settled_positions),
+            "win_count": win_count,
+            "loss_count": len(settled_positions) - win_count,
+            "win_rate": (
+                win_count / len(settled_positions) if settled_positions else None
+            ),
+            "total_pnl": total_pnl,
+            "daily_pnl": total_pnl,
+        }
+    )
+    paper_session.summary_json = existing_summary
+    paper_session.status = "settled" if not open_positions else "open"
+    paper_session.finished_at = settled_at if not open_positions else None
+
+
+def settle_paper_trade_sessions_for_completed_session(
+    ctx: PipelineContext,
+    *,
+    completed_session: F1Session,
+    meeting: F1Meeting | None,
+) -> dict[str, Any]:
+    settlement_summary = {
+        "settled_session_ids": [],
+        "settled_gp_slugs": [],
+        "settled_positions": 0,
+        "manual_positions_settled": 0,
+        "unresolved_positions": 0,
+        "unresolved_session_ids": [],
+        "winner_driver_id": None,
+    }
+    candidates = _candidate_paper_trade_sessions_for_completed_session(
+        ctx,
+        completed_session=completed_session,
+        meeting=meeting,
+    )
+    if not candidates:
+        return settlement_summary
+
+    winner_driver_id = _session_winner_driver_id(ctx, session_id=completed_session.id)
+    if winner_driver_id is None:
+        raise ValueError(
+            f"No position-1 result found for completed session {completed_session.session_code} "
+            f"({completed_session.session_key})."
+        )
+    settlement_summary["winner_driver_id"] = winner_driver_id
+    alias_index = _session_driver_alias_index(ctx, session_id=completed_session.id)
+    settled_at = datetime.now(tz=timezone.utc)
+
+    for candidate in candidates:
+        paper_session = cast(PaperTradeSession, candidate["session"])
+        open_positions = cast(list[PaperTradePosition], candidate["open_positions"])
+        manual_trade = bool(candidate["manual_trade"])
+        stage_backed = candidate["gp_config"] is not None
+        market_driver_map = _load_snapshot_market_driver_map(ctx, paper_session=paper_session)
+        market_ids = sorted(
+            {
+                position.market_id
+                for position in open_positions
+                if position.market_id
+            }
+        )
+        markets_by_id = {
+            market.id: market
+            for market in ctx.db.scalars(
+                select(PolymarketMarket).where(PolymarketMarket.id.in_(market_ids))
+            ).all()
+        } if market_ids else {}
+        fee_rate = float((paper_session.config_json or {}).get("fee_rate", 0.02))
+
+        resolvable_positions: list[tuple[PaperTradePosition, str]] = []
+        unresolved_position_ids: list[str] = []
+        for position in open_positions:
+            driver_id = _resolve_position_driver_id(
+                position=position,
+                paper_session=paper_session,
+                market_driver_map=market_driver_map,
+                markets_by_id=markets_by_id,
+                alias_index=alias_index,
+            )
+            if driver_id is None:
+                unresolved_position_ids.append(position.id)
+                continue
+            resolvable_positions.append((position, driver_id))
+
+        if unresolved_position_ids and stage_backed:
+            raise ValueError(
+                f"Could not resolve {len(unresolved_position_ids)} open position(s) for "
+                f"{paper_session.gp_slug} against {completed_session.session_code} results."
+            )
+
+        for position, driver_id in resolvable_positions:
+            outcome_yes = driver_id == winner_driver_id
+            position.status = "settled"
+            position.exit_price = 1.0 if outcome_yes else 0.0
+            position.exit_time = settled_at
+            position.realized_pnl = _paper_trade_position_pnl(
+                position,
+                outcome_yes=outcome_yes,
+                fee_rate=fee_rate,
+            )
+
+        if resolvable_positions:
+            _refresh_paper_trade_session_summary(
+                ctx,
+                paper_session=paper_session,
+                settled_at=settled_at,
+            )
+            settlement_summary["settled_positions"] += len(resolvable_positions)
+            if manual_trade:
+                settlement_summary["manual_positions_settled"] += len(resolvable_positions)
+            if paper_session.id not in settlement_summary["settled_session_ids"]:
+                settlement_summary["settled_session_ids"].append(paper_session.id)
+            if paper_session.gp_slug not in settlement_summary["settled_gp_slugs"]:
+                settlement_summary["settled_gp_slugs"].append(paper_session.gp_slug)
+
+        if unresolved_position_ids:
+            settlement_summary["unresolved_positions"] += len(unresolved_position_ids)
+            if paper_session.id not in settlement_summary["unresolved_session_ids"]:
+                settlement_summary["unresolved_session_ids"].append(paper_session.id)
+
+    return settlement_summary
+
+
 def get_weekend_cockpit_status(
     ctx: PipelineContext,
     *,
@@ -1251,6 +1782,10 @@ def get_weekend_cockpit_status(
     discover_resource = _resource_label_for_step(
         "discover_target_markets",
         session_code=selected_config.target_session_code,
+    )
+    settle_resource = _resource_label_for_step(
+        "settle_finished_stage",
+        session_code=selected_config.source_session_code,
     )
     run_resource = _resource_label_for_step("run_paper_trade", session_code=None)
 
@@ -1360,6 +1895,104 @@ def get_weekend_cockpit_status(
                 resource_label=hydrate_resource,
             )
 
+    if selected_config.source_session_code is None:
+        settle_step = _step_payload(
+            key="settle_finished_stage",
+            label="Settle finished stage",
+            status="skipped",
+            detail="This stage does not have an earlier ticket set to settle.",
+            reason_code="not_required",
+            resource_label=settle_resource,
+        )
+    elif not calendar_completed:
+        settle_step = _step_payload(
+            key="settle_finished_stage",
+            label="Settle finished stage",
+            status="pending",
+            detail=(
+                "Once the weekend schedule is loaded and source results are available, "
+                "finished tickets can be settled."
+            ),
+            session_code=selected_config.source_session_code,
+            reason_code="waiting_for_calendar",
+            resource_label=settle_resource,
+        )
+    elif source_session is None:
+        settle_step = _step_payload(
+            key="settle_finished_stage",
+            label="Settle finished stage",
+            status="blocked",
+            detail=(
+                f"{source_name} session details are unavailable, so finished tickets "
+                "cannot be settled."
+            ),
+            session_code=selected_config.source_session_code,
+            reason_code="missing_source_session",
+            resource_label=settle_resource,
+        )
+    elif source_result_count == 0:
+        settle_step = _step_payload(
+            key="settle_finished_stage",
+            label="Settle finished stage",
+            status="pending",
+            detail=(
+                f"Once {source_name} results are loaded, finished tickets can be "
+                "settled automatically."
+            ),
+            session_code=selected_config.source_session_code,
+            session_key=source_session.session_key,
+            reason_code="waiting_for_source_results",
+            resource_label=settle_resource,
+        )
+    else:
+        settlement_preview = _settlement_preview(
+            ctx,
+            completed_session=source_session,
+            meeting=meeting,
+        )
+        if settlement_preview["candidate_positions"] == 0:
+            settle_step = _step_payload(
+                key="settle_finished_stage",
+                label="Settle finished stage",
+                status="skipped",
+                detail=f"No open tickets are waiting on {source_name} results.",
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                reason_code="nothing_to_settle",
+                resource_label=settle_resource,
+            )
+        elif _session_winner_driver_id(ctx, session_id=source_session.id) is None:
+            settle_step = _step_payload(
+                key="settle_finished_stage",
+                label="Settle finished stage",
+                status="blocked",
+                detail=(
+                    f"{source_name} results are present, but the winning driver is not "
+                    "available yet."
+                ),
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                count=settlement_preview["candidate_positions"],
+                reason_code="missing_winner_result",
+                resource_label=settle_resource,
+            )
+        else:
+            settle_step = _step_payload(
+                key="settle_finished_stage",
+                label="Settle finished stage",
+                status="ready",
+                detail=(
+                    f"{settlement_preview['candidate_positions']} open tickets across "
+                    f"{settlement_preview['candidate_sessions']} prior runs can be "
+                    f"settled from {source_name} results now."
+                ),
+                session_code=selected_config.source_session_code,
+                session_key=source_session.session_key,
+                count=settlement_preview["candidate_positions"],
+                reason_code="ready_to_settle",
+                resource_label=settle_resource,
+            )
+
     if not calendar_completed:
         discover_step = _step_payload(
             key="discover_target_markets",
@@ -1412,7 +2045,7 @@ def get_weekend_cockpit_status(
 
     blockers = [
         step["detail"]
-        for step in (hydrate_step, discover_step)
+        for step in (hydrate_step, settle_step, discover_step)
         if step["status"] == "blocked"
     ]
     if blockers:
@@ -1457,6 +2090,7 @@ def get_weekend_cockpit_status(
         config=selected_config,
         sync_step=sync_step,
         hydrate_step=hydrate_step,
+        settle_step=settle_step,
         discover_step=discover_step,
         run_step=run_step,
         latest_paper_session=latest_paper_session,
@@ -1476,7 +2110,7 @@ def get_weekend_cockpit_status(
         "source_session": source_session,
         "target_session": target_session,
         "latest_paper_session": latest_paper_session,
-        "steps": [sync_step, hydrate_step, discover_step, run_step],
+        "steps": [sync_step, hydrate_step, settle_step, discover_step, run_step],
         "blockers": blockers,
         "ready_to_run": not blockers,
         "primary_action_title": primary_action["primary_action_title"],
@@ -1594,6 +2228,186 @@ def run_gp_paper_trade_pipeline(
     }
 
 
+def execute_manual_live_paper_trade(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str,
+    market_id: str,
+    token_id: str | None,
+    model_run_id: str | None,
+    snapshot_id: str | None,
+    model_prob: float,
+    market_price: float,
+    observed_at_utc: datetime | None = None,
+    observed_spread: float | None = None,
+    source_event_type: str | None = None,
+    min_edge: float = 0.05,
+    max_spread: float | None = None,
+    bet_size: float = 10.0,
+) -> dict[str, Any]:
+    config = get_gp_config(gp_short_code)
+    market = ctx.db.get(PolymarketMarket, market_id)
+    if market is None:
+        raise KeyError(f"market_id={market_id} not found")
+    if not 0.0 <= model_prob <= 1.0:
+        raise ValueError("model_prob must be between 0 and 1")
+    if not 0.0 <= market_price <= 1.0:
+        raise ValueError("market_price must be between 0 and 1")
+    if observed_spread is not None and not 0.0 <= observed_spread <= 1.0:
+        raise ValueError("observed_spread must be between 0 and 1")
+    if max_spread is not None and not 0.0 <= max_spread <= 1.0:
+        raise ValueError("max_spread must be between 0 and 1")
+
+    entry_ts = _ensure_utc(observed_at_utc or utc_now())
+    if max_spread is not None:
+        if observed_spread is None:
+            return {
+                "action": "execute-manual-live-paper-trade",
+                "status": "skipped",
+                "message": (
+                    f"Skipped manual paper trade for {market.question}: "
+                    "live spread is unavailable."
+                ),
+                "gp_short_code": config.short_code,
+                "market_id": market.id,
+                "pt_session_id": None,
+                "signal_action": "skip",
+                "quantity": None,
+                "entry_price": None,
+                "stake_cost": None,
+                "market_price": market_price,
+                "model_prob": model_prob,
+                "edge": model_prob - market_price,
+                "side_label": None,
+                "reason": "spread_unavailable",
+            }
+        if observed_spread > max_spread:
+            return {
+                "action": "execute-manual-live-paper-trade",
+                "status": "skipped",
+                "message": (
+                    f"Skipped manual paper trade for {market.question}: "
+                    f"spread {observed_spread:.3f} exceeds max {max_spread:.3f}."
+                ),
+                "gp_short_code": config.short_code,
+                "market_id": market.id,
+                "pt_session_id": None,
+                "signal_action": "skip",
+                "quantity": None,
+                "entry_price": None,
+                "stake_cost": None,
+                "market_price": market_price,
+                "model_prob": model_prob,
+                "edge": model_prob - market_price,
+                "side_label": None,
+                "reason": "spread_above_max",
+            }
+    engine = PaperTradingEngine(
+        config=PaperTradeConfig(
+            min_edge=min_edge,
+            bet_size=bet_size,
+        )
+    )
+    signal = engine.evaluate_signal(
+        market_id=market.id,
+        token_id=token_id,
+        model_prob=model_prob,
+        market_price=market_price,
+        timestamp=entry_ts,
+    )
+    signal_action = str(signal.get("action") or "skip")
+    edge = float(signal.get("edge", 0.0) or 0.0)
+    quantity = float(signal["quantity"]) if signal.get("quantity") is not None else None
+    entry_price = (
+        float(signal["entry_price"]) if signal.get("entry_price") is not None else None
+    )
+    stake_cost = (
+        quantity * entry_price
+        if quantity is not None and entry_price is not None
+        else None
+    )
+    side_label = {"buy_yes": "YES", "buy_no": "NO"}.get(signal_action)
+    reason = str(signal.get("reason") or "")
+
+    if signal_action == "skip":
+        return {
+            "action": "execute-manual-live-paper-trade",
+            "status": "skipped",
+            "message": f"Skipped manual paper trade for {market.question}: {reason}.",
+            "gp_short_code": config.short_code,
+            "market_id": market.id,
+            "pt_session_id": None,
+            "signal_action": signal_action,
+            "quantity": quantity,
+            "entry_price": entry_price,
+            "stake_cost": stake_cost,
+            "market_price": market_price,
+            "model_prob": model_prob,
+            "edge": edge,
+            "side_label": side_label,
+            "reason": reason,
+        }
+
+    timestamp_slug = entry_ts.strftime("%Y%m%dT%H%M%SZ")
+    log_path = (
+        ctx.settings.data_root
+        / "reports"
+        / "paper_trading"
+        / "manual"
+        / f"{config.short_code}_{market.id}_{timestamp_slug}.json"
+    )
+    engine.save_log(log_path)
+    pt_session_id = engine.persist(
+        ctx.db,
+        gp_slug=config.short_code,
+        snapshot_id=snapshot_id,
+        model_run_id=model_run_id,
+        log_path=log_path,
+    )
+    paper_session = ctx.db.get(PaperTradeSession, pt_session_id)
+    if paper_session is not None:
+        config_json = dict(paper_session.config_json or {})
+        config_json.update(
+            {
+                "manual_trade": True,
+                "manual_execution": True,
+                "selected_market_id": market.id,
+                "selected_market_question": market.question,
+                "source_event_type": source_event_type,
+                "observed_at_utc": entry_ts.isoformat(),
+                "signal_action": signal_action,
+                "side_label": side_label,
+                "market_price": market_price,
+                "model_prob": model_prob,
+                "stake_cost": stake_cost,
+                "observed_spread": observed_spread,
+                "max_spread": max_spread,
+            }
+        )
+        paper_session.config_json = config_json
+
+    return {
+        "action": "execute-manual-live-paper-trade",
+        "status": "ok",
+        "message": (
+            f"Opened manual {side_label} paper trade for {market.question} "
+            f"at {entry_price:.3f} with edge {edge:.3f}."
+        ),
+        "gp_short_code": config.short_code,
+        "market_id": market.id,
+        "pt_session_id": pt_session_id,
+        "signal_action": signal_action,
+        "quantity": quantity,
+        "entry_price": entry_price,
+        "stake_cost": stake_cost,
+        "market_price": market_price,
+        "model_prob": model_prob,
+        "edge": edge,
+        "side_label": side_label,
+        "reason": reason,
+    }
+
+
 def run_weekend_cockpit(
     ctx: PipelineContext,
     *,
@@ -1610,6 +2424,15 @@ def run_weekend_cockpit(
 
     config = get_gp_config(status["selected_gp_short_code"])
     executed_steps: list[dict[str, Any]] = []
+    settlement_result = {
+        "settled_session_ids": [],
+        "settled_gp_slugs": [],
+        "settled_positions": 0,
+        "manual_positions_settled": 0,
+        "unresolved_positions": 0,
+        "unresolved_session_ids": [],
+        "winner_driver_id": None,
+    }
 
     sync_step = next(step for step in status["steps"] if step["key"] == "sync_calendar")
     if sync_step["status"] == "completed":
@@ -1686,6 +2509,56 @@ def run_weekend_cockpit(
         if hydrate_step["status"] != "completed":
             raise ValueError(hydrate_step["detail"])
 
+    settle_step = next(step for step in status["steps"] if step["key"] == "settle_finished_stage")
+    source_session = status["source_session"]
+    if settle_step["status"] == "skipped":
+        executed_steps.append(
+            _step_payload(
+                key="settle_finished_stage",
+                label="Settle finished stage",
+                status="skipped",
+                detail=settle_step["detail"],
+                session_code=settle_step["session_code"],
+                session_key=settle_step["session_key"],
+                count=settle_step["count"],
+            )
+        )
+    else:
+        if source_session is None:
+            raise ValueError("Source session unavailable before settlement")
+        settlement_result = settle_paper_trade_sessions_for_completed_session(
+            ctx,
+            completed_session=source_session,
+            meeting=status["meeting"],
+        )
+        unresolved_positions = int(settlement_result["unresolved_positions"])
+        settlement_detail = (
+            f"Settled {settlement_result['settled_positions']} prior tickets across "
+            f"{len(settlement_result['settled_session_ids'])} runs."
+        )
+        if unresolved_positions:
+            settlement_detail += (
+                f" {unresolved_positions} manual ticket(s) remain open because the "
+                "driver mapping could not be resolved automatically."
+            )
+        executed_steps.append(
+            _step_payload(
+                key="settle_finished_stage",
+                label="Settle finished stage",
+                status="completed",
+                detail=settlement_detail,
+                session_code=source_session.session_code,
+                session_key=source_session.session_key,
+                count=int(settlement_result["settled_positions"]),
+            )
+        )
+        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+        settle_step = next(
+            step for step in status["steps"] if step["key"] == "settle_finished_stage"
+        )
+        if settle_step["status"] == "blocked":
+            raise ValueError(settle_step["detail"])
+
     discover_step = next(
         step for step in status["steps"] if step["key"] == "discover_target_markets"
     )
@@ -1755,21 +2628,159 @@ def run_weekend_cockpit(
             count=int(paper_result["trades_executed"]),
         )
     )
+    message = (
+        f"Weekend cockpit complete for {config.name} ({config.short_code}). "
+        f"Trades: {paper_result['trades_executed']}, "
+        f"PnL: ${paper_result['total_pnl']:.2f}"
+    )
+    if settlement_result["settled_positions"]:
+        message += (
+            f" Settled {settlement_result['settled_positions']} prior ticket(s)"
+        )
+        if settlement_result["manual_positions_settled"]:
+            message += (
+                f", including {settlement_result['manual_positions_settled']} manual ticket(s)"
+            )
+        message += "."
+    if settlement_result["unresolved_positions"]:
+        message += (
+            f" {settlement_result['unresolved_positions']} manual ticket(s) remain open "
+            "because the driver mapping was unresolved."
+        )
+    details = dict(paper_result)
+    details["settlement"] = settlement_result
 
     return {
         "action": "run-weekend-cockpit",
         "status": "ok",
-        "message": (
-            f"Weekend cockpit complete for {config.name} ({config.short_code}). "
-            f"Trades: {paper_result['trades_executed']}, "
-            f"PnL: ${paper_result['total_pnl']:.2f}"
-        ),
+        "message": message,
         "gp_short_code": config.short_code,
         "snapshot_id": paper_result["snapshot_id"],
         "model_run_id": paper_result["model_run_id"],
         "pt_session_id": paper_result["pt_session_id"],
         "executed_steps": executed_steps,
-        "details": paper_result,
+        "details": details,
+    }
+
+
+def _latest_ended_session_for_meeting(
+    ctx: PipelineContext,
+    *,
+    meeting_id: str,
+    now: Any,
+) -> F1Session | None:
+    sessions = ctx.db.scalars(
+        select(F1Session)
+        .where(F1Session.meeting_id == meeting_id)
+        .order_by(F1Session.date_end_utc.desc(), F1Session.session_key.desc())
+    ).all()
+    ended_sessions = [session for session in sessions if _session_has_ended(session, now=now)]
+    if not ended_sessions:
+        return None
+    return ended_sessions[0]
+
+
+def _linked_market_ids_for_session(
+    ctx: PipelineContext,
+    *,
+    session_id: str,
+) -> set[str]:
+    return {
+        market_id
+        for market_id in ctx.db.scalars(
+            select(EntityMappingF1ToPolymarket.polymarket_market_id).where(
+                EntityMappingF1ToPolymarket.f1_session_id == session_id,
+                EntityMappingF1ToPolymarket.polymarket_market_id.is_not(None),
+            )
+        ).all()
+        if market_id is not None
+    }
+
+
+def refresh_latest_session_for_meeting(
+    ctx: PipelineContext,
+    *,
+    meeting_id: str,
+    search_fallback: bool = True,
+    discover_max_pages: int = 5,
+    hydrate_market_history: bool = True,
+    market_history_fidelity: int = 60,
+) -> dict[str, Any]:
+    meeting = ctx.db.get(F1Meeting, meeting_id)
+    if meeting is None:
+        raise KeyError(f"Meeting not found: {meeting_id}")
+
+    sync_f1_calendar(ctx, season=meeting.season)
+    refreshed_meeting = ctx.db.scalar(
+        select(F1Meeting).where(
+            F1Meeting.meeting_key == meeting.meeting_key,
+            F1Meeting.season == meeting.season,
+        )
+    )
+    if refreshed_meeting is None:
+        raise KeyError(
+            "Meeting missing after calendar sync: "
+            f"season={meeting.season} meeting_key={meeting.meeting_key}"
+        )
+
+    now = _ensure_utc(utc_now())
+    refreshed_session = _latest_ended_session_for_meeting(
+        ctx,
+        meeting_id=refreshed_meeting.id,
+        now=now,
+    )
+    if refreshed_session is None:
+        raise ValueError(
+            f"No ended sessions are available yet for {refreshed_meeting.meeting_name}."
+        )
+
+    linked_market_ids_before = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
+    hydrate_result = hydrate_f1_session(
+        ctx,
+        session_key=refreshed_session.session_key,
+        include_extended=True,
+        include_heavy=refreshed_session.session_code in {"Q", "SQ", "R"},
+    )
+    discover_result = discover_session_polymarket(
+        ctx,
+        session_key=refreshed_session.session_key,
+        max_pages=discover_max_pages,
+        search_fallback=search_fallback,
+    )
+    reconcile_mappings(ctx)
+    linked_market_ids_after = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
+
+    markets_hydrated = 0
+    if hydrate_market_history:
+        for market_id in sorted(linked_market_ids_after):
+            hydrate_polymarket_market(
+                ctx,
+                market_id=market_id,
+                fidelity=market_history_fidelity,
+            )
+            markets_hydrated += 1
+
+    session_label = refreshed_session.session_code or refreshed_session.session_name
+    return {
+        "action": "refresh-latest-session",
+        "status": "ok",
+        "message": (
+            f"Updated latest ended session {session_label} for "
+            f"{refreshed_meeting.meeting_name}."
+        ),
+        "meeting_id": refreshed_meeting.id,
+        "meeting_name": refreshed_meeting.meeting_name,
+        "refreshed_session": {
+            "id": refreshed_session.id,
+            "session_key": refreshed_session.session_key,
+            "session_code": refreshed_session.session_code,
+            "session_name": refreshed_session.session_name,
+            "date_end_utc": refreshed_session.date_end_utc,
+        },
+        "f1_records_written": int(hydrate_result.get("records_written", 0) or 0),
+        "markets_discovered": int(discover_result.get("markets", 0) or 0),
+        "mappings_written": len(linked_market_ids_after - linked_market_ids_before),
+        "markets_hydrated": markets_hydrated,
     }
 
 
@@ -1823,6 +2834,262 @@ def _derive_live_market_ids(
     return candidate_ids
 
 
+def _sorted_count_rows(counter: Counter[str]) -> list[dict[str, Any]]:
+    return [
+        {"key": key, "count": int(count)}
+        for key, count in sorted(counter.items(), key=lambda item: (-item[1], item[0]))
+    ]
+
+
+def _normalize_live_float(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _normalize_live_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _best_book_price(levels: Any, *, side: str) -> float | None:
+    if not isinstance(levels, list):
+        return None
+    prices = [
+        price
+        for price in (
+            _normalize_live_float(level.get("price")) if isinstance(level, dict) else None
+            for level in levels
+        )
+        if price is not None
+    ]
+    if not prices:
+        return None
+    return max(prices) if side == "bid" else min(prices)
+
+
+def _live_payload_timestamp(payload: dict[str, Any], fallback: datetime) -> datetime:
+    for key in ("timestamp", "timestamp_ms", "ts", "ts_ms"):
+        value = _normalize_live_float(payload.get(key))
+        if value is None:
+            continue
+        try:
+            if value > 10_000_000_000:
+                value = value / 1000.0
+            return datetime.fromtimestamp(value, tz=timezone.utc)
+        except (OverflowError, OSError, ValueError):
+            continue
+    parsed = parse_dt(
+        payload.get("observed_at")
+        or payload.get("observedAt")
+        or payload.get("created_at")
+        or payload.get("createdAt")
+    )
+    return _ensure_utc(parsed or fallback)
+
+
+def _pick_live_payload_value(
+    primary: dict[str, Any],
+    fallback: dict[str, Any],
+    *keys: str,
+) -> Any:
+    for key in keys:
+        if key in primary and primary.get(key) is not None:
+            return primary.get(key)
+        if key in fallback and fallback.get(key) is not None:
+            return fallback.get(key)
+    return None
+
+
+def _preferred_live_token_ids(tokens: list[PolymarketToken]) -> dict[str, str]:
+    preferred: dict[str, PolymarketToken] = {}
+    for token in tokens:
+        outcome = (token.outcome or "").strip().lower()
+        priority = 0 if outcome == "yes" or token.outcome_index == 0 else 1
+        current = preferred.get(token.market_id)
+        if current is None:
+            preferred[token.market_id] = token
+            continue
+        current_outcome = (current.outcome or "").strip().lower()
+        current_priority = 0 if current_outcome == "yes" or current.outcome_index == 0 else 1
+        if priority < current_priority:
+            preferred[token.market_id] = token
+    return {market_id: token.id for market_id, token in preferred.items()}
+
+
+def _build_live_market_quote(
+    *,
+    payload: dict[str, Any],
+    item: dict[str, Any],
+    observed_at: datetime,
+    event_type: str,
+    token_to_market_id: dict[str, str],
+    token_outcomes: dict[str, str | None],
+    condition_to_market_id: dict[str, str],
+) -> dict[str, Any] | None:
+    token_id = _normalize_live_text(
+        _pick_live_payload_value(item, payload, "asset_id", "assetId", "token_id", "tokenId")
+    )
+    condition_id = _normalize_live_text(
+        _pick_live_payload_value(item, payload, "market", "condition_id", "conditionId")
+    )
+    market_id = (
+        token_to_market_id.get(token_id) if token_id is not None else None
+    ) or (
+        condition_to_market_id.get(condition_id) if condition_id is not None else None
+    )
+    if market_id is None:
+        return None
+
+    best_bid = _normalize_live_float(
+        _pick_live_payload_value(item, payload, "best_bid", "bestBid")
+    )
+    best_ask = _normalize_live_float(
+        _pick_live_payload_value(item, payload, "best_ask", "bestAsk")
+    )
+    book_bid = _best_book_price(
+        _pick_live_payload_value(item, payload, "bids"),
+        side="bid",
+    )
+    book_ask = _best_book_price(
+        _pick_live_payload_value(item, payload, "asks"),
+        side="ask",
+    )
+    if book_bid is not None:
+        best_bid = book_bid
+    if book_ask is not None:
+        best_ask = book_ask
+
+    midpoint = _normalize_live_float(
+        _pick_live_payload_value(item, payload, "midpoint", "midPoint", "mid_price", "midPrice")
+    )
+    if midpoint is None and best_bid is not None and best_ask is not None:
+        midpoint = (best_bid + best_ask) / 2
+
+    price = _normalize_live_float(
+        _pick_live_payload_value(
+            item,
+            payload,
+            "price",
+            "last_trade_price",
+            "lastTradePrice",
+        )
+    )
+    if price is None:
+        price = midpoint
+
+    if price is None and best_bid is None and best_ask is None and midpoint is None:
+        return None
+
+    spread = (
+        best_ask - best_bid
+        if best_bid is not None and best_ask is not None
+        else None
+    )
+    return {
+        "market_id": market_id,
+        "token_id": token_id,
+        "outcome": token_outcomes.get(token_id) if token_id is not None else None,
+        "event_type": event_type,
+        "observed_at_utc": _live_payload_timestamp(item, observed_at).isoformat(),
+        "price": price,
+        "best_bid": best_bid,
+        "best_ask": best_ask,
+        "midpoint": midpoint,
+        "spread": spread,
+        "size": _normalize_live_float(
+            _pick_live_payload_value(item, payload, "size", "amount", "quantity")
+        ),
+        "side": _normalize_live_text(_pick_live_payload_value(item, payload, "side")),
+    }
+
+
+def _extract_live_market_quotes(
+    *,
+    payload: dict[str, Any],
+    observed_at: datetime,
+    token_to_market_id: dict[str, str],
+    token_outcomes: dict[str, str | None],
+    condition_to_market_id: dict[str, str],
+) -> list[dict[str, Any]]:
+    event_type = _normalize_live_text(payload.get("event_type") or payload.get("type")) or "unknown"
+    price_changes = payload.get("price_changes")
+    if isinstance(price_changes, list):
+        quotes = [
+            quote
+            for quote in (
+                _build_live_market_quote(
+                    payload=payload,
+                    item=item,
+                    observed_at=observed_at,
+                    event_type=event_type,
+                    token_to_market_id=token_to_market_id,
+                    token_outcomes=token_outcomes,
+                    condition_to_market_id=condition_to_market_id,
+                )
+                for item in price_changes
+                if isinstance(item, dict)
+            )
+            if quote is not None
+        ]
+        if quotes:
+            return quotes
+    quote = _build_live_market_quote(
+        payload=payload,
+        item=payload,
+        observed_at=observed_at,
+        event_type=event_type,
+        token_to_market_id=token_to_market_id,
+        token_outcomes=token_outcomes,
+        condition_to_market_id=condition_to_market_id,
+    )
+    return [] if quote is None else [quote]
+
+
+def _should_replace_live_market_quote(
+    current: dict[str, Any] | None,
+    candidate: dict[str, Any],
+    *,
+    preferred_token_id: str | None,
+) -> bool:
+    if current is None:
+        return True
+
+    def quote_priority(quote: dict[str, Any]) -> int:
+        token_id = _normalize_live_text(quote.get("token_id"))
+        if preferred_token_id is None:
+            return 0
+        return 0 if token_id == preferred_token_id else 1
+
+    candidate_priority = quote_priority(candidate)
+    current_priority = quote_priority(current)
+    if candidate_priority != current_priority:
+        return candidate_priority < current_priority
+
+    candidate_observed_at = _ensure_utc(
+        parse_dt(candidate.get("observed_at_utc")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    current_observed_at = _ensure_utc(
+        parse_dt(current.get("observed_at_utc")) or datetime.min.replace(tzinfo=timezone.utc)
+    )
+    if candidate_observed_at != current_observed_at:
+        return candidate_observed_at > current_observed_at
+
+    def completeness(quote: dict[str, Any]) -> int:
+        return sum(
+            1
+            for key in ("price", "best_bid", "best_ask", "midpoint", "spread", "size", "side")
+            if quote.get(key) is not None
+        )
+
+    return completeness(candidate) > completeness(current)
+
+
 def capture_live_weekend(
     ctx: PipelineContext,
     *,
@@ -1832,6 +3099,7 @@ def capture_live_weekend(
     stop_buffer_min: int = 15,
     openf1_topics: tuple[str, ...] = DEFAULT_OPENF1_TOPICS,
     message_limit: int | None = None,
+    capture_seconds: int | None = None,
 ) -> dict[str, Any]:
     definition = ensure_job_definition(
         ctx.db,
@@ -1852,6 +3120,8 @@ def capture_live_weekend(
             "market_ids": market_ids or [],
             "start_buffer_min": start_buffer_min,
             "stop_buffer_min": stop_buffer_min,
+            "capture_seconds": capture_seconds,
+            "message_limit": message_limit,
         },
     )
     if not ctx.execute:
@@ -1876,9 +3146,24 @@ def capture_live_weekend(
     end_anchor = _ensure_utc(session.date_end_utc or session.date_start_utc or utc_now())
     stop_at = end_anchor + timedelta(minutes=stop_buffer_min)
     now = _ensure_utc(utc_now())
-    if now < start_at:
-        time.sleep((start_at - now).total_seconds())
-    capture_seconds = max((stop_at - _ensure_utc(utc_now())).total_seconds(), 1.0)
+    if capture_seconds is not None:
+        if now < start_at or now > stop_at:
+            detail = (
+                f"{session.session_name} live capture is available only between "
+                f"{start_at.isoformat()} and {stop_at.isoformat()}."
+            )
+            finish_job_run(
+                ctx.db,
+                run,
+                status="failed",
+                error_message=detail,
+            )
+            raise ValueError(detail)
+        resolved_capture_seconds = max(float(capture_seconds), 1.0)
+    else:
+        if now < start_at:
+            time.sleep((start_at - now).total_seconds())
+        resolved_capture_seconds = max((stop_at - _ensure_utc(utc_now())).total_seconds(), 1.0)
 
     if not ctx.settings.openf1_username or not ctx.settings.openf1_password:
         finish_job_run(
@@ -1912,7 +3197,7 @@ def capture_live_weekend(
     openf1_message_count = openf1_live.stream(
         topics=openf1_topics,
         on_message=_handle_openf1,
-        stop_after_seconds=capture_seconds,
+        stop_after_seconds=resolved_capture_seconds,
         message_limit=message_limit,
     )
 
@@ -1936,18 +3221,32 @@ def capture_live_weekend(
             partition={"session_key": str(session_key), "topic": dataset},
         )
         records_written += len(payloads)
+    openf1_topic_counts = Counter(
+        {
+            topic: len(payloads)
+            for topic, payloads in openf1_payloads.items()
+            if payloads
+        }
+    )
 
     live_market_ids = _derive_live_market_ids(ctx, session=session, requested_market_ids=market_ids)
     polymarket_tokens = ctx.db.scalars(
         select(PolymarketToken).where(PolymarketToken.market_id.in_(live_market_ids))
     ).all()
     token_ids = [token.id for token in polymarket_tokens]
+    token_to_market_id = {token.id: token.market_id for token in polymarket_tokens}
+    token_outcomes = {token.id: token.outcome for token in polymarket_tokens}
+    preferred_token_ids = _preferred_live_token_ids(polymarket_tokens)
     condition_to_market_id = {
         market.condition_id: market.id
         for market in ctx.db.scalars(
             select(PolymarketMarket).where(PolymarketMarket.id.in_(live_market_ids))
         ).all()
     }
+    polymarket_event_type_counts: Counter[str] = Counter()
+    observed_market_ids: set[str] = set()
+    observed_token_ids: set[str] = set()
+    live_market_quotes: dict[str, dict[str, Any]] = {}
     if token_ids:
         ws_messages: list[dict[str, Any]] = []
         ws_connector = PolymarketLiveConnector()
@@ -1956,6 +3255,35 @@ def capture_live_weekend(
             payload = message.payload
             if not isinstance(payload, dict):
                 return
+            event_type = str(payload.get("event_type") or payload.get("type") or "unknown")
+            polymarket_event_type_counts[event_type] += 1
+            asset_id = payload.get("asset_id")
+            if asset_id is not None:
+                observed_token_ids.add(str(asset_id))
+            condition_id = payload.get("market")
+            if condition_id is not None:
+                market_id = condition_to_market_id.get(str(condition_id))
+                if market_id is not None:
+                    observed_market_ids.add(str(market_id))
+            for quote in _extract_live_market_quotes(
+                payload=payload,
+                observed_at=message.observed_at,
+                token_to_market_id=token_to_market_id,
+                token_outcomes=token_outcomes,
+                condition_to_market_id=condition_to_market_id,
+            ):
+                market_id = str(quote["market_id"])
+                observed_market_ids.add(market_id)
+                token_id = _normalize_live_text(quote.get("token_id"))
+                if token_id is not None:
+                    observed_token_ids.add(token_id)
+                current_quote = live_market_quotes.get(market_id)
+                if _should_replace_live_market_quote(
+                    current_quote,
+                    quote,
+                    preferred_token_id=preferred_token_ids.get(market_id),
+                ):
+                    live_market_quotes[market_id] = quote
             ws_messages.append(
                 {
                     "observed_at": message.observed_at.isoformat(),
@@ -1966,7 +3294,7 @@ def capture_live_weekend(
         ws_count = ws_connector.stream_market_messages(
             asset_ids=token_ids,
             on_message=_handle_polymarket,
-            stop_after_seconds=capture_seconds,
+            stop_after_seconds=resolved_capture_seconds,
             message_limit=message_limit,
         )
         bronze_object = persist_fetch(
@@ -2005,6 +3333,8 @@ def capture_live_weekend(
             upsert_records(ctx.db, PolymarketWsMessageManifest, manifest_rows)
             records_written += len(manifest_rows)
         records_written += ws_count
+    else:
+        ws_count = 0
 
     finish_job_run(
         ctx.db,
@@ -2012,11 +3342,30 @@ def capture_live_weekend(
         status="completed",
         records_written=records_written,
     )
+    market_count = len(live_market_ids)
+    duration_seconds = int(round(resolved_capture_seconds))
     return {
         "job_run_id": run.id,
         "status": "completed",
+        "message": (
+            f"Captured {duration_seconds}s of live data for {session.session_name} "
+            f"across {market_count} market(s)."
+        ),
         "session_key": session_key,
+        "capture_seconds": duration_seconds,
         "openf1_messages": openf1_message_count,
+        "polymarket_messages": ws_count,
+        "market_count": market_count,
         "polymarket_market_ids": live_market_ids,
         "records_written": records_written,
+        "summary": {
+            "openf1_topics": _sorted_count_rows(openf1_topic_counts),
+            "polymarket_event_types": _sorted_count_rows(polymarket_event_type_counts),
+            "observed_market_count": len(observed_market_ids),
+            "observed_token_count": len(observed_token_ids),
+            "market_quotes": [
+                live_market_quotes[market_id]
+                for market_id in sorted(live_market_quotes)
+            ],
+        },
     }

@@ -2,12 +2,14 @@ import type {
   DriverAffinityReport,
   PaperTradePosition,
   PaperTradeSession,
+  PolymarketMarket,
   RefreshDriverAffinityResponse,
 } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Panel, StatCard } from "@f1/ui";
 import { PageStatusBanner } from "../../components/page-status-banner";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { meetingRefreshTargetForConfig } from "../../lib/session-refresh";
 import { DriverAffinitySummary } from "../_components/driver-affinity-summary";
 import { WeekendCockpitPanel } from "../_components/weekend-cockpit-panel";
 
@@ -26,6 +28,11 @@ function fmtPct(value: number | null | undefined) {
 function fmtPnl(value: number | null | undefined) {
   if (value == null) return "—";
   return `${value >= 0 ? "+" : ""}$${value.toFixed(2)}`;
+}
+
+function fmtUsd(value: number | null | undefined) {
+  if (value == null) return "—";
+  return `$${value.toFixed(2)}`;
 }
 
 function fmtDateTime(value: string) {
@@ -63,14 +70,120 @@ function StatusBadge({ status }: { status: string }) {
   );
 }
 
+function numberFromConfig(
+  config: Record<string, unknown> | null,
+  key: string,
+): number | null {
+  const value = config?.[key];
+  return typeof value === "number" ? value : null;
+}
+
+function sessionStrategySummary(session: PaperTradeSession) {
+  const config = session.configJson as Record<string, unknown> | null;
+  const summary = session.summaryJson as Record<string, unknown> | null;
+  const minEdge = numberFromConfig(config, "min_edge");
+  const betSize = numberFromConfig(config, "bet_size");
+  const feeRate = numberFromConfig(config, "fee_rate");
+  const maxOpenPositions = numberFromConfig(config, "max_open_positions");
+
+  if (config?.manual_trade === true) {
+    const driver =
+      typeof config.driver === "string" ? config.driver : "selected driver";
+    const marketQuestion =
+      typeof config.market_question === "string"
+        ? config.market_question
+        : null;
+    const basis =
+      typeof config.analysis_basis === "string" ? config.analysis_basis : null;
+    return {
+      title: "Manual analyst thesis",
+      description:
+        basis && marketQuestion
+          ? `${driver} view. ${basis}. Ticket: ${marketQuestion}`
+          : `${driver} view entered manually for this run.`,
+      minEdge,
+      betSize,
+      feeRate,
+      maxOpenPositions,
+      selectedDriver:
+        typeof summary?.selected_driver === "string"
+          ? summary.selected_driver
+          : null,
+    };
+  }
+
+  return {
+    title: "Rule-based stage portfolio",
+    description:
+      "Compares model YES probability against market YES price and buys the cheaper side when the edge clears the threshold.",
+    minEdge,
+    betSize,
+    feeRate,
+    maxOpenPositions,
+    selectedDriver: null,
+  };
+}
+
+function positionTicketLabel(side: string) {
+  return side === "buy_no" ? "Bought NO" : "Bought YES";
+}
+
+function formatShares(quantity: number) {
+  return `${quantity.toFixed(Number.isInteger(quantity) ? 0 : 2)} shares`;
+}
+
+function PositionCard({
+  position,
+  market,
+}: {
+  position: PaperTradePosition;
+  market: PolymarketMarket | null;
+}) {
+  const stake = position.quantity * position.entryPrice;
+  const maxPayout = position.quantity;
+  return (
+    <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="space-y-1">
+          <a
+            href={`/markets/${position.marketId}`}
+            className="text-sm font-medium text-white hover:text-[#ff8b85]"
+          >
+            {market?.question ?? `Market ${position.marketId}`}
+          </a>
+          <p className="text-xs text-[#6b7280]">
+            {positionTicketLabel(position.side)} ·{" "}
+            {formatShares(position.quantity)} @ {fmtPct(position.entryPrice)} ·
+            stake {fmtUsd(stake)}
+          </p>
+        </div>
+        <StatusBadge status={position.status} />
+      </div>
+
+      <div className="mt-3 grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-5">
+        <p>Model YES {fmtPct(position.modelProb)}</p>
+        <p>Market YES {fmtPct(position.marketProb)}</p>
+        <p>Edge {fmtPct(position.edge)}</p>
+        <p>Max payout {fmtUsd(maxPayout)}</p>
+        <p className={pnlColor(position.realizedPnl)}>
+          PnL {fmtPnl(position.realizedPnl)}
+        </p>
+      </div>
+    </div>
+  );
+}
+
 function SessionRow({
   session,
   positions,
+  marketsById,
 }: {
   session: PaperTradeSession;
   positions: PaperTradePosition[];
+  marketsById: Map<string, PolymarketMarket>;
 }) {
   const summary = session.summaryJson as Record<string, number> | null;
+  const strategy = sessionStrategySummary(session);
   const trades = summary?.trades_executed ?? 0;
   const pnl = summary?.total_pnl ?? null;
   const winRate = summary?.win_rate ?? null;
@@ -78,7 +191,7 @@ function SessionRow({
   return (
     <div className="rounded-xl border border-white/[0.06] bg-[#1a1a28] p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
+        <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold tracking-wider text-white">
               Paper-trading run
@@ -88,6 +201,12 @@ function SessionRow({
           <p className="text-[11px] text-[#6b7280]">
             {fmtDateTime(session.startedAt)}
           </p>
+          <div>
+            <p className="text-xs font-medium text-white">{strategy.title}</p>
+            <p className="mt-1 max-w-2xl text-xs text-[#9ca3af]">
+              {strategy.description}
+            </p>
+          </div>
         </div>
         <div className="flex gap-6 text-right">
           <div>
@@ -118,60 +237,43 @@ function SessionRow({
           Show run details
         </summary>
         <div className="mt-4 space-y-4">
-          <div className="grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2">
+          <div className="grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-4">
             <p>Stage code: {session.gpSlug}</p>
             <p>Run ID: {session.id}</p>
             <p>Snapshot ID: {session.snapshotId ?? "None"}</p>
             <p>Model run ID: {session.modelRunId ?? "None"}</p>
           </div>
 
+          <div className="grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-4">
+            <p>
+              Edge trigger:{" "}
+              {strategy.minEdge != null ? fmtPct(strategy.minEdge) : "—"}
+            </p>
+            <p>
+              Ticket size:{" "}
+              {strategy.betSize != null ? formatShares(strategy.betSize) : "—"}
+            </p>
+            <p>
+              Fee rate:{" "}
+              {strategy.feeRate != null ? fmtPct(strategy.feeRate) : "—"}
+            </p>
+            <p>
+              Max open tickets:{" "}
+              {strategy.maxOpenPositions != null
+                ? strategy.maxOpenPositions.toFixed(0)
+                : "—"}
+            </p>
+          </div>
+
           {positions.length > 0 ? (
-            <div className="overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-white/[0.06] text-[10px] uppercase tracking-wider text-[#6b7280]">
-                    <th className="pb-2 text-left font-medium">Market</th>
-                    <th className="pb-2 text-right font-medium">Model</th>
-                    <th className="pb-2 text-right font-medium">Entry price</th>
-                    <th className="pb-2 text-right font-medium">Edge</th>
-                    <th className="pb-2 text-right font-medium">Exit price</th>
-                    <th className="pb-2 text-right font-medium">PnL</th>
-                    <th className="pb-2 text-right font-medium">Status</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {positions.map((pos) => (
-                    <tr
-                      key={pos.id}
-                      className="border-b border-white/[0.04] last:border-0"
-                    >
-                      <td className="py-2 pr-4 font-mono text-[11px] text-[#9ca3af]">
-                        {pos.marketId.slice(0, 10)}…
-                      </td>
-                      <td className="py-2 text-right text-white">
-                        {fmtPct(pos.modelProb)}
-                      </td>
-                      <td className="py-2 text-right text-[#9ca3af]">
-                        {fmtPct(pos.entryPrice)}
-                      </td>
-                      <td className="py-2 text-right text-white">
-                        {fmtPct(pos.edge)}
-                      </td>
-                      <td className="py-2 text-right text-[#9ca3af]">
-                        {pos.exitPrice != null ? fmtPct(pos.exitPrice) : "—"}
-                      </td>
-                      <td
-                        className={`py-2 text-right font-bold tabular-nums ${pnlColor(pos.realizedPnl)}`}
-                      >
-                        {fmtPnl(pos.realizedPnl)}
-                      </td>
-                      <td className="py-2 text-right">
-                        <StatusBadge status={pos.status} />
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
+            <div className="space-y-3">
+              {positions.map((position) => (
+                <PositionCard
+                  key={position.id}
+                  position={position}
+                  market={marketsById.get(position.marketId) ?? null}
+                />
+              ))}
             </div>
           ) : (
             <p className="text-xs text-[#6b7280]">No positions recorded.</p>
@@ -179,6 +281,53 @@ function SessionRow({
         </div>
       </details>
     </div>
+  );
+}
+
+function HowPaperTradingWorks({
+  latestSession,
+}: {
+  latestSession: PaperTradeSession | null;
+}) {
+  const strategy = latestSession ? sessionStrategySummary(latestSession) : null;
+
+  return (
+    <Panel title="What Paper Trading Does" eyebrow="Quick read">
+      <div className="grid gap-3 md:grid-cols-3">
+        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+            1. Compare
+          </p>
+          <p className="mt-2 text-sm text-white">
+            Reads the current stage&apos;s F1 markets and compares model YES
+            probability to the market&apos;s YES price.
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+            2. Buy Tickets
+          </p>
+          <p className="mt-2 text-sm text-white">
+            Simulates buying YES or NO shares only when the edge clears the
+            configured trigger.
+          </p>
+          <p className="mt-1 text-xs text-[#6b7280]">
+            Current default: edge{" "}
+            {strategy?.minEdge != null ? fmtPct(strategy.minEdge) : "—"} · size{" "}
+            {strategy?.betSize != null ? formatShares(strategy.betSize) : "—"}
+          </p>
+        </div>
+        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
+          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+            3. Track Outcome
+          </p>
+          <p className="mt-2 text-sm text-white">
+            Keeps open and settled tickets, stake, payout profile, and PnL so
+            you can see exactly what the model would have bought.
+          </p>
+        </div>
+      </div>
+    </Panel>
   );
 }
 
@@ -193,17 +342,29 @@ export default async function PaperTradingPage() {
     null as DriverAffinityReport | null,
     "Driver affinity",
   );
+  const affinityReport =
+    affinityState.data ?? affinityRefreshState.data?.report ?? null;
   const cockpitState = await loadResource(
     () => sdk.weekendCockpitStatus(),
     null,
     "Weekend cockpit",
   );
-  const sessionsState = await loadResource(
+  const f1SessionsState = await loadResource(
+    () => sdk.sessions({ limit: 250 }),
+    [],
+    "Session feed",
+  );
+  const meetingsState = await loadResource(
+    () => sdk.meetings({ limit: 100 }),
+    [],
+    "Meeting feed",
+  );
+  const paperSessionsState = await loadResource(
     () => sdk.paperTradeSessions(),
     [] as PaperTradeSession[],
     "Paper trading sessions",
   );
-  const sessions = sessionsState.data;
+  const sessions = paperSessionsState.data;
   const positionsState = await loadResource(
     () =>
       Promise.all(
@@ -215,24 +376,45 @@ export default async function PaperTradingPage() {
     "Paper trading positions",
   );
   const positionsBySession = positionsState.data;
-  const degradedMessages = collectResourceErrors([
-    affinityRefreshState,
-    affinityState,
-    cockpitState,
-    sessionsState,
-    positionsState,
-  ]).concat(
-    affinityRefreshMessage(affinityRefreshState.data)
-      ? [affinityRefreshMessage(affinityRefreshState.data) as string]
-      : [],
-    affinityState.data &&
-      !affinityState.data.isFresh &&
-      affinityState.data.staleReason
-      ? [affinityState.data.staleReason]
-      : [],
+  const allPositions = positionsBySession.flat();
+  const uniqueMarketIds = [
+    ...new Set(allPositions.map((position) => position.marketId)),
+  ];
+  const marketPairs = await Promise.all(
+    uniqueMarketIds.map(async (marketId) => {
+      try {
+        return [marketId, await sdk.market(marketId)] as const;
+      } catch {
+        return null;
+      }
+    }),
+  );
+  const marketsById = new Map(
+    marketPairs.filter(
+      (pair): pair is readonly [string, PolymarketMarket] => pair !== null,
+    ),
   );
 
-  const allPositions = positionsBySession.flat();
+  const degradedMessages = collectResourceErrors([
+    cockpitState,
+    f1SessionsState,
+    meetingsState,
+    paperSessionsState,
+    positionsState,
+  ])
+    .concat(
+      !affinityReport
+        ? collectResourceErrors([affinityRefreshState, affinityState])
+        : [],
+    )
+    .concat(
+      affinityRefreshMessage(affinityRefreshState.data)
+        ? [affinityRefreshMessage(affinityRefreshState.data) as string]
+        : [],
+      affinityReport && !affinityReport.isFresh && affinityReport.staleReason
+        ? [affinityReport.staleReason]
+        : [],
+    );
 
   const totalTrades = sessions.reduce((sum, s) => {
     const summary = s.summaryJson as Record<string, number> | null;
@@ -248,6 +430,17 @@ export default async function PaperTradingPage() {
   const wins = settledPositions.filter((p) => (p.realizedPnl ?? 0) > 0);
   const winRate =
     settledPositions.length > 0 ? wins.length / settledPositions.length : null;
+  const latestSession = sessions[0] ?? null;
+  const refreshTargetsByGpShortCode = Object.fromEntries(
+    (cockpitState.data?.availableConfigs ?? []).map((config) => [
+      config.short_code,
+      meetingRefreshTargetForConfig(
+        config,
+        meetingsState.data,
+        f1SessionsState.data,
+      ),
+    ]),
+  );
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -256,15 +449,21 @@ export default async function PaperTradingPage() {
       <div>
         <h1 className="text-xl font-bold text-white">Paper Trading</h1>
         <p className="mt-1 text-sm text-[#6b7280]">
-          This page shows the next action first, then the current run readiness
-          and history.
+          Simulated YES and NO ticket buying for the current F1 stage. The
+          cockpit prepares the stage, this page shows what the model bought, how
+          much it staked, and how the run is performing.
         </p>
       </div>
 
-      <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
-        <WeekendCockpitPanel initialStatus={cockpitState.data} />
+      <HowPaperTradingWorks latestSession={latestSession} />
+
+      <section className="grid gap-4 xl:grid-cols-[1.34fr_0.66fr]">
+        <WeekendCockpitPanel
+          initialStatus={cockpitState.data}
+          refreshTargetsByGpShortCode={refreshTargetsByGpShortCode}
+        />
         <DriverAffinitySummary
-          report={affinityState.data}
+          report={affinityReport}
           refreshMessage={affinityRefreshMessage(affinityRefreshState.data)}
         />
       </section>
@@ -276,14 +475,14 @@ export default async function PaperTradingPage() {
           hint="total paper-trading runs"
         />
         <StatCard
-          label="Total trades"
+          label="Total tickets"
           value={totalTrades}
-          hint="executed positions"
+          hint="executed YES/NO tickets"
         />
         <StatCard
           label="Win rate"
           value={winRate != null ? `${(winRate * 100).toFixed(1)}%` : "—"}
-          hint="based on settled positions"
+          hint="based on settled tickets"
         />
         <StatCard
           label="Total PnL"
@@ -295,8 +494,8 @@ export default async function PaperTradingPage() {
       {sessions.length === 0 ? (
         <Panel title="No runs yet">
           <p className="text-sm text-[#6b7280]">
-            Run the current stage from the cockpit above and the results will
-            appear here.
+            Run the current stage from the cockpit above and the simulated
+            tickets will appear here.
           </p>
         </Panel>
       ) : (
@@ -309,6 +508,7 @@ export default async function PaperTradingPage() {
               key={session.id}
               session={session}
               positions={positionsBySession[i] ?? []}
+              marketsById={marketsById}
             />
           ))}
         </section>

@@ -3,9 +3,14 @@ import type {
   ActionStatusResponse,
   ApiHealth,
   BacktestResult,
+  CaptureLiveWeekendRequest,
+  CaptureLiveWeekendResponse,
   DriverAffinityEntry,
   DriverAffinityReport,
+  DriverAffinitySegment,
   EntityMapping,
+  ExecuteManualLivePaperTradeRequest,
+  ExecuteManualLivePaperTradeResponse,
   F1Driver,
   F1Meeting,
   F1Session,
@@ -24,12 +29,17 @@ import type {
   PricePoint,
   RefreshDriverAffinityRequest,
   RefreshDriverAffinityResponse,
+  RefreshLatestSessionRequest,
+  RefreshLatestSessionResponse,
+  RefreshedSessionSummary,
   RunBacktestRequest,
   RunPaperTradeRequest,
+  RunWeekendCockpitDetails,
   RunWeekendCockpitRequest,
   RunWeekendCockpitResponse,
   SyncCalendarRequest,
   SyncF1MarketsRequest,
+  WeekendCockpitSettlementSummary,
   WeekendCockpitStatus,
   WeekendCockpitStep,
 } from "@f1/shared-types";
@@ -413,6 +423,23 @@ export const sdk = {
       "/api/v1/actions/sync-f1-markets",
       body ?? {},
     ),
+  refreshLatestSession: (body: RefreshLatestSessionRequest) =>
+    apiPost<RefreshLatestSessionRequest, RefreshLatestSessionResponseApi>(
+      "/api/v1/actions/refresh-latest-session",
+      body,
+    ).then(mapRefreshLatestSessionResponse),
+  captureLiveWeekend: (body: CaptureLiveWeekendRequest) =>
+    apiPost<CaptureLiveWeekendRequest, CaptureLiveWeekendResponseApi>(
+      "/api/v1/actions/capture-live-weekend",
+      body,
+    ).then(mapCaptureLiveWeekendResponse),
+  executeManualLivePaperTrade: (body: ExecuteManualLivePaperTradeRequest) =>
+    apiPost<
+      ExecuteManualLivePaperTradeRequest,
+      ExecuteManualLivePaperTradeResponseApi
+    >("/api/v1/actions/execute-manual-live-paper-trade", body).then(
+      mapExecuteManualLivePaperTradeResponse,
+    ),
   weekendCockpitStatus: async (
     gpShortCode?: string,
   ): Promise<WeekendCockpitStatus> => {
@@ -431,10 +458,13 @@ export const sdk = {
     season = 2026,
     meetingKey?: number,
   ): Promise<DriverAffinityReport> => {
-    const record = await apiGet<DriverAffinityReportApi>("/api/v1/driver-affinity", {
-      season,
-      meeting_key: meetingKey,
-    });
+    const record = await apiGet<DriverAffinityReportApi>(
+      "/api/v1/driver-affinity",
+      {
+        season,
+        meeting_key: meetingKey,
+      },
+    );
     return mapDriverAffinityReport(record);
   },
   refreshDriverAffinity: (body?: RefreshDriverAffinityRequest) =>
@@ -716,7 +746,114 @@ type RunWeekendCockpitResponseApi = {
   model_run_id: string | null;
   pt_session_id: string | null;
   executed_steps: WeekendCockpitStepApi[];
-  details: Record<string, unknown> | null;
+  details: RunWeekendCockpitDetailsApi | null;
+};
+
+type WeekendCockpitSettlementSummaryApi = {
+  settled_session_ids: string[];
+  settled_gp_slugs: string[];
+  settled_positions: number;
+  manual_positions_settled: number;
+  unresolved_positions: number;
+  unresolved_session_ids: string[];
+  winner_driver_id: string | null;
+};
+
+type RunWeekendCockpitDetailsApi = {
+  snapshot_id: string | null;
+  model_run_id: string | null;
+  baseline: string | null;
+  pt_session_id: string | null;
+  log_path: string | null;
+  total_signals: number | null;
+  trades_executed: number | null;
+  open_positions: number | null;
+  settled_positions: number | null;
+  win_count: number | null;
+  loss_count: number | null;
+  win_rate: number | null;
+  total_pnl: number | null;
+  daily_pnl: number | null;
+  settlement: WeekendCockpitSettlementSummaryApi | null;
+};
+
+type RefreshedSessionSummaryApi = {
+  id: string;
+  session_key: number;
+  session_code: string | null;
+  session_name: string;
+  date_end_utc: string | null;
+};
+
+type RefreshLatestSessionResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  meeting_id: string;
+  meeting_name: string;
+  refreshed_session: RefreshedSessionSummaryApi;
+  f1_records_written: number;
+  markets_discovered: number;
+  mappings_written: number;
+  markets_hydrated: number;
+};
+
+type CaptureLiveWeekendResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  job_run_id: string;
+  session_key: number;
+  capture_seconds: number;
+  openf1_messages: number;
+  polymarket_messages: number;
+  market_count: number;
+  polymarket_market_ids: string[];
+  records_written: number;
+  summary: {
+    openf1_topics: Array<{
+      key: string;
+      count: number;
+    }>;
+    polymarket_event_types: Array<{
+      key: string;
+      count: number;
+    }>;
+    observed_market_count: number;
+    observed_token_count: number;
+    market_quotes: Array<{
+      market_id: string;
+      token_id: string | null;
+      outcome: string | null;
+      event_type: string;
+      observed_at_utc: string;
+      price: number | null;
+      best_bid: number | null;
+      best_ask: number | null;
+      midpoint: number | null;
+      spread: number | null;
+      size: number | null;
+      side: string | null;
+    }>;
+  };
+};
+
+type ExecuteManualLivePaperTradeResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  gp_short_code: string;
+  market_id: string;
+  pt_session_id: string | null;
+  signal_action: string;
+  quantity: number | null;
+  entry_price: number | null;
+  stake_cost: number | null;
+  market_price: number;
+  model_prob: number;
+  edge: number;
+  side_label: string | null;
+  reason: string | null;
 };
 
 type DriverAffinityEntryApi = {
@@ -753,6 +890,8 @@ type DriverAffinityReportApi = {
   session_code_weights: Record<string, number>;
   season_weights: Record<string, number>;
   track_weights: Record<string, number>;
+  default_segment_key?: string | null;
+  segments?: DriverAffinitySegmentApi[];
   source_session_codes_included: string[];
   source_max_session_end_utc: string | null;
   latest_ended_relevant_session_code: string | null;
@@ -760,6 +899,16 @@ type DriverAffinityReportApi = {
   entry_count: number;
   is_fresh: boolean;
   stale_reason: string | null;
+  entries: DriverAffinityEntryApi[];
+};
+
+type DriverAffinitySegmentApi = {
+  key: string;
+  title: string;
+  description: string;
+  source_session_codes_included: string[];
+  source_seasons_included: number[];
+  entry_count: number;
   entries: DriverAffinityEntryApi[];
 };
 
@@ -839,12 +988,18 @@ function mapWeekendCockpitStatus(
     selectedConfig: record.selected_config,
     availableConfigs: record.available_configs,
     meeting: record.meeting ? mapMeeting(record.meeting) : null,
-    focusSession: record.focus_session ? mapSession(record.focus_session) : null,
+    focusSession: record.focus_session
+      ? mapSession(record.focus_session)
+      : null,
     focusStatus: record.focus_status,
     timelineCompletedCodes: record.timeline_completed_codes,
     timelineActiveCode: record.timeline_active_code,
-    sourceSession: record.source_session ? mapSession(record.source_session) : null,
-    targetSession: record.target_session ? mapSession(record.target_session) : null,
+    sourceSession: record.source_session
+      ? mapSession(record.source_session)
+      : null,
+    targetSession: record.target_session
+      ? mapSession(record.target_session)
+      : null,
     latestPaperSession: record.latest_paper_session
       ? mapPaperTradeSession(record.latest_paper_session)
       : null,
@@ -870,7 +1025,144 @@ function mapRunWeekendCockpitResponse(
     modelRunId: record.model_run_id,
     ptSessionId: record.pt_session_id,
     executedSteps: record.executed_steps.map(mapWeekendCockpitStep),
-    details: record.details,
+    details: record.details
+      ? mapRunWeekendCockpitDetails(record.details)
+      : null,
+  };
+}
+
+function mapWeekendCockpitSettlementSummary(
+  record: WeekendCockpitSettlementSummaryApi,
+): WeekendCockpitSettlementSummary {
+  return {
+    settledSessionIds: record.settled_session_ids,
+    settledGpSlugs: record.settled_gp_slugs,
+    settledPositions: record.settled_positions,
+    manualPositionsSettled: record.manual_positions_settled,
+    unresolvedPositions: record.unresolved_positions,
+    unresolvedSessionIds: record.unresolved_session_ids,
+    winnerDriverId: record.winner_driver_id,
+  };
+}
+
+function mapRunWeekendCockpitDetails(
+  record: RunWeekendCockpitDetailsApi,
+): RunWeekendCockpitDetails {
+  return {
+    snapshotId: record.snapshot_id,
+    modelRunId: record.model_run_id,
+    baseline: record.baseline,
+    ptSessionId: record.pt_session_id,
+    logPath: record.log_path,
+    totalSignals: record.total_signals,
+    tradesExecuted: record.trades_executed,
+    openPositions: record.open_positions,
+    settledPositions: record.settled_positions,
+    winCount: record.win_count,
+    lossCount: record.loss_count,
+    winRate: record.win_rate,
+    totalPnl: record.total_pnl,
+    dailyPnl: record.daily_pnl,
+    settlement: record.settlement
+      ? mapWeekendCockpitSettlementSummary(record.settlement)
+      : null,
+  };
+}
+
+function mapRefreshedSessionSummary(
+  record: RefreshedSessionSummaryApi,
+): RefreshedSessionSummary {
+  return {
+    id: record.id,
+    sessionKey: record.session_key,
+    sessionCode: record.session_code,
+    sessionName: record.session_name,
+    dateEndUtc: record.date_end_utc,
+  };
+}
+
+function mapRefreshLatestSessionResponse(
+  record: RefreshLatestSessionResponseApi,
+): RefreshLatestSessionResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    meetingId: record.meeting_id,
+    meetingName: record.meeting_name,
+    refreshedSession: mapRefreshedSessionSummary(record.refreshed_session),
+    f1RecordsWritten: record.f1_records_written,
+    marketsDiscovered: record.markets_discovered,
+    mappingsWritten: record.mappings_written,
+    marketsHydrated: record.markets_hydrated,
+  };
+}
+
+function mapCaptureLiveWeekendResponse(
+  record: CaptureLiveWeekendResponseApi,
+): CaptureLiveWeekendResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    jobRunId: record.job_run_id,
+    sessionKey: record.session_key,
+    captureSeconds: record.capture_seconds,
+    openf1Messages: record.openf1_messages,
+    polymarketMessages: record.polymarket_messages,
+    marketCount: record.market_count,
+    polymarketMarketIds: record.polymarket_market_ids,
+    recordsWritten: record.records_written,
+    summary: {
+      openf1Topics: record.summary.openf1_topics.map((item) => ({
+        key: item.key,
+        count: item.count,
+      })),
+      polymarketEventTypes: record.summary.polymarket_event_types.map(
+        (item) => ({
+          key: item.key,
+          count: item.count,
+        }),
+      ),
+      observedMarketCount: record.summary.observed_market_count,
+      observedTokenCount: record.summary.observed_token_count,
+      marketQuotes: record.summary.market_quotes.map((item) => ({
+        marketId: item.market_id,
+        tokenId: item.token_id,
+        outcome: item.outcome,
+        eventType: item.event_type,
+        observedAtUtc: item.observed_at_utc,
+        price: item.price,
+        bestBid: item.best_bid,
+        bestAsk: item.best_ask,
+        midpoint: item.midpoint,
+        spread: item.spread,
+        size: item.size,
+        side: item.side,
+      })),
+    },
+  };
+}
+
+function mapExecuteManualLivePaperTradeResponse(
+  record: ExecuteManualLivePaperTradeResponseApi,
+): ExecuteManualLivePaperTradeResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    gpShortCode: record.gp_short_code,
+    marketId: record.market_id,
+    ptSessionId: record.pt_session_id,
+    signalAction: record.signal_action,
+    quantity: record.quantity,
+    entryPrice: record.entry_price,
+    stakeCost: record.stake_cost,
+    marketPrice: record.market_price,
+    modelProb: record.model_prob,
+    edge: record.edge,
+    sideLabel: record.side_label,
+    reason: record.reason,
   };
 }
 
@@ -902,6 +1194,20 @@ function mapDriverAffinityEntry(
   };
 }
 
+function mapDriverAffinitySegment(
+  record: DriverAffinitySegmentApi,
+): DriverAffinitySegment {
+  return {
+    key: record.key,
+    title: record.title,
+    description: record.description,
+    sourceSessionCodesIncluded: record.source_session_codes_included,
+    sourceSeasonsIncluded: record.source_seasons_included,
+    entryCount: record.entry_count,
+    entries: record.entries.map(mapDriverAffinityEntry),
+  };
+}
+
 function mapDriverAffinityReport(
   record: DriverAffinityReportApi,
 ): DriverAffinityReport {
@@ -915,6 +1221,8 @@ function mapDriverAffinityReport(
     sessionCodeWeights: record.session_code_weights,
     seasonWeights: record.season_weights,
     trackWeights: record.track_weights,
+    defaultSegmentKey: record.default_segment_key ?? null,
+    segments: (record.segments ?? []).map(mapDriverAffinitySegment),
     sourceSessionCodesIncluded: record.source_session_codes_included,
     sourceMaxSessionEndUtc: record.source_max_session_end_utc,
     latestEndedRelevantSessionCode: record.latest_ended_relevant_session_code,
