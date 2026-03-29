@@ -14,6 +14,8 @@ from .xgb_trainer import (
 
 if TYPE_CHECKING:
     from .lgbm_trainer import LGBMTrainerConfig
+    from .multitask_model import MultitaskModelConfig, MultitaskTabularModel
+    from .multitask_trainer import MultitaskTrainerConfig, train_multitask_split
     from .tuner import tune_xgb
 else:
     try:
@@ -48,15 +50,60 @@ else:
             )
             raise ImportError(msg) from _TUNER_IMPORT_ERROR
 
+    try:
+        from .multitask_model import MultitaskModelConfig, MultitaskTabularModel
+    except ModuleNotFoundError as exc:
+        _MULTITASK_IMPORT_ERROR = exc
+
+        class MultitaskModelConfig:  # type: ignore[no-redef]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                msg = (
+                    "Multitask modeling requires the optional 'torch' dependency. "
+                    "Install it with `uv sync --package f1-polymarket-models`."
+                )
+                raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
+
+        class MultitaskTabularModel:  # type: ignore[no-redef]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                msg = (
+                    "Multitask modeling requires the optional 'torch' dependency. "
+                    "Install it with `uv sync --package f1-polymarket-models`."
+                )
+                raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
+
+    try:
+        from .multitask_trainer import MultitaskTrainerConfig, train_multitask_split
+    except ModuleNotFoundError as exc:
+        _MULTITASK_TRAINER_IMPORT_ERROR = exc
+
+        class MultitaskTrainerConfig:  # type: ignore[no-redef]
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                msg = (
+                    "Multitask training requires the optional 'torch' dependency. "
+                    "Install it with `uv sync --package f1-polymarket-models`."
+                )
+                raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
+
+        def train_multitask_split(*args: Any, **kwargs: Any) -> Any:
+            msg = (
+                "Multitask training requires the optional 'torch' dependency. "
+                "Install it with `uv sync --package f1-polymarket-models`."
+            )
+            raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
+
 __all__ = [
     "ALL_FEATURES",
     "LGBMTrainerConfig",
     "MODELING_ORDER",
+    "MultitaskModelConfig",
+    "MultitaskTabularModel",
+    "MultitaskTrainerConfig",
     "TrainResult",
     "WalkForwardSplit",
     "XGBTrainerConfig",
     "build_walk_forward_splits",
     "train_one_split",
     "train_one_split_lgbm",
+    "train_multitask_split",
     "tune_xgb",
 ]

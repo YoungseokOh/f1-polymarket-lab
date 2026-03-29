@@ -3,8 +3,11 @@
 - `apps/web`: analyst-facing dashboard and explorer UI.
 - `apps/api`: FastAPI service exposing normalized entities, freshness, and lineage.
 - `apps/worker`: explicit one-shot ingestion and orchestration CLI entrypoints.
+- `apps/worker/src/f1_polymarket_worker/multitask_snapshot.py`: checkpoint-aware qualifying/race snapshot generation.
 - `py/connectors`: source adapters for OpenF1, FastF1, and Polymarket.
 - `py/storage`: lake and relational persistence.
+- `py/models/src/f1_polymarket_lab/models/multitask_model.py`: shared encoder with family-specific heads.
+- `py/experiments/src/f1_polymarket_lab/experiments/autoresearch.py`: screening and promotion loop for fixed-evaluator research.
 - `py/features`, `py/models`, `py/experiments`, `py/agent`: downstream modeling and assistant layers.
 
 The current repo does not ship a queue-backed background worker service. Long-running collection still

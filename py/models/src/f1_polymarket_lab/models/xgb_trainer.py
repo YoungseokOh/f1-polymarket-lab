@@ -14,9 +14,12 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+xgb: Any
 try:
-    import xgboost as xgb
-except ModuleNotFoundError:
+    import xgboost as xgb_module
+
+    xgb = xgb_module
+except Exception:
     xgb = None
 
 # Feature columns expected in every snapshot parquet
@@ -220,8 +223,11 @@ def train_one_split(
 
         dtest = xgb.DMatrix(X_test)
         raw_probs = booster.predict(dtest)
-        gain = booster.feature_importance(importance_type="gain").tolist()
-        feature_importance = dict(zip(feature_cols, gain, strict=True))
+        gain = booster.get_score(importance_type="gain")
+        feature_importance = {
+            feature: float(gain.get(f"f{idx}", 0.0))
+            for idx, feature in enumerate(feature_cols)
+        }
     else:
         backend = "numpy_fallback"
         if "entry_yes_price" in feature_cols:
