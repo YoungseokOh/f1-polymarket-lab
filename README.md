@@ -15,6 +15,9 @@ make api
 make web
 ```
 
+`make bootstrap` now runs `uv sync --all-packages --group dev`, which installs the default dev
+dependencies needed for multitask trainer checks, including `torch`.
+
 Override the demo backfill scope if needed:
 
 ```bash
@@ -99,13 +102,16 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-m
   --execute
 ```
 
-Run the experiment loop:
+Run the experimental autoresearch scaffold:
 
 ```bash
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-multitask-autoresearch \
   --output-dir data/experiments/autoresearch/multitask_qr \
   --iterations 20
 ```
+
+`run-multitask-autoresearch` is currently a mock-scored experiment loop. It does not yet run the
+real training or backtest stack.
 
 ## Worker package layout
 

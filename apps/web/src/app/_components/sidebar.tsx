@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import React from "react";
 import { useState } from "react";
 
 const navItems = [
@@ -11,6 +12,11 @@ const navItems = [
   { href: "/predictions", label: "Predictions", icon: PredictionIcon },
   { href: "/backtest", label: "Backtest", icon: BacktestIcon },
   { href: "/paper-trading", label: "Paper Trading", icon: PaperTradeIcon },
+  {
+    href: "/driver-affinity",
+    label: "Driver Affinity",
+    icon: DriverAffinityIcon,
+  },
   { href: "/lineage", label: "Lineage", icon: LineageIcon },
 ];
 
@@ -213,6 +219,30 @@ function BacktestIcon({ active }: { active: boolean }) {
         strokeLinecap="round"
         strokeLinejoin="round"
         d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"
+      />
+    </svg>
+  );
+}
+
+function DriverAffinityIcon({ active }: { active: boolean }) {
+  return (
+    <svg
+      className={`h-4 w-4 ${active ? "text-f1-red" : "text-current"}`}
+      fill="none"
+      aria-hidden="true"
+      viewBox="0 0 24 24"
+      stroke="currentColor"
+      strokeWidth={1.8}
+    >
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"
+      />
+      <path
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        d="M19.5 10.5c0 6.5-7.5 10.5-7.5 10.5S4.5 17 4.5 10.5a7.5 7.5 0 1115 0z"
       />
     </svg>
   );

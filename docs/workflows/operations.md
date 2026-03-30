@@ -10,6 +10,9 @@ make db-upgrade
 make ingest-demo
 ```
 
+`make bootstrap` runs `uv sync --all-packages --group dev`, so the default dev toolchain and the
+workspace packages install together, including `torch` for multitask trainer tests.
+
 ## Full Historical Backfill
 
 ```bash
@@ -94,6 +97,20 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-<
 # Run baseline model
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-<gp>-sq-pole-baseline \
   --snapshot-id <SNAPSHOT_ID> --execute
+```
+
+For multitask Q/R research, treat the commands as two separate layers:
+
+```bash
+# Real snapshot + walk-forward training path
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-multitask-qr-snapshots \
+  --meeting-key <MEETING_KEY> --season <SEASON> --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-multitask-walk-forward \
+  --manifest data/feature_snapshots/multitask/<SEASON>/manifest.json --execute
+
+# Experimental scaffold with mock scoring only
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-multitask-autoresearch \
+  --output-dir data/experiments/autoresearch/multitask_qr --iterations 20
 ```
 
 ## Data Quality

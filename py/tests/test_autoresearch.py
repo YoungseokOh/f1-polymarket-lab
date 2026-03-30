@@ -4,6 +4,8 @@ from pathlib import Path
 
 from f1_polymarket_lab.experiments.autoresearch import promotion_gate
 from f1_polymarket_lab.experiments.tracking import ExperimentSpec, ExperimentTracker
+from f1_polymarket_worker.cli import app
+from typer.testing import CliRunner
 
 
 def test_promotion_gate_requires_positive_ev_and_bet_support() -> None:
@@ -66,3 +68,16 @@ def test_best_run_maximizes_total_pnl(tmp_path: Path) -> None:
 
     assert best is not None
     assert best["experiment_id"] == "exp-002"
+
+
+def test_multitask_autoresearch_cli_calls_out_mock_scoring() -> None:
+    runner = CliRunner()
+
+    result = runner.invoke(
+        app,
+        ["run-multitask-autoresearch", "--iterations", "1"],
+    )
+
+    assert result.exit_code == 0
+    assert "experimental" in result.stdout.lower()
+    assert "mock scoring" in result.stdout.lower()

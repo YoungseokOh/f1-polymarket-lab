@@ -7,8 +7,8 @@ from typing import Any
 
 from f1_polymarket_lab.common import utc_now
 from f1_polymarket_lab.features.driver_profile import (
-    DEFAULT_AFFINITY_SESSION_CODES,
     DEFAULT_AFFINITY_SEASON_WEIGHTS,
+    DEFAULT_AFFINITY_SESSION_CODES,
     DEFAULT_AFFINITY_SESSION_WEIGHTS,
     build_driver_identity_map,
     canonical_driver_identity,
@@ -421,7 +421,8 @@ def _build_affinity_segments(
             "title": "Current Grand Prix",
             "description": (
                 f"{meeting.meeting_name} only. Uses ended {', '.join(session_codes)} sessions "
-                f"from this weekend and scores them against {circuit_short_name or 'current circuit'}."
+                "from this weekend and scores them against "
+                f"{circuit_short_name or 'current circuit'}."
             ),
             "source_session_codes_included": [
                 session.session_code

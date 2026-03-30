@@ -380,19 +380,19 @@ export default async function PaperTradingPage() {
   const uniqueMarketIds = [
     ...new Set(allPositions.map((position) => position.marketId)),
   ];
-  const marketPairs = await Promise.all(
-    uniqueMarketIds.map(async (marketId) => {
-      try {
-        return [marketId, await sdk.market(marketId)] as const;
-      } catch {
-        return null;
-      }
-    }),
+  const marketsState = await loadResource(
+    () =>
+      uniqueMarketIds.length === 0
+        ? Promise.resolve([] as PolymarketMarket[])
+        : sdk.markets({
+            ids: uniqueMarketIds,
+            limit: uniqueMarketIds.length,
+          }),
+    [] as PolymarketMarket[],
+    "Polymarket markets",
   );
   const marketsById = new Map(
-    marketPairs.filter(
-      (pair): pair is readonly [string, PolymarketMarket] => pair !== null,
-    ),
+    marketsState.data.map((market) => [market.id, market] as const),
   );
 
   const degradedMessages = collectResourceErrors([
@@ -401,6 +401,7 @@ export default async function PaperTradingPage() {
     meetingsState,
     paperSessionsState,
     positionsState,
+    marketsState,
   ])
     .concat(
       !affinityReport

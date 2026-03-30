@@ -691,6 +691,7 @@ dev = [
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "ruff" },
+    { name = "torch" },
 ]
 modeling = [
     { name = "catboost" },
@@ -703,7 +704,6 @@ modeling = [
     { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "shap", version = "0.49.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "shap", version = "0.51.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "torch" },
     { name = "xgboost" },
 ]
 
@@ -716,6 +716,7 @@ dev = [
     { name = "pytest", specifier = ">=8.3.5" },
     { name = "pytest-asyncio", specifier = ">=0.25.3" },
     { name = "ruff", specifier = ">=0.11.2" },
+    { name = "torch", specifier = ">=2.6.0" },
 ]
 modeling = [
     { name = "catboost", specifier = ">=1.2.8" },
@@ -725,7 +726,6 @@ modeling = [
     { name = "pymc", specifier = ">=5.20.1" },
     { name = "scikit-learn", specifier = ">=1.6.1" },
     { name = "shap", specifier = ">=0.47.1" },
-    { name = "torch", specifier = ">=2.6.0" },
     { name = "xgboost", specifier = ">=2.1.4" },
 ]
 

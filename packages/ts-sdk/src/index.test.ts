@@ -78,6 +78,26 @@ describe("sdk", () => {
     ]);
   });
 
+  it("serializes batched market ids into the request URL", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => [],
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await sdk.markets({
+      ids: ["market-good", "market-unknown"],
+      limit: 10,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/polymarket/markets?limit=10&market_ids=market-good%2Cmarket-unknown",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+  });
+
   it("maps weekend cockpit status payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

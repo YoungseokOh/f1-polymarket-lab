@@ -1001,9 +1001,15 @@ def run_multitask_autoresearch_command(
     output_dir: str = typer.Option(
         "data/experiments/autoresearch/multitask_qr",
         "--output-dir",
+        help="Directory for experimental multitask autoresearch logs and artifacts.",
     ),
-    iterations: int = typer.Option(20, "--iterations"),
+    iterations: int = typer.Option(
+        20,
+        "--iterations",
+        help="Number of experimental candidates to score with the mock scorer.",
+    ),
 ) -> None:
+    """Run the experimental multitask autoresearch scaffold with mock scoring."""
     from pathlib import Path
 
     from f1_polymarket_lab.experiments import (
@@ -1013,6 +1019,12 @@ def run_multitask_autoresearch_command(
     )
 
     tracker = ExperimentTracker(storage_dir=Path(output_dir))
+
+    typer.secho(
+        "Experimental workflow: this command currently uses mock scoring, not real training "
+        "or backtest evaluation.",
+        fg=typer.colors.YELLOW,
+    )
 
     def scoring_fn(candidate: dict[str, float]) -> dict[str, float]:
         pnl = 20.0 + candidate["winner_weight"] * 10.0 - candidate["dropout"] * 15.0

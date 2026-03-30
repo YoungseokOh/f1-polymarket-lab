@@ -59,7 +59,7 @@ else:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask modeling requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or `uv sync --all-packages --group dev`."
                 )
                 raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
 
@@ -67,7 +67,7 @@ else:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask modeling requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or `uv sync --all-packages --group dev`."
                 )
                 raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
 
@@ -80,14 +80,14 @@ else:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask training requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or `uv sync --all-packages --group dev`."
                 )
                 raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
 
         def train_multitask_split(*args: Any, **kwargs: Any) -> Any:
             msg = (
                 "Multitask training requires the optional 'torch' dependency. "
-                "Install it with `uv sync --package f1-polymarket-models`."
+                "Install it with `make bootstrap` or `uv sync --all-packages --group dev`."
             )
             raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
 

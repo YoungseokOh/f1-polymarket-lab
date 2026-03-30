@@ -86,7 +86,9 @@ export function DriverAffinitySummary({
                             {entry.rank}. {entry.displayName}
                           </p>
                           <p className="text-[10px] text-[#6b7280]">
-                            {entry.teamName ?? entry.teamId ?? "Team unavailable"}
+                            {entry.teamName ??
+                              entry.teamId ??
+                              "Team unavailable"}
                           </p>
                         </div>
                         <p className="text-[13px] font-semibold text-white">

@@ -62,6 +62,7 @@ export type SessionListOptions = ListOptions & {
 };
 
 export type MarketListOptions = ListOptions & {
+  ids?: string[];
   eventId?: string;
   taxonomy?: MarketTaxonomy;
   active?: boolean;
@@ -332,6 +333,7 @@ export const sdk = {
     (
       await apiGet<PolymarketMarketApi[]>("/api/v1/polymarket/markets", {
         limit: options?.limit,
+        market_ids: options?.ids?.length ? options.ids.join(",") : undefined,
         event_id: options?.eventId,
         taxonomy: options?.taxonomy,
         active: options?.active,

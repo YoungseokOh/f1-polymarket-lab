@@ -224,6 +224,20 @@ def test_markets_endpoint_coerces_taxonomy_and_filters(tmp_path: Path) -> None:
     }
 
 
+def test_markets_endpoint_filters_by_market_ids(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/polymarket/markets",
+            params={"market_ids": "market-unknown,market-good", "limit": 10},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [row["id"] for row in payload] == ["market-good", "market-unknown"]
+
+
 def test_mappings_endpoint_filters_by_confidence_and_session(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         response = client.get(

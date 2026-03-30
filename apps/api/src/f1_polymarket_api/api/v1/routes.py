@@ -248,6 +248,7 @@ def polymarket_events(
 def polymarket_markets(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
     event_id: str | None = Query(None),
+    market_ids: str | None = Query(None),
     taxonomy: MarketTaxonomy | None = Query(None),
     active: bool | None = Query(None),
     closed: bool | None = Query(None),
@@ -256,6 +257,10 @@ def polymarket_markets(
     stmt = select(PolymarketMarket)
     if event_id is not None:
         stmt = stmt.where(PolymarketMarket.event_id == event_id)
+    if market_ids is not None:
+        market_id_list = [value.strip() for value in market_ids.split(",") if value.strip()]
+        if market_id_list:
+            stmt = stmt.where(PolymarketMarket.id.in_(market_id_list))
     if taxonomy is not None:
         stmt = stmt.where(PolymarketMarket.taxonomy == taxonomy)
     if active is not None:
