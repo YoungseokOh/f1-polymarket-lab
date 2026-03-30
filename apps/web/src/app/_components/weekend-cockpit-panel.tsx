@@ -2,7 +2,9 @@
 
 import type {
   CaptureLiveWeekendResponse,
+  CurrentWeekendOperationsReadiness,
   ModelPrediction,
+  OperationReadiness,
   PolymarketMarket,
   PricePoint,
   RunWeekendCockpitResponse,
@@ -27,6 +29,14 @@ function formatDateTime(value: string | null | undefined) {
     hour12: false,
     timeZone: "UTC",
   })} UTC`;
+}
+
+function operationTone(
+  status: OperationReadiness["status"],
+): "default" | "good" | "warn" {
+  if (status === "ready") return "good";
+  if (status === "blocked") return "warn";
+  return "default";
 }
 
 function stepTone(status: string): "default" | "good" | "warn" | "live" {
@@ -329,9 +339,11 @@ function liveMonitorState(status: WeekendCockpitStatus) {
 
 export function WeekendCockpitPanel({
   initialStatus,
+  initialReadiness,
   refreshTargetsByGpShortCode = {},
 }: {
   initialStatus: WeekendCockpitStatus | null;
+  initialReadiness?: CurrentWeekendOperationsReadiness | null;
   refreshTargetsByGpShortCode?: Record<string, MeetingRefreshTarget | null>;
 }) {
   type LiveCaptureSample = {
@@ -356,6 +368,10 @@ export function WeekendCockpitPanel({
 
   const router = useRouter();
   const [status, setStatus] = useState(initialStatus);
+  const [operationsReadiness, setOperationsReadiness] =
+    useState<CurrentWeekendOperationsReadiness | null>(
+      initialReadiness ?? null,
+    );
   const [selectedGp, setSelectedGp] = useState(
     initialStatus?.selectedGpShortCode ?? "",
   );
@@ -393,6 +409,7 @@ export function WeekendCockpitPanel({
 
   useEffect(() => {
     setStatus(initialStatus);
+    setOperationsReadiness(initialReadiness ?? null);
     setSelectedGp(initialStatus?.selectedGpShortCode ?? "");
     selectedGpRef.current = initialStatus?.selectedGpShortCode ?? "";
     statusRef.current = initialStatus;
@@ -409,7 +426,7 @@ export function WeekendCockpitPanel({
     setIsLoadingLiveSignals(false);
     setLiveSignalError(null);
     setManualTradeMarketId(null);
-  }, [initialStatus]);
+  }, [initialStatus, initialReadiness]);
 
   useEffect(() => {
     selectedGpRef.current = selectedGp;
@@ -568,8 +585,12 @@ export function WeekendCockpitPanel({
   ]);
 
   async function loadStatus(gpShortCode?: string) {
-    const next = await sdk.weekendCockpitStatus(gpShortCode);
+    const [next, nextReadiness] = await Promise.all([
+      sdk.weekendCockpitStatus(gpShortCode),
+      sdk.currentWeekendReadiness({ gpShortCode }),
+    ]);
     setStatus(next);
+    setOperationsReadiness(nextReadiness);
     return next;
   }
 
@@ -652,6 +673,11 @@ export function WeekendCockpitPanel({
         status: "error",
         message: feedbackMessage(error),
       });
+      try {
+        await loadStatus(selectedGp);
+      } catch {
+        // Ignore refresh failures after surfacing the original error.
+      }
     } finally {
       setIsRunning(false);
     }
@@ -668,6 +694,11 @@ export function WeekendCockpitPanel({
         status: "error",
         message: feedbackMessage(error),
       });
+      try {
+        await loadStatus(selectedGpRef.current);
+      } catch {
+        // Ignore refresh failures after surfacing the original error.
+      }
     } finally {
       setIsCapturingLive(false);
     }
@@ -832,6 +863,12 @@ export function WeekendCockpitPanel({
     isLiveWatchActive ||
     manualTradeMarketId !== null;
   const blockedSteps = status.steps.filter((step) => step.status === "blocked");
+  const operationStatuses = operationsReadiness?.actions ?? [];
+  const weekendActionStatus =
+    operationStatuses.find((action) => action.key === "weekend_cockpit") ??
+    null;
+  const liveCaptureActionStatus =
+    operationStatuses.find((action) => action.key === "live_capture") ?? null;
 
   return (
     <Panel title="Weekend cockpit" eyebrow="Latest update">
@@ -965,6 +1002,39 @@ export function WeekendCockpitPanel({
                   </div>
                 </div>
               )}
+              {operationStatuses.length > 0 && (
+                <div className="border-t border-white/[0.06] pt-3">
+                  <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+                    Operations readiness
+                  </p>
+                  <div className="mt-2 space-y-2">
+                    {operationStatuses.map((action) => (
+                      <div
+                        key={action.key}
+                        className="rounded-lg border border-white/[0.06] bg-[#0d1018] px-3 py-2"
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-xs font-semibold text-white">
+                            {action.label}
+                          </p>
+                          <Badge tone={operationTone(action.status)}>
+                            {action.status}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-xs text-[#9ca3af]">
+                          {action.message}
+                        </p>
+                        {action.lastJobRun ? (
+                          <p className="mt-1 text-[11px] text-[#6b7280]">
+                            Last run: {action.lastJobRun.status} ·{" "}
+                            {formatDateTime(action.lastJobRun.finishedAt)}
+                          </p>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="border-t border-white/[0.06] pt-3">
                 <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
                   Live monitor
@@ -1010,6 +1080,12 @@ export function WeekendCockpitPanel({
                     {isLiveWatchActive ? "Stop live watch" : "Start live watch"}
                   </button>
                   <p className="text-xs text-[#6b7280]">{liveState.detail}</p>
+                  {liveCaptureActionStatus?.lastReportPath ? (
+                    <p className="text-[11px] text-[#6b7280]">
+                      Latest report:{" "}
+                      <code>{liveCaptureActionStatus.lastReportPath}</code>
+                    </p>
+                  ) : null}
                   <div className="grid gap-2 sm:grid-cols-4">
                     <div className="rounded-lg border border-white/[0.06] bg-[#0f1119] px-3 py-2">
                       <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
@@ -1392,6 +1468,11 @@ export function WeekendCockpitPanel({
             className={`rounded-xl border px-4 py-3 text-sm ${feedbackTone(feedback.status)}`}
           >
             {feedback.message}
+            {weekendActionStatus?.lastReportPath ? (
+              <div className="mt-1 text-xs opacity-80">
+                Latest report: <code>{weekendActionStatus.lastReportPath}</code>
+              </div>
+            ) : null}
           </div>
         )}
 

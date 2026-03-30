@@ -254,6 +254,13 @@ def action_capture_live_weekend(
                 if market_id is not None
             ],
             records_written=int(result.get("records_written", 0) or 0),
+            report_path=(
+                str(result["report_path"])
+                if result.get("report_path") is not None
+                else None
+            ),
+            preflight_summary=result.get("preflight_summary"),
+            warnings=[str(item) for item in result.get("warnings", [])],
             summary={
                 "openf1_topics": [
                     {

@@ -234,6 +234,88 @@ describe("sdk", () => {
     );
   });
 
+  it("loads current weekend readiness and maps action summaries", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        now: "2026-03-27T05:13:00Z",
+        selected_gp_short_code: "japan_fp1_fp2",
+        selected_config: {
+          name: "Japanese Grand Prix",
+          short_code: "japan_fp1_fp2",
+          meeting_key: 1281,
+          season: 2026,
+          target_session_code: "FP2",
+          variant: "fp1_to_fp2",
+          source_session_code: "FP1",
+          market_taxonomy: "driver_fastest_lap_practice",
+          stage_rank: 1,
+          stage_label: "FP1 -> FP2",
+          display_label: "Use FP1 results to prepare FP2",
+          display_description:
+            "Use FP1 results to find FP2 markets and prepare paper trading.",
+        },
+        meeting: null,
+        latest_ended_session: null,
+        next_active_session: null,
+        openf1_credentials_configured: true,
+        actions: [
+          {
+            key: "weekend_cockpit",
+            label: "Weekend cockpit",
+            status: "ready",
+            message: "Ready to run.",
+            blockers: [],
+            warnings: [],
+            meeting_key: 1281,
+            meeting_name: "Japanese Grand Prix",
+            gp_short_code: "japan_fp1_fp2",
+            session_code: "FP2",
+            session_key: 11247,
+            actionable_after_utc: null,
+            openf1_credentials_configured: true,
+            last_job_run: {
+              id: "job-1",
+              job_name: "run-weekend-cockpit",
+              status: "completed",
+              records_written: 2,
+              started_at: "2026-03-27T05:00:00Z",
+              finished_at: "2026-03-27T05:01:00Z",
+              error_message: null,
+            },
+            last_report_path: "/tmp/run-weekend-cockpit.json",
+          },
+        ],
+        blockers: [],
+        warnings: [],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const readiness = await sdk.currentWeekendReadiness({
+      gpShortCode: "japan_fp1_fp2",
+      season: 2026,
+      meetingKey: 1281,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/operations/current-weekend-readiness?gp_short_code=japan_fp1_fp2&season=2026&meeting_key=1281",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(readiness.actions[0]).toEqual(
+      expect.objectContaining({
+        key: "weekend_cockpit",
+        status: "ready",
+        gpShortCode: "japan_fp1_fp2",
+        lastJobRun: expect.objectContaining({
+          jobName: "run-weekend-cockpit",
+        }),
+      }),
+    );
+  });
+
   it("posts latest session refresh requests and maps the response", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

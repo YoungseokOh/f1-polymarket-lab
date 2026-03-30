@@ -1,10 +1,11 @@
 import type {
+  CurrentWeekendOperationsReadiness,
   DriverAffinityEntry,
   DriverAffinityReport,
   RefreshDriverAffinityResponse,
 } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
-import { Panel, StatCard } from "@f1/ui";
+import { Badge, Panel, StatCard } from "@f1/ui";
 import { PageStatusBanner } from "../../components/page-status-banner";
 import {
   getDefaultDriverAffinitySegment,
@@ -104,9 +105,20 @@ export default async function DriverAffinityPage() {
     null as DriverAffinityReport | null,
     "Driver affinity",
   );
+  const readinessState = await loadResource(
+    () => sdk.currentWeekendReadiness({ season: 2026 }),
+    null as CurrentWeekendOperationsReadiness | null,
+    "Weekend operations readiness",
+  );
   const report = reportState.data ?? refreshState.data?.report ?? null;
+  const affinityReadiness =
+    readinessState.data?.actions.find(
+      (action) => action.key === "driver_affinity",
+    ) ?? null;
   const degradedMessages = [
-    ...(!report ? collectResourceErrors([refreshState, reportState]) : []),
+    ...(!report
+      ? collectResourceErrors([refreshState, reportState, readinessState])
+      : collectResourceErrors([readinessState])),
     ...(refreshBannerMessage(refreshState.data)
       ? [refreshBannerMessage(refreshState.data) as string]
       : []),
@@ -171,6 +183,40 @@ export default async function DriverAffinityPage() {
           hint={seasonSegment.title}
         />
       </section>
+
+      {affinityReadiness ? (
+        <Panel title="Refresh status" eyebrow="Current readiness">
+          <div className="space-y-3">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                tone={
+                  affinityReadiness.status === "ready"
+                    ? "good"
+                    : affinityReadiness.status === "blocked"
+                      ? "warn"
+                      : "default"
+                }
+              >
+                {affinityReadiness.status}
+              </Badge>
+              <p className="text-sm text-[#9ca3af]">
+                {affinityReadiness.message}
+              </p>
+            </div>
+            {affinityReadiness.lastJobRun ? (
+              <p className="text-xs text-[#6b7280]">
+                Last run: {affinityReadiness.lastJobRun.status} ·{" "}
+                {formatDateTime(affinityReadiness.lastJobRun.finishedAt)}
+              </p>
+            ) : null}
+            {affinityReadiness.lastReportPath ? (
+              <p className="text-xs text-[#6b7280]">
+                Latest report: <code>{affinityReadiness.lastReportPath}</code>
+              </p>
+            ) : null}
+          </div>
+        </Panel>
+      ) : null}
 
       <section className="grid gap-4 xl:grid-cols-3">
         <SegmentLeaderboard

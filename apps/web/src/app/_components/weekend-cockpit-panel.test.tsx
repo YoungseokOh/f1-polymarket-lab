@@ -3,6 +3,7 @@
 import "@testing-library/jest-dom/vitest";
 import type {
   CaptureLiveWeekendResponse,
+  CurrentWeekendOperationsReadiness,
   EntityMapping,
   ModelPrediction,
   PolymarketMarket,
@@ -38,6 +39,7 @@ vi.mock("@f1/ts-sdk", () => ({
     mappings: vi.fn(),
     market: vi.fn(),
     marketPrices: vi.fn(),
+    currentWeekendReadiness: vi.fn(),
     predictions: vi.fn(),
     refreshLatestSession: vi.fn(),
     weekendCockpitStatus: vi.fn(),
@@ -226,6 +228,78 @@ const baseStatus: WeekendCockpitStatus = {
     "This stage uses FP1 results to settle finished FP1 tickets, find FP2 markets, and when ready continue into paper trading.",
 };
 
+const baseReadiness: CurrentWeekendOperationsReadiness = {
+  now: "2026-03-27T05:13:00Z",
+  selectedGpShortCode: "japan_fp1_fp2",
+  selectedConfig: baseStatus.selectedConfig,
+  meeting: baseStatus.meeting,
+  latestEndedSession: baseStatus.sourceSession,
+  nextActiveSession: baseStatus.focusSession,
+  openf1CredentialsConfigured: true,
+  actions: [
+    {
+      key: "weekend_cockpit",
+      label: "Weekend cockpit",
+      status: "ready",
+      message:
+        "This latest update will load FP1 results first and prepare FP2 markets.",
+      blockers: [],
+      warnings: [],
+      meetingKey: 1281,
+      meetingName: "Japanese Grand Prix",
+      gpShortCode: "japan_fp1_fp2",
+      sessionCode: "FP2",
+      sessionKey: 11247,
+      actionableAfterUtc: null,
+      openf1CredentialsConfigured: true,
+      lastJobRun: null,
+      lastReportPath: "/tmp/run-weekend-cockpit.json",
+    },
+    {
+      key: "driver_affinity",
+      label: "Driver affinity refresh",
+      status: "degraded",
+      message:
+        "Driver affinity is stale and can be refreshed with current ended session data.",
+      blockers: [],
+      warnings: ["Missing hydration for FP2."],
+      meetingKey: 1281,
+      meetingName: "Japanese Grand Prix",
+      gpShortCode: "japan_fp1_fp2",
+      sessionCode: "FP2",
+      sessionKey: 11247,
+      actionableAfterUtc: null,
+      openf1CredentialsConfigured: true,
+      lastJobRun: null,
+      lastReportPath: "/tmp/driver-affinity.json",
+    },
+    {
+      key: "live_capture",
+      label: "Live capture",
+      status: "blocked",
+      message:
+        "Practice 2 live capture becomes available at 2026-03-27T06:00:00Z.",
+      blockers: [
+        "Practice 2 live capture becomes available at 2026-03-27T06:00:00Z.",
+      ],
+      warnings: [],
+      meetingKey: 1281,
+      meetingName: "Japanese Grand Prix",
+      gpShortCode: "japan_fp1_fp2",
+      sessionCode: "FP2",
+      sessionKey: 11247,
+      actionableAfterUtc: "2026-03-27T06:00:00Z",
+      openf1CredentialsConfigured: true,
+      lastJobRun: null,
+      lastReportPath: "/tmp/capture-live.json",
+    },
+  ],
+  blockers: [
+    "Practice 2 live capture becomes available at 2026-03-27T06:00:00Z.",
+  ],
+  warnings: ["Missing hydration for FP2."],
+};
+
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -312,6 +386,7 @@ describe("WeekendCockpitPanel", () => {
     );
     vi.mocked(sdk.marketPrices).mockResolvedValue([]);
     vi.mocked(sdk.predictions).mockResolvedValue([]);
+    vi.mocked(sdk.currentWeekendReadiness).mockResolvedValue(baseReadiness);
     vi.mocked(sdk.executeManualLivePaperTrade).mockResolvedValue({
       action: "execute-manual-live-paper-trade",
       status: "ok",
@@ -340,6 +415,7 @@ describe("WeekendCockpitPanel", () => {
     render(
       <WeekendCockpitPanel
         initialStatus={baseStatus}
+        initialReadiness={baseReadiness}
         refreshTargetsByGpShortCode={{
           japan_fp1_fp2: {
             meetingId: "meeting:1281",
@@ -363,6 +439,8 @@ describe("WeekendCockpitPanel", () => {
     expect(
       screen.getByRole("button", { name: "Capture 20s live sample" }),
     ).toBeDisabled();
+    expect(screen.getByText("Operations readiness")).toBeInTheDocument();
+    expect(screen.getByText("Driver affinity refresh")).toBeInTheDocument();
     expect(screen.queryByText("japan_fp1_fp2")).not.toBeInTheDocument();
     expect(screen.queryByText("fp1_to_fp2")).not.toBeInTheDocument();
     expect(
@@ -372,7 +450,12 @@ describe("WeekendCockpitPanel", () => {
   });
 
   it("reveals advanced identifiers only after expanding advanced details", () => {
-    render(<WeekendCockpitPanel initialStatus={baseStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={baseStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     fireEvent.click(screen.getByText("Show advanced details"));
 
@@ -403,7 +486,12 @@ describe("WeekendCockpitPanel", () => {
     vi.mocked(sdk.runWeekendCockpit).mockReturnValue(runRequest.promise);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(updatedStatus);
 
-    render(<WeekendCockpitPanel initialStatus={baseStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={baseStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     const button = screen.getByRole("button", { name: "Update to latest" });
     fireEvent.click(button);
@@ -479,7 +567,12 @@ describe("WeekendCockpitPanel", () => {
 
     vi.mocked(sdk.weekendCockpitStatus).mockReturnValue(statusRequest.promise);
 
-    render(<WeekendCockpitPanel initialStatus={baseStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={baseStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     const select = screen.getByLabelText("Stage");
     fireEvent.change(select, { target: { value: "japan_fp1" } });
@@ -564,7 +657,12 @@ describe("WeekendCockpitPanel", () => {
     vi.mocked(sdk.predictions).mockResolvedValue(predictions);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
 
-    render(<WeekendCockpitPanel initialStatus={liveStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={liveStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     const button = screen.getByRole("button", {
       name: "Capture 20s live sample",
@@ -691,7 +789,12 @@ describe("WeekendCockpitPanel", () => {
     vi.mocked(sdk.predictions).mockResolvedValue(predictions);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
 
-    render(<WeekendCockpitPanel initialStatus={liveStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={liveStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -786,7 +889,12 @@ describe("WeekendCockpitPanel", () => {
       .mockReturnValueOnce(secondCapture.promise);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
 
-    render(<WeekendCockpitPanel initialStatus={liveStatus} />);
+    render(
+      <WeekendCockpitPanel
+        initialStatus={liveStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
 
     fireEvent.click(screen.getByRole("button", { name: "Start live watch" }));
 

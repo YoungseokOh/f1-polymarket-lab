@@ -24,6 +24,12 @@ from f1_polymarket_worker.lineage import (
     finish_job_run,
     start_job_run,
 )
+from f1_polymarket_worker.ops_support import (
+    job_run_summary,
+    latest_job_run_for_name,
+    latest_operation_report_path,
+    write_operation_report,
+)
 from f1_polymarket_worker.pipeline import PipelineContext, hydrate_f1_session
 
 AFFINITY_RELEVANT_SESSION_CODES: tuple[str, ...] = ("FP1", "FP2", "FP3", "Q")
@@ -113,9 +119,7 @@ def _session_lap_count(ctx: PipelineContext, *, session_id: str) -> int:
     from f1_polymarket_lab.storage.models import F1Lap
 
     return int(
-        ctx.db.scalar(
-            select(func.count()).select_from(F1Lap).where(F1Lap.session_id == session_id)
-        )
+        ctx.db.scalar(select(func.count()).select_from(F1Lap).where(F1Lap.session_id == session_id))
         or 0
     )
 
@@ -153,9 +157,7 @@ def _meeting_payload(meeting: F1Meeting) -> dict[str, Any]:
             else _ensure_utc(meeting.start_date_utc).isoformat()
         ),
         "end_date_utc": (
-            None
-            if meeting.end_date_utc is None
-            else _ensure_utc(meeting.end_date_utc).isoformat()
+            None if meeting.end_date_utc is None else _ensure_utc(meeting.end_date_utc).isoformat()
         ),
     }
 
@@ -330,9 +332,7 @@ def _build_affinity_entries(
                     else driver_identity.title()
                 ),
                 "display_broadcast_name": (
-                    None
-                    if display_row is None
-                    else display_row["display_broadcast_name"]
+                    None if display_row is None else display_row["display_broadcast_name"]
                 ),
                 "driver_number": None if display_row is None else display_row["driver_number"],
                 "team_id": None if display_row is None else display_row["team_id"],
@@ -524,7 +524,9 @@ def build_driver_affinity_report(
         "as_of_utc": now.isoformat(),
         "lookback_start_season": 2024,
         "session_code_weights": DEFAULT_AFFINITY_SESSION_WEIGHTS,
-        "season_weights": DEFAULT_AFFINITY_SEASON_WEIGHTS,
+        "season_weights": {
+            str(key): value for key, value in DEFAULT_AFFINITY_SEASON_WEIGHTS.items()
+        },
         "track_weights": track_weights,
         "default_segment_key": current_segment["key"],
         "segments": segments,
@@ -617,11 +619,7 @@ def augment_driver_affinity_report(
             segments = [_segment_from_report(report, season=season)]
     default_segment_key = report.get("default_segment_key") or DEFAULT_SEGMENT_KEY
     current_segment = next(
-        (
-            segment
-            for segment in segments
-            if segment.get("key") == default_segment_key
-        ),
+        (segment for segment in segments if segment.get("key") == default_segment_key),
         segments[0],
     )
     return {
@@ -671,6 +669,118 @@ def get_driver_affinity_report(
     )
 
 
+def get_driver_affinity_refresh_status(
+    ctx: PipelineContext,
+    *,
+    season: int = 2026,
+    meeting_key: int | None = None,
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    reference_now = _ensure_utc(now) or datetime.now(timezone.utc)
+    meeting = _resolve_meeting(ctx, season=season, meeting_key=meeting_key, now=reference_now)
+    sessions = _relevant_sessions(ctx, meeting_id=meeting.id)
+    latest_ended = _latest_ended_session(sessions, now=reference_now)
+    latest_ended_end_utc = (
+        None
+        if latest_ended is None or latest_ended.date_end_utc is None
+        else _ensure_utc(latest_ended.date_end_utc).isoformat()
+    )
+    missing_sessions = _missing_affinity_sessions(ctx, sessions=sessions, now=reference_now)
+    existing_report = _load_report(
+        _report_path(
+            root=ctx.settings.data_root,
+            season=season,
+            meeting_key=meeting.meeting_key,
+        )
+    )
+    augmented = (
+        None
+        if existing_report is None
+        else augment_driver_affinity_report(
+            ctx,
+            report=existing_report,
+            season=season,
+            meeting_key=meeting.meeting_key,
+            now=reference_now,
+        )
+    )
+    warnings: list[str] = []
+    blockers: list[str] = []
+    openf1_configured = bool(ctx.settings.openf1_username and ctx.settings.openf1_password)
+    actionable_after_utc = latest_ended_end_utc
+
+    if latest_ended is None:
+        status = "blocked"
+        message = "No ended FP/Q session is available yet for driver affinity."
+        blockers.append(message)
+    elif missing_sessions and not openf1_configured:
+        status = "blocked"
+        session_codes = ", ".join(
+            session.session_code or str(session.session_key) for session in missing_sessions
+        )
+        message = (
+            "Driver affinity needs newer ended session data, but OpenF1 credentials are missing."
+        )
+        blockers.append(message)
+        warnings.append(f"Missing hydration for {session_codes}.")
+    elif augmented is None:
+        status = "degraded"
+        message = "No driver affinity report exists yet. Refresh will build the first report."
+    elif augmented.get("is_fresh"):
+        status = "ready"
+        message = (
+            "Driver affinity is already fresh through "
+            f"{latest_ended.session_code or 'the latest ended session'}."
+        )
+    elif missing_sessions:
+        status = "degraded"
+        message = (
+            "Driver affinity is stale and will hydrate missing ended sessions before refreshing."
+        )
+        warnings.append(
+            "Missing hydration for "
+            + ", ".join(
+                session.session_code or str(session.session_key) for session in missing_sessions
+            )
+            + "."
+        )
+    else:
+        status = "degraded"
+        message = "Driver affinity is stale and can be refreshed with current ended session data."
+        if augmented.get("stale_reason"):
+            warnings.append(str(augmented["stale_reason"]))
+
+    latest_run = latest_job_run_for_name(ctx.db, job_name="refresh-driver-affinity")
+    latest_report_path = latest_operation_report_path(
+        root=ctx.settings.data_root,
+        season=season,
+        meeting_key=meeting.meeting_key,
+        action="refresh-driver-affinity",
+        job_run_id=None if latest_run is None else latest_run.id,
+    )
+    return {
+        "key": "driver_affinity",
+        "label": "Driver affinity refresh",
+        "status": status,
+        "message": message,
+        "blockers": blockers,
+        "warnings": warnings,
+        "meeting_key": meeting.meeting_key,
+        "meeting_name": meeting.meeting_name,
+        "session_code": None if latest_ended is None else latest_ended.session_code,
+        "session_key": None if latest_ended is None else latest_ended.session_key,
+        "actionable_after_utc": actionable_after_utc,
+        "openf1_credentials_configured": openf1_configured,
+        "missing_session_keys": [session.session_key for session in missing_sessions],
+        "report_is_fresh": None if augmented is None else bool(augmented.get("is_fresh")),
+        "last_job_run": job_run_summary(latest_run),
+        "last_report_path": latest_report_path,
+        "report": augmented,
+        "latest_ended_session_code": None if latest_ended is None else latest_ended.session_code,
+        "latest_ended_session_end_utc": latest_ended_end_utc,
+    }
+
+
 def refresh_driver_affinity(
     ctx: PipelineContext,
     *,
@@ -689,6 +799,12 @@ def refresh_driver_affinity(
     )
     path = _report_path(root=ctx.settings.data_root, season=season, meeting_key=meeting.meeting_key)
     existing_report = _load_report(path)
+    preflight_summary = get_driver_affinity_refresh_status(
+        ctx,
+        season=season,
+        meeting_key=meeting.meeting_key,
+        now=now,
+    )
 
     if (
         ctx.execute
@@ -715,6 +831,10 @@ def refresh_driver_affinity(
             "computed_at_utc": augmented.get("computed_at_utc"),
             "source_max_session_end_utc": augmented.get("source_max_session_end_utc"),
             "hydrated_session_keys": [],
+            "job_run_id": None,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": list(preflight_summary.get("warnings") or []),
             "report": augmented,
         }
 
@@ -738,7 +858,7 @@ def refresh_driver_affinity(
     )
     if not ctx.execute:
         finish_job_run(ctx.db, run, status="planned", records_written=0)
-        return {
+        result = {
             "action": "refresh-driver-affinity",
             "status": "planned",
             "message": "Driver affinity refresh planned.",
@@ -747,13 +867,25 @@ def refresh_driver_affinity(
             "computed_at_utc": None,
             "source_max_session_end_utc": latest_ended_end_utc,
             "hydrated_session_keys": [],
+            "job_run_id": run.id,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": list(preflight_summary.get("warnings") or []),
             "report": None,
         }
+        result["report_path"] = write_operation_report(
+            root=ctx.settings.data_root,
+            season=season,
+            meeting_key=meeting.meeting_key,
+            action="refresh-driver-affinity",
+            payload={**result, "meeting_name": meeting.meeting_name},
+            job_run_id=run.id,
+            observed_at=now,
+        )
+        return result
 
     missing_sessions = _missing_affinity_sessions(ctx, sessions=sessions, now=now)
-    if missing_sessions and (
-        not ctx.settings.openf1_username or not ctx.settings.openf1_password
-    ):
+    if missing_sessions and (not ctx.settings.openf1_username or not ctx.settings.openf1_password):
         finish_job_run(
             ctx.db,
             run,
@@ -775,7 +907,7 @@ def refresh_driver_affinity(
                 now=now,
             )
         )
-        return {
+        result = {
             "action": "refresh-driver-affinity",
             "status": "blocked",
             "message": (
@@ -787,8 +919,26 @@ def refresh_driver_affinity(
             "computed_at_utc": None if augmented is None else augmented.get("computed_at_utc"),
             "source_max_session_end_utc": latest_ended_end_utc,
             "hydrated_session_keys": [],
+            "job_run_id": run.id,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": list(preflight_summary.get("warnings") or []),
             "report": augmented,
         }
+        result["report_path"] = write_operation_report(
+            root=ctx.settings.data_root,
+            season=season,
+            meeting_key=meeting.meeting_key,
+            action="refresh-driver-affinity",
+            payload={
+                **result,
+                "meeting_name": meeting.meeting_name,
+                "blockers": list(preflight_summary.get("blockers") or []),
+            },
+            job_run_id=run.id,
+            observed_at=now,
+        )
+        return result
 
     hydrated_session_keys: list[int] = []
     for session in missing_sessions:
@@ -813,7 +963,7 @@ def refresh_driver_affinity(
         status="completed",
         records_written=int(report.get("entry_count", 0)),
     )
-    return {
+    result = {
         "action": "refresh-driver-affinity",
         "status": "refreshed",
         "message": (
@@ -824,5 +974,19 @@ def refresh_driver_affinity(
         "computed_at_utc": report.get("computed_at_utc"),
         "source_max_session_end_utc": report.get("source_max_session_end_utc"),
         "hydrated_session_keys": hydrated_session_keys,
+        "job_run_id": run.id,
+        "report_path": None,
+        "preflight_summary": preflight_summary,
+        "warnings": list(preflight_summary.get("warnings") or []),
         "report": report,
     }
+    result["report_path"] = write_operation_report(
+        root=ctx.settings.data_root,
+        season=season,
+        meeting_key=meeting.meeting_key,
+        action="refresh-driver-affinity",
+        payload={**result, "meeting_name": meeting.meeting_name},
+        job_run_id=run.id,
+        observed_at=now,
+    )
+    return result

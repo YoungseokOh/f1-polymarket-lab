@@ -346,6 +346,55 @@ def capture_live_weekend_command(
     typer.echo(result)
 
 
+@app.command("check-current-weekend-ops")
+def check_current_weekend_ops_command(
+    gp_short_code: str | None = typer.Option(None, "--gp-short-code"),
+    season: int | None = typer.Option(None, "--season"),
+    meeting_key: int | None = typer.Option(None, "--meeting-key"),
+) -> None:
+    import json
+
+    from f1_polymarket_worker.ops_support import write_operation_report
+    from f1_polymarket_worker.weekend_ops import (
+        get_current_weekend_operations_readiness,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=False)
+        readiness = get_current_weekend_operations_readiness(
+            context,
+            gp_short_code=gp_short_code,
+            season=season,
+            meeting_key=meeting_key,
+        )
+        selected_config = readiness["selected_config"]
+        meeting = readiness.get("meeting")
+        report_path = write_operation_report(
+            root=settings.data_root,
+            season=int(selected_config["season"]),
+            meeting_key=int(selected_config["meeting_key"]),
+            action="check-current-weekend-ops",
+            payload={
+                "action": "check-current-weekend-ops",
+                "status": (
+                    "blocked"
+                    if any(action["status"] == "blocked" for action in readiness["actions"])
+                    else "ready"
+                ),
+                "message": "Current weekend readiness evaluated.",
+                "gp_short_code": selected_config["short_code"],
+                "meeting_name": None if meeting is None else meeting.meeting_name,
+                "details": readiness,
+                "blockers": readiness["blockers"],
+                "warnings": readiness["warnings"],
+            },
+        )
+    typer.echo(json.dumps({**readiness, "report_path": report_path}, indent=2, default=str))
+    if any(action["status"] == "blocked" for action in readiness["actions"]):
+        raise typer.Exit(1)
+
+
 @app.command("reconcile-mappings")
 def reconcile_mappings_command(min_confidence: float = 0.65) -> None:
     settings = get_settings()
@@ -385,8 +434,6 @@ def validate_f1_weekend_subset_command(
     typer.echo(result)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Dynamic GP quicktest commands — auto-registered from GP_REGISTRY
 # ---------------------------------------------------------------------------
@@ -416,6 +463,7 @@ def _register_gp_commands() -> None:
                         fidelity=fidelity,
                     )
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"build-{code}-snapshot")(_make_build())
@@ -430,10 +478,9 @@ def _register_gp_commands() -> None:
                 settings = get_settings()
                 with db_session(settings.database_url) as session:
                     context = PipelineContext(db=session, execute=execute)
-                    result = run_baseline(
-                        context, cfg, snapshot_id=snapshot_id, min_edge=min_edge
-                    )
+                    result = run_baseline(context, cfg, snapshot_id=snapshot_id, min_edge=min_edge)
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"run-{code}-baseline")(_make_run())
@@ -457,6 +504,7 @@ def _register_gp_commands() -> None:
                         min_edge=min_edge,
                     )
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"report-{code}-quicktest")(_make_report())
@@ -515,13 +563,9 @@ def _register_gp_commands() -> None:
                                 )
                             ).all()
                             market_ids = [
-                                m.polymarket_market_id
-                                for m in mappings
-                                if m.polymarket_market_id
+                                m.polymarket_market_id for m in mappings if m.polymarket_market_id
                             ]
-                            typer.echo(
-                                f"[0/3] Refreshing prices for {len(market_ids)} markets..."
-                            )
+                            typer.echo(f"[0/3] Refreshing prices for {len(market_ids)} markets...")
                             for mid in market_ids:
                                 try:
                                     hydrate_polymarket_market(context, market_id=mid, fidelity=60)
@@ -565,9 +609,7 @@ def _register_gp_commands() -> None:
                         model_run_ids,
                         baseline=baseline,
                     )
-                    typer.echo(
-                        f"  baseline={resolved_baseline}, model_run_id={used_model_run_id}"
-                    )
+                    typer.echo(f"  baseline={resolved_baseline}, model_run_id={used_model_run_id}")
 
                     if not execute:
                         typer.echo(
@@ -887,8 +929,7 @@ def train_multitask_walk_forward_command(
     if not execute:
         for split in splits:
             typer.echo(
-                f"[plan] train on {split.train_meeting_keys} "
-                f"-> test {split.test_meeting_key}"
+                f"[plan] train on {split.train_meeting_keys} -> test {split.test_meeting_key}"
             )
         return
 
@@ -926,8 +967,7 @@ def train_multitask_walk_forward_command(
                 continue
             if not test_frames:
                 typer.echo(
-                    f"Skipping test meeting_key={split.test_meeting_key}: "
-                    "no non-empty test rows"
+                    f"Skipping test meeting_key={split.test_meeting_key}: no non-empty test rows"
                 )
                 continue
 
@@ -943,11 +983,11 @@ def train_multitask_walk_forward_command(
                 config=MultitaskTrainerConfig(),
             )
 
-            test_timestamps = [
-                value
-                for value in test_df["as_of_ts"].to_list()
-                if isinstance(value, datetime)
-            ] if "as_of_ts" in test_df.columns else []
+            test_timestamps = (
+                [value for value in test_df["as_of_ts"].to_list() if isinstance(value, datetime)]
+                if "as_of_ts" in test_df.columns
+                else []
+            )
 
             run_record = {
                 "id": result.model_run_id,
@@ -998,68 +1038,230 @@ def train_multitask_walk_forward_command(
 
 @app.command("run-multitask-autoresearch")
 def run_multitask_autoresearch_command(
+    manifest: str = typer.Option(
+        ...,
+        "--manifest",
+        help="Path to multitask manifest.json used for walk-forward evaluation.",
+    ),
     output_dir: str = typer.Option(
         "data/experiments/autoresearch/multitask_qr",
         "--output-dir",
-        help="Directory for experimental multitask autoresearch logs and artifacts.",
+        help="Directory for multitask autoresearch logs and artifacts.",
     ),
     iterations: int = typer.Option(
         20,
         "--iterations",
-        help="Number of experimental candidates to score with the mock scorer.",
+        help="Total candidates to evaluate, including the baseline candidate.",
+    ),
+    min_train_gps: int = typer.Option(
+        2,
+        "--min-train-gps",
+        help="Minimum prior meetings required before each walk-forward test fold.",
+    ),
+    min_edge: float = typer.Option(
+        0.05,
+        "--min-edge",
+        help="Minimum executable edge used for simulated bet selection.",
+    ),
+    persist_best: bool = typer.Option(
+        False,
+        "--persist-best/--no-persist-best",
+        help="Persist only the best candidate's ModelRun and ModelPrediction rows.",
     ),
 ) -> None:
-    """Run the experimental multitask autoresearch scaffold with mock scoring."""
+    """Run manifest-based multitask autoresearch with hybrid ranking."""
+    import json
+    from datetime import UTC, datetime
     from pathlib import Path
 
+    from f1_polymarket_lab.common import stable_uuid
     from f1_polymarket_lab.experiments import (
         AutoResearchConfig,
         ExperimentTracker,
+        load_manifest_grouped,
         run_autoresearch_loop,
+        trainer_config_from_candidate,
     )
+    from f1_polymarket_lab.models import build_walk_forward_splits, train_multitask_split
+    from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
+    from f1_polymarket_lab.storage.repository import upsert_records
 
-    tracker = ExperimentTracker(storage_dir=Path(output_dir))
-
-    typer.secho(
-        "Experimental workflow: this command currently uses mock scoring, not real training "
-        "or backtest evaluation.",
-        fg=typer.colors.YELLOW,
-    )
-
-    def scoring_fn(candidate: dict[str, float]) -> dict[str, float]:
-        pnl = 20.0 + candidate["winner_weight"] * 10.0 - candidate["dropout"] * 15.0
-        return {
-            "total_pnl": pnl,
-            "roi_pct": pnl / 5.0,
-            "bet_count": 30,
-            "family_pnl_share_max": 0.60,
-        }
+    manifest_path = Path(manifest)
+    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    tracker = ExperimentTracker(storage_dir=Path(output_dir) / run_id)
 
     history = run_autoresearch_loop(
         tracker=tracker,
-        config=AutoResearchConfig(iterations=iterations),
-        scoring_fn=scoring_fn,
+        config=AutoResearchConfig(
+            iterations=iterations,
+            min_train_gps=min_train_gps,
+            min_edge=min_edge,
+        ),
+        manifest_path=manifest_path,
     )
+
+    best = (
+        min(
+            history,
+            key=lambda entry: (
+                -float(entry["metrics"].get("realized_pnl_total", 0.0) or 0.0),
+                -float(entry["metrics"].get("roi_pct", 0.0) or 0.0),
+                float(entry["metrics"].get("log_loss", 999.0) or 999.0),
+                float(entry["metrics"].get("brier_score", 999.0) or 999.0),
+            ),
+        )
+        if history
+        else None
+    )
+
+    persistence_summary: dict[str, int] | None = None
+    if persist_best and best is not None:
+        grouped = load_manifest_grouped(manifest_path)
+        meeting_keys = sorted(grouped)
+        splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
+        checkpoint_order = {"FP1": 1, "FP2": 2, "FP3": 3, "Q": 4}
+
+        def load_frames(paths: list[str]):
+            import polars as pl_module
+
+            frames = []
+            for path in paths:
+                frame = pl_module.read_parquet(path)
+                if frame.height == 0 or frame.width == 0:
+                    continue
+                frames.append(frame)
+            return frames
+
+        def serialize_timestamp(value: object) -> str:
+            if isinstance(value, datetime):
+                return value.isoformat()
+            return str(value)
+
+        settings = get_settings()
+        with db_session(settings.database_url) as session:
+            persisted_runs = 0
+            persisted_predictions = 0
+            trainer_config = trainer_config_from_candidate(best["config"])
+            for split in splits:
+                train_paths: list[str] = []
+                for meeting_key in split.train_meeting_keys:
+                    snapshots = sorted(
+                        grouped[meeting_key],
+                        key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
+                    )
+                    train_paths.extend(str(row["path"]) for row in snapshots)
+                test_snapshots = sorted(
+                    grouped[split.test_meeting_key],
+                    key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
+                )
+                train_frames = load_frames(train_paths)
+                test_frames = load_frames([str(row["path"]) for row in test_snapshots])
+                if not train_frames or not test_frames:
+                    continue
+
+                import polars as pl_module
+
+                train_df = pl_module.concat(train_frames)
+                test_df = pl_module.concat(test_frames)
+                if train_df.height == 0 or test_df.height == 0:
+                    continue
+
+                model_run_id = stable_uuid(
+                    "multitask-autoresearch-best",
+                    split.test_meeting_key,
+                    best["experiment_id"],
+                )
+                result = train_multitask_split(
+                    train_df,
+                    test_df,
+                    model_run_id=model_run_id,
+                    stage="multitask_qr_autoresearch_best",
+                    config=trainer_config,
+                    min_edge=min_edge,
+                )
+                test_timestamps = (
+                    [
+                        value
+                        for value in test_df["as_of_ts"].to_list()
+                        if isinstance(value, datetime)
+                    ]
+                    if "as_of_ts" in test_df.columns
+                    else []
+                )
+                run_record = {
+                    "id": result.model_run_id,
+                    "stage": "multitask_qr_autoresearch_best",
+                    "model_family": "torch_multitask",
+                    "model_name": "shared_encoder_multitask_v1",
+                    "dataset_version": "multitask_v1",
+                    "feature_snapshot_id": None,
+                    "test_start": min(test_timestamps) if test_timestamps else None,
+                    "test_end": max(test_timestamps) if test_timestamps else None,
+                    "config_json": result.config,
+                    "metrics_json": result.metrics,
+                }
+                upsert_records(session, ModelRun, [run_record], conflict_columns=["id"])
+
+                pred_records: list[dict[str, object]] = []
+                for row in result.predictions:
+                    checkpoint = str(
+                        (row.get("explanation_json") or {}).get("as_of_checkpoint", "NA")
+                    )
+                    pred_records.append(
+                        {
+                            **row,
+                            "id": stable_uuid(
+                                "multitask-autoresearch-best-prediction",
+                                result.model_run_id,
+                                row.get("market_id"),
+                                row.get("token_id"),
+                                checkpoint,
+                                serialize_timestamp(row.get("as_of_ts")),
+                            ),
+                        }
+                    )
+                upsert_records(session, ModelPrediction, pred_records)
+                persisted_runs += 1
+                persisted_predictions += len(pred_records)
+            session.commit()
+            persistence_summary = {
+                "persisted_runs": persisted_runs,
+                "persisted_predictions": persisted_predictions,
+            }
+
     typer.echo(
-        {
-            "runs": len(history),
-            "best": tracker.best_run(metric_key="total_pnl", higher_is_better=True),
-        }
+        json.dumps(
+            {
+                "run_id": run_id,
+                "runs": len(history),
+                "storage_dir": str(tracker.storage_dir),
+                "best": best,
+                "persisted": persistence_summary,
+            },
+            indent=2,
+            default=str,
+        )
     )
 
 
 @app.command("train-xgb-walk-forward")
 def train_xgb_walk_forward_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
     min_edge: float = typer.Option(0.05, "--min-edge"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
     execute: bool = typer.Option(False, "--execute/--plan-only"),
 ) -> None:
@@ -1113,7 +1315,8 @@ def train_xgb_walk_forward_command(
 
             model_run_id = stable_uuid("xgb-run", key_to_sid[sp.test_meeting_key], stage)
             result = train_one_split(
-                train_df, test_df,
+                train_df,
+                test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 min_edge=min_edge,
@@ -1135,7 +1338,9 @@ def train_xgb_walk_forward_command(
 
             pred_records = [ModelPrediction(**p) for p in result.predictions]
             upsert_records(
-                session, ModelPrediction, pred_records,
+                session,
+                ModelPrediction,
+                pred_records,
                 key_columns=["model_run_id", "market_id"],
             )
 
@@ -1152,15 +1357,21 @@ def train_xgb_walk_forward_command(
 @app.command("train-lgbm-walk-forward")
 def train_lgbm_walk_forward_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("lgbm_pole_quicktest", "--stage"),
     min_edge: float = typer.Option(0.05, "--min-edge"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
     execute: bool = typer.Option(False, "--execute/--plan-only"),
 ) -> None:
@@ -1212,7 +1423,8 @@ def train_lgbm_walk_forward_command(
 
             model_run_id = stable_uuid("lgbm-run", key_to_sid[sp.test_meeting_key], stage)
             result = train_one_split_lgbm(
-                train_df, test_df,
+                train_df,
+                test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 min_edge=min_edge,
@@ -1234,7 +1446,9 @@ def train_lgbm_walk_forward_command(
 
             pred_records = [ModelPrediction(**p) for p in result.predictions]
             upsert_records(
-                session, ModelPrediction, pred_records,
+                session,
+                ModelPrediction,
+                pred_records,
                 key_columns=["model_run_id", "market_id"],
             )
 
@@ -1251,15 +1465,21 @@ def train_lgbm_walk_forward_command(
 @app.command("tune-xgb-optuna")
 def tune_xgb_optuna_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
     n_trials: int = typer.Option(50, "--n-trials"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
 ) -> None:
     """Run Optuna hyperparameter search for XGBoost."""
@@ -1314,9 +1534,7 @@ def paper_trade_command(
         from sqlalchemy import select
 
         preds = session.scalars(
-            select(ModelPrediction).where(
-                ModelPrediction.model_run_id == model_run_id
-            )
+            select(ModelPrediction).where(ModelPrediction.model_run_id == model_run_id)
         ).all()
 
         snap = session.get(FeatureSnapshot, snapshot_id)
@@ -1378,8 +1596,10 @@ def paper_trade_command(
         )
         session.commit()
 
-        typer.echo(f"Paper trading complete: {summary['trades_executed']} trades, "
-                   f"PnL: ${summary['total_pnl']:.2f}")
+        typer.echo(
+            f"Paper trading complete: {summary['trades_executed']} trades, "
+            f"PnL: ${summary['total_pnl']:.2f}"
+        )
         typer.echo(f"Session ID: {pt_session_id}")
         typer.echo(f"Log saved: {log_path}")
 
@@ -1418,9 +1638,7 @@ def settle_paper_trade_session_command(
         # Find GP config
         cfg = next((g for g in GP_REGISTRY if g.short_code == gp_slug), None)
         if cfg is None:
-            typer.echo(
-                f"Unknown gp_slug: {gp_slug}. Known: {[g.short_code for g in GP_REGISTRY]}"
-            )
+            typer.echo(f"Unknown gp_slug: {gp_slug}. Known: {[g.short_code for g in GP_REGISTRY]}")
             raise typer.Exit(1)
 
         # Find paper trade session
@@ -1439,9 +1657,7 @@ def settle_paper_trade_session_command(
 
         # Load snapshot to get market_id → driver_id mapping
         snap = (
-            session.get(FeatureSnapshot, pt_session.snapshot_id)
-            if pt_session.snapshot_id
-            else None
+            session.get(FeatureSnapshot, pt_session.snapshot_id) if pt_session.snapshot_id else None
         )
         if snap is None or not snap.storage_path:
             typer.echo("No snapshot found for this session; cannot settle.")
@@ -1455,15 +1671,12 @@ def settle_paper_trade_session_command(
                 market_to_driver[str(mid)] = str(did)
 
         # Find the target session (Q for pole, R for race winner)
-        meeting = session.scalar(
-            select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key)
-        )
+        meeting = session.scalar(select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key))
         if meeting is None:
             typer.echo(f"Meeting {cfg.meeting_key} not found in DB.")
             raise typer.Exit(1)
         target_session = session.scalar(
-            select(F1Session)
-            .where(
+            select(F1Session).where(
                 F1Session.meeting_id == meeting.id,
                 F1Session.session_code == cfg.target_session_code,
             )
@@ -1477,8 +1690,7 @@ def settle_paper_trade_session_command(
 
         # Get winner (position == 1) from F1SessionResult
         winner_result = session.scalar(
-            select(F1SessionResult)
-            .where(
+            select(F1SessionResult).where(
                 F1SessionResult.session_id == target_session.id,
                 F1SessionResult.position == 1,
             )
@@ -1495,8 +1707,7 @@ def settle_paper_trade_session_command(
 
         # Load open positions
         open_positions = session.scalars(
-            select(PaperTradePosition)
-            .where(
+            select(PaperTradePosition).where(
                 PaperTradePosition.session_id == pt_session.id,
                 PaperTradePosition.status == "open",
             )
@@ -1616,7 +1827,7 @@ def h2h_signals_command(
         signal_str = s["signal"].upper()
         flag = " ★" if s["is_teammate_h2h"] and abs(s["edge"]) >= 0.10 else ""
         typer.echo(
-            f"  {s['token_driver']+' > '+s['other_driver']:<30} {tm:>3} "
+            f"  {s['token_driver'] + ' > ' + s['other_driver']:<30} {tm:>3} "
             f"{s['token_price']:>6.3f} {s['model_prob']:>6.3f} "
             f"{s['edge']:>+7.3f}  {signal_str}{flag}"
         )
@@ -1635,9 +1846,7 @@ def build_multitask_qr_snapshots_command(
 ) -> None:
     from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snapshots
 
-    checkpoint_tuple = tuple(
-        part.strip() for part in checkpoints.split(",") if part.strip()
-    )
+    checkpoint_tuple = tuple(part.strip() for part in checkpoints.split(",") if part.strip())
     settings = get_settings()
     with db_session(settings.database_url) as session:
         context = PipelineContext(db=session, execute=execute, settings=settings)

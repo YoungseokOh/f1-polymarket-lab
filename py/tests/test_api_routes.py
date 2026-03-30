@@ -379,6 +379,82 @@ def test_weekend_cockpit_status_blocks_fp2_to_q_during_fp2_live(
     assert "FP2 is still in progress" in payload["blockers"][0]
 
 
+def test_current_weekend_operations_readiness_endpoint_serializes_worker_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.get_current_weekend_operations_readiness",
+        lambda *args, **kwargs: {
+            "now": "2026-03-27T05:13:00Z",
+            "selected_gp_short_code": "japan_fp1_fp2",
+            "selected_config": {
+                "name": "Japanese Grand Prix",
+                "short_code": "japan_fp1_fp2",
+                "meeting_key": 1281,
+                "season": 2026,
+                "target_session_code": "FP2",
+                "variant": "fp1_to_fp2",
+                "source_session_code": "FP1",
+                "market_taxonomy": "driver_fastest_lap_practice",
+                "stage_rank": 1,
+                "stage_label": "FP1 -> FP2",
+                "display_label": "Use FP1 results to prepare FP2",
+                "display_description": (
+                    "Use FP1 results to find FP2 markets and prepare paper trading."
+                ),
+            },
+            "meeting": None,
+            "latest_ended_session": None,
+            "next_active_session": None,
+            "openf1_credentials_configured": True,
+            "actions": [
+                {
+                    "key": "weekend_cockpit",
+                    "label": "Weekend cockpit",
+                    "status": "ready",
+                    "message": "Ready to run.",
+                    "blockers": [],
+                    "warnings": [],
+                    "meeting_key": 1281,
+                    "meeting_name": "Japanese Grand Prix",
+                    "gp_short_code": "japan_fp1_fp2",
+                    "session_code": "FP2",
+                    "session_key": 11247,
+                    "actionable_after_utc": None,
+                    "openf1_credentials_configured": True,
+                    "last_job_run": {
+                        "id": "job-1",
+                        "job_name": "run-weekend-cockpit",
+                        "status": "completed",
+                        "records_written": 2,
+                        "started_at": "2026-03-27T05:00:00Z",
+                        "finished_at": "2026-03-27T05:01:00Z",
+                        "error_message": None,
+                    },
+                    "last_report_path": "/tmp/run-weekend-cockpit.json",
+                }
+            ],
+            "blockers": [],
+            "warnings": [],
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/operations/current-weekend-readiness",
+            params={"gp_short_code": "japan_fp1_fp2", "season": 2026, "meeting_key": 1281},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_gp_short_code"] == "japan_fp1_fp2"
+    assert payload["actions"][0]["key"] == "weekend_cockpit"
+    assert payload["actions"][0]["last_job_run"]["job_name"] == "run-weekend-cockpit"
+
+
 def test_run_weekend_cockpit_endpoint_serializes_worker_result(
     tmp_path: Path,
     monkeypatch,
@@ -393,6 +469,26 @@ def test_run_weekend_cockpit_endpoint_serializes_worker_result(
             "snapshot_id": "snapshot-1",
             "model_run_id": "model-run-1",
             "pt_session_id": "pt-session-1",
+            "job_run_id": "job-weekend-1",
+            "report_path": "/tmp/run-weekend-cockpit.json",
+            "preflight_summary": {
+                "key": "weekend_cockpit",
+                "label": "Weekend cockpit",
+                "status": "ready",
+                "message": "Ready to run.",
+                "blockers": [],
+                "warnings": [],
+                "meeting_key": 1281,
+                "meeting_name": "Japanese Grand Prix",
+                "gp_short_code": "japan_pre",
+                "session_code": "Q",
+                "session_key": 11249,
+                "actionable_after_utc": None,
+                "openf1_credentials_configured": True,
+                "last_job_run": None,
+                "last_report_path": "/tmp/run-weekend-cockpit.json",
+            },
+            "warnings": ["Latest paper session already exists."],
             "executed_steps": [
                 {
                     "key": "sync_calendar",
@@ -427,6 +523,10 @@ def test_run_weekend_cockpit_endpoint_serializes_worker_result(
     assert response.status_code == 200
     payload = response.json()
     assert payload["gp_short_code"] == "japan_pre"
+    assert payload["job_run_id"] == "job-weekend-1"
+    assert payload["report_path"] == "/tmp/run-weekend-cockpit.json"
+    assert payload["preflight_summary"]["key"] == "weekend_cockpit"
+    assert payload["warnings"] == ["Latest paper session already exists."]
     assert payload["executed_steps"][0]["status"] == "completed"
     assert payload["details"]["settlement"]["settled_positions"] == 2
 
@@ -561,6 +661,25 @@ def test_capture_live_weekend_endpoint_serializes_worker_result(
             "market_count": 12,
             "polymarket_market_ids": ["market-1", "market-2"],
             "records_written": 31,
+            "report_path": "/tmp/capture-live-weekend.json",
+            "preflight_summary": {
+                "key": "live_capture",
+                "label": "Live capture",
+                "status": "ready",
+                "message": "Ready to capture.",
+                "blockers": [],
+                "warnings": [],
+                "meeting_key": 1281,
+                "meeting_name": "Japanese Grand Prix",
+                "gp_short_code": "japan_fp2_q",
+                "session_code": "Q",
+                "session_key": 11249,
+                "actionable_after_utc": None,
+                "openf1_credentials_configured": True,
+                "last_job_run": None,
+                "last_report_path": "/tmp/capture-live-weekend.json",
+            },
+            "warnings": ["Latest linked markets already loaded."],
             "summary": {
                 "openf1_topics": [{"key": "v1/laps", "count": 14}],
                 "polymarket_event_types": [{"key": "book", "count": 9}],
@@ -601,6 +720,9 @@ def test_capture_live_weekend_endpoint_serializes_worker_result(
     assert payload["capture_seconds"] == 20
     assert payload["polymarket_messages"] == 9
     assert payload["market_count"] == 12
+    assert payload["report_path"] == "/tmp/capture-live-weekend.json"
+    assert payload["preflight_summary"]["key"] == "live_capture"
+    assert payload["warnings"] == ["Latest linked markets already loaded."]
     assert payload["summary"]["openf1_topics"] == [{"key": "v1/laps", "count": 14}]
     assert payload["summary"]["polymarket_event_types"] == [{"key": "book", "count": 9}]
     assert payload["summary"]["market_quotes"][0]["market_id"] == "market-1"
@@ -800,6 +922,36 @@ def test_refresh_driver_affinity_endpoint_returns_blocked_payload(
             "computed_at_utc": None,
             "source_max_session_end_utc": "2026-03-27T07:00:00Z",
             "hydrated_session_keys": [],
+            "job_run_id": "job-affinity-1",
+            "report_path": "/tmp/driver-affinity.json",
+            "preflight_summary": {
+                "key": "driver_affinity",
+                "label": "Driver affinity refresh",
+                "status": "blocked",
+                "message": (
+                    "Driver affinity needs newer ended session data, "
+                    "but OpenF1 credentials are missing."
+                ),
+                "blockers": [
+                    "Driver affinity needs newer ended session data, "
+                    "but OpenF1 credentials are missing."
+                ],
+                "warnings": ["Missing hydration for FP2."],
+                "meeting_key": 1281,
+                "meeting_name": "Japanese Grand Prix",
+                "gp_short_code": None,
+                "session_code": "FP2",
+                "session_key": 11247,
+                "actionable_after_utc": "2026-03-27T07:00:00Z",
+                "openf1_credentials_configured": False,
+                "last_job_run": None,
+                "last_report_path": "/tmp/driver-affinity.json",
+                "missing_session_keys": [11247],
+                "report_is_fresh": False,
+                "latest_ended_session_code": "FP2",
+                "latest_ended_session_end_utc": "2026-03-27T07:00:00Z",
+            },
+            "warnings": ["Missing hydration for FP2."],
             "report": None,
         },
     )
@@ -816,6 +968,10 @@ def test_refresh_driver_affinity_endpoint_returns_blocked_payload(
     payload = response.json()
     assert payload["status"] == "blocked"
     assert payload["meeting_key"] == 1281
+    assert payload["job_run_id"] == "job-affinity-1"
+    assert payload["report_path"] == "/tmp/driver-affinity.json"
+    assert payload["preflight_summary"]["missing_session_keys"] == [11247]
+    assert payload["warnings"] == ["Missing hydration for FP2."]
 
 
 def test_refresh_driver_affinity_endpoint_accepts_report_without_round_number(

@@ -5,6 +5,7 @@ from typing import Any
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     BacktestResultResponse,
+    CurrentWeekendOperationsReadinessResponse,
     CursorStateResponse,
     DataQualityResultResponse,
     DriverAffinityReportResponse,
@@ -127,6 +128,35 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
 
 def _driver_affinity_report_response(payload: dict[str, Any]) -> DriverAffinityReportResponse:
     return DriverAffinityReportResponse.model_validate(payload)
+
+
+def _current_weekend_operations_readiness_response(
+    payload: dict[str, Any],
+) -> CurrentWeekendOperationsReadinessResponse:
+    return CurrentWeekendOperationsReadinessResponse(
+        now=payload["now"],
+        selected_gp_short_code=payload["selected_gp_short_code"],
+        selected_config=payload["selected_config"],
+        meeting=(
+            None
+            if payload["meeting"] is None
+            else F1MeetingResponse.model_validate(payload["meeting"])
+        ),
+        latest_ended_session=(
+            None
+            if payload["latest_ended_session"] is None
+            else F1SessionResponse.model_validate(payload["latest_ended_session"])
+        ),
+        next_active_session=(
+            None
+            if payload["next_active_session"] is None
+            else F1SessionResponse.model_validate(payload["next_active_session"])
+        ),
+        openf1_credentials_configured=payload["openf1_credentials_configured"],
+        actions=payload["actions"],
+        blockers=payload["blockers"],
+        warnings=payload["warnings"],
+    )
 
 
 @router.get("/freshness", response_model=list[FreshnessResponse])
@@ -450,6 +480,36 @@ def weekend_cockpit_status(
                 gp_short_code=gp_short_code,
             )
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get(
+    "/operations/current-weekend-readiness",
+    response_model=CurrentWeekendOperationsReadinessResponse,
+)
+def current_weekend_operations_readiness(
+    gp_short_code: str | None = Query(None),
+    season: int | None = Query(None),
+    meeting_key: int | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> CurrentWeekendOperationsReadinessResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import (
+        get_current_weekend_operations_readiness,
+    )
+
+    try:
+        return _current_weekend_operations_readiness_response(
+            get_current_weekend_operations_readiness(
+                PipelineContext(db=db, execute=False),
+                gp_short_code=gp_short_code,
+                season=season,
+                meeting_key=meeting_key,
+            )
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

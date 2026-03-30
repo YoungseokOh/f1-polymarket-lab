@@ -9,14 +9,15 @@ from f1_polymarket_lab.storage.db import Base
 from f1_polymarket_lab.storage.models import (
     F1Driver,
     F1Lap,
-    IngestionJobRun,
     F1Meeting,
     F1Session,
     F1SessionResult,
     F1Team,
+    IngestionJobRun,
 )
 from f1_polymarket_worker.driver_affinity import (
     build_driver_affinity_report,
+    get_driver_affinity_refresh_status,
     refresh_driver_affinity,
 )
 from f1_polymarket_worker.pipeline import PipelineContext
@@ -206,8 +207,7 @@ def test_driver_affinity_respects_as_of_cutoff_and_merges_driver_identity(
         assert before_fp2["lando norris"]["n_sessions"] == 1
         assert after_fp2["lando norris"]["n_sessions"] == 2
         assert (
-            after_fp2["george russell"]["s1_strength"]
-            > before_fp2["george russell"]["s1_strength"]
+            after_fp2["george russell"]["s1_strength"] > before_fp2["george russell"]["s1_strength"]
         )
         assert after_fp2["lando norris"]["s1_strength"] < before_fp2["lando norris"]["s1_strength"]
     finally:
@@ -235,6 +235,31 @@ def test_driver_affinity_report_prefers_current_season_display_identity(
         assert lando["team_name"] == "McLaren"
         assert report["latest_ended_relevant_session_code"] == "FP2"
         assert report["source_max_session_end_utc"] == "2026-03-27T07:00:00+00:00"
+        assert report["season_weights"] == {"2024": 0.4, "2025": 0.65, "2026": 1.0}
+    finally:
+        session.close()
+
+
+def test_driver_affinity_report_defaults_to_current_meeting_when_key_is_omitted(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        seed_affinity_fixture(session)
+        report = build_driver_affinity_report(
+            context,
+            season=2026,
+            as_of_utc=datetime(2026, 3, 27, 7, 1, tzinfo=timezone.utc),
+        )
+
+        assert report["meeting_key"] == 1281
+        assert report["meeting"]["meeting_key"] == 1281
+        assert report["entry_count"] == len(report["entries"])
+        assert {segment["key"] for segment in report["segments"]} == {
+            "current_gp",
+            "season_to_date",
+            "all_history",
+        }
     finally:
         session.close()
 
@@ -286,7 +311,53 @@ def test_refresh_driver_affinity_blocks_without_credentials_when_fp2_is_missing(
 
         assert result["status"] == "blocked"
         assert result["report"] is None
+        assert result["job_run_id"] is not None
+        assert result["report_path"] is not None
+        assert result["preflight_summary"]["missing_session_keys"] == [11246, 11247]
         assert result["source_max_session_end_utc"] == "2026-03-27T07:00:00+00:00"
+    finally:
+        session.close()
+
+
+def test_driver_affinity_refresh_status_marks_missing_credentials_as_blocked(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting-2026-japan",
+            meeting_key=1281,
+            season=2026,
+            meeting_name="Japanese Grand Prix",
+            circuit_short_name="Suzuka",
+            start_date_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+            end_date_utc=datetime(2026, 3, 29, 7, 0, tzinfo=timezone.utc),
+        )
+        fp2 = F1Session(
+            id="session-2026-fp2",
+            meeting_id=meeting.id,
+            session_key=11247,
+            session_name="Practice 2",
+            session_code="FP2",
+            session_type="Practice",
+            date_start_utc=datetime(2026, 3, 27, 6, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 27, 7, 0, tzinfo=timezone.utc),
+            is_practice=True,
+        )
+        session.add_all([meeting, fp2])
+        session.commit()
+
+        readiness = get_driver_affinity_refresh_status(
+            context,
+            season=2026,
+            meeting_key=1281,
+            now=datetime(2026, 3, 27, 8, 0, tzinfo=timezone.utc),
+        )
+
+        assert readiness["status"] == "blocked"
+        assert readiness["openf1_credentials_configured"] is False
+        assert readiness["missing_session_keys"] == [11247]
+        assert readiness["latest_ended_session_code"] == "FP2"
     finally:
         session.close()
 
@@ -319,9 +390,7 @@ def test_refresh_driver_affinity_skips_fresh_report_without_writing_lineage_runs
         session.add_all([meeting, fp3])
         session.commit()
 
-        report_path = (
-            tmp_path / "reports" / "driver_affinity" / "2026" / "1281" / "latest.json"
-        )
+        report_path = tmp_path / "reports" / "driver_affinity" / "2026" / "1281" / "latest.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(
             """
@@ -333,7 +402,11 @@ def test_refresh_driver_affinity_skips_fresh_report_without_writing_lineage_runs
   "lookback_start_season": 2024,
   "session_code_weights": {"FP1": 0.4, "FP2": 0.6, "FP3": 0.8, "Q": 1.0},
   "season_weights": {"2024": 0.4, "2025": 0.65, "2026": 1.0},
-  "track_weights": {"s1_fraction": 0.3333333333, "s2_fraction": 0.3333333333, "s3_fraction": 0.3333333333},
+  "track_weights": {
+    "s1_fraction": 0.3333333333,
+    "s2_fraction": 0.3333333333,
+    "s3_fraction": 0.3333333333
+  },
   "source_session_codes_included": ["FP3"],
   "source_max_session_end_utc": "2026-03-28T03:30:00+00:00",
   "latest_ended_relevant_session_code": "FP3",

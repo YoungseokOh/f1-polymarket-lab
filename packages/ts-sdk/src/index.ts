@@ -5,6 +5,7 @@ import type {
   BacktestResult,
   CaptureLiveWeekendRequest,
   CaptureLiveWeekendResponse,
+  CurrentWeekendOperationsReadiness,
   DriverAffinityEntry,
   DriverAffinityReport,
   DriverAffinitySegment,
@@ -19,9 +20,11 @@ import type {
   FreshnessRecord,
   GPRegistryItem,
   IngestDemoRequest,
+  IngestionJobRunSummary,
   MarketTaxonomy,
   ModelPrediction,
   ModelRun,
+  OperationReadiness,
   PaperTradePosition,
   PaperTradeSession,
   PolymarketEvent,
@@ -451,6 +454,21 @@ export const sdk = {
     const record = await apiGet<WeekendCockpitStatusApi>(path);
     return mapWeekendCockpitStatus(record);
   },
+  currentWeekendReadiness: async (options?: {
+    gpShortCode?: string;
+    season?: number;
+    meetingKey?: number;
+  }): Promise<CurrentWeekendOperationsReadiness> => {
+    const record = await apiGet<CurrentWeekendOperationsReadinessApi>(
+      "/api/v1/operations/current-weekend-readiness",
+      {
+        gp_short_code: options?.gpShortCode,
+        season: options?.season,
+        meeting_key: options?.meetingKey,
+      },
+    );
+    return mapCurrentWeekendOperationsReadiness(record);
+  },
   runWeekendCockpit: (body?: RunWeekendCockpitRequest) =>
     apiPost<RunWeekendCockpitRequest, RunWeekendCockpitResponseApi>(
       "/api/v1/actions/run-weekend-cockpit",
@@ -739,6 +757,53 @@ type WeekendCockpitStatusApi = {
   explanation: string;
 };
 
+type IngestionJobRunSummaryApi = {
+  id: string;
+  job_name: string;
+  status: string;
+  records_written: number | null;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+};
+
+type OperationReadinessApi = {
+  key: string;
+  label: string;
+  status: string;
+  message: string;
+  blockers: string[];
+  warnings: string[];
+  meeting_key: number | null;
+  meeting_name: string | null;
+  gp_short_code: string | null;
+  session_code: string | null;
+  session_key: number | null;
+  actionable_after_utc: string | null;
+  openf1_credentials_configured: boolean;
+  last_job_run: IngestionJobRunSummaryApi | null;
+  last_report_path: string | null;
+  linked_market_count?: number | null;
+  token_count?: number | null;
+  missing_session_keys?: number[];
+  report_is_fresh?: boolean | null;
+  latest_ended_session_code?: string | null;
+  latest_ended_session_end_utc?: string | null;
+};
+
+type CurrentWeekendOperationsReadinessApi = {
+  now: string;
+  selected_gp_short_code: string;
+  selected_config: GPRegistryItem;
+  meeting: F1MeetingApi | null;
+  latest_ended_session: F1SessionApi | null;
+  next_active_session: F1SessionApi | null;
+  openf1_credentials_configured: boolean;
+  actions: OperationReadinessApi[];
+  blockers: string[];
+  warnings: string[];
+};
+
 type RunWeekendCockpitResponseApi = {
   action: string;
   status: string;
@@ -747,6 +812,10 @@ type RunWeekendCockpitResponseApi = {
   snapshot_id: string | null;
   model_run_id: string | null;
   pt_session_id: string | null;
+  job_run_id: string | null;
+  report_path: string | null;
+  preflight_summary: OperationReadinessApi | null;
+  warnings: string[];
   executed_steps: WeekendCockpitStepApi[];
   details: RunWeekendCockpitDetailsApi | null;
 };
@@ -812,6 +881,9 @@ type CaptureLiveWeekendResponseApi = {
   market_count: number;
   polymarket_market_ids: string[];
   records_written: number;
+  report_path: string | null;
+  preflight_summary: OperationReadinessApi | null;
+  warnings: string[];
   summary: {
     openf1_topics: Array<{
       key: string;
@@ -923,6 +995,10 @@ type RefreshDriverAffinityResponseApi = {
   computed_at_utc: string | null;
   source_max_session_end_utc: string | null;
   hydrated_session_keys: number[];
+  job_run_id: string | null;
+  report_path: string | null;
+  preflight_summary: OperationReadinessApi | null;
+  warnings: string[];
   report: DriverAffinityReportApi | null;
 };
 
@@ -980,6 +1056,71 @@ function mapWeekendCockpitStep(
   };
 }
 
+function mapIngestionJobRunSummary(
+  record: IngestionJobRunSummaryApi,
+): IngestionJobRunSummary {
+  return {
+    id: record.id,
+    jobName: record.job_name,
+    status: record.status,
+    recordsWritten: record.records_written,
+    startedAt: record.started_at,
+    finishedAt: record.finished_at,
+    errorMessage: record.error_message,
+  };
+}
+
+function mapOperationReadiness(
+  record: OperationReadinessApi,
+): OperationReadiness {
+  return {
+    key: record.key,
+    label: record.label,
+    status: record.status,
+    message: record.message,
+    blockers: record.blockers,
+    warnings: record.warnings,
+    meetingKey: record.meeting_key,
+    meetingName: record.meeting_name,
+    gpShortCode: record.gp_short_code,
+    sessionCode: record.session_code,
+    sessionKey: record.session_key,
+    actionableAfterUtc: record.actionable_after_utc,
+    openf1CredentialsConfigured: record.openf1_credentials_configured,
+    lastJobRun: record.last_job_run
+      ? mapIngestionJobRunSummary(record.last_job_run)
+      : null,
+    lastReportPath: record.last_report_path,
+    linkedMarketCount: record.linked_market_count ?? null,
+    tokenCount: record.token_count ?? null,
+    missingSessionKeys: record.missing_session_keys ?? [],
+    reportIsFresh: record.report_is_fresh ?? null,
+    latestEndedSessionCode: record.latest_ended_session_code ?? null,
+    latestEndedSessionEndUtc: record.latest_ended_session_end_utc ?? null,
+  };
+}
+
+function mapCurrentWeekendOperationsReadiness(
+  record: CurrentWeekendOperationsReadinessApi,
+): CurrentWeekendOperationsReadiness {
+  return {
+    now: record.now,
+    selectedGpShortCode: record.selected_gp_short_code,
+    selectedConfig: record.selected_config,
+    meeting: record.meeting ? mapMeeting(record.meeting) : null,
+    latestEndedSession: record.latest_ended_session
+      ? mapSession(record.latest_ended_session)
+      : null,
+    nextActiveSession: record.next_active_session
+      ? mapSession(record.next_active_session)
+      : null,
+    openf1CredentialsConfigured: record.openf1_credentials_configured,
+    actions: record.actions.map(mapOperationReadiness),
+    blockers: record.blockers,
+    warnings: record.warnings,
+  };
+}
+
 function mapWeekendCockpitStatus(
   record: WeekendCockpitStatusApi,
 ): WeekendCockpitStatus {
@@ -1026,6 +1167,16 @@ function mapRunWeekendCockpitResponse(
     snapshotId: record.snapshot_id,
     modelRunId: record.model_run_id,
     ptSessionId: record.pt_session_id,
+    ...(record.job_run_id !== undefined ? { jobRunId: record.job_run_id } : {}),
+    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.preflight_summary !== undefined
+      ? {
+          preflightSummary: record.preflight_summary
+            ? mapOperationReadiness(record.preflight_summary)
+            : null,
+        }
+      : {}),
+    ...(record.warnings !== undefined ? { warnings: record.warnings } : {}),
     executedSteps: record.executed_steps.map(mapWeekendCockpitStep),
     details: record.details
       ? mapRunWeekendCockpitDetails(record.details)
@@ -1115,6 +1266,15 @@ function mapCaptureLiveWeekendResponse(
     marketCount: record.market_count,
     polymarketMarketIds: record.polymarket_market_ids,
     recordsWritten: record.records_written,
+    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.preflight_summary !== undefined
+      ? {
+          preflightSummary: record.preflight_summary
+            ? mapOperationReadiness(record.preflight_summary)
+            : null,
+        }
+      : {}),
+    ...(record.warnings !== undefined ? { warnings: record.warnings } : {}),
     summary: {
       openf1Topics: record.summary.openf1_topics.map((item) => ({
         key: item.key,
@@ -1249,6 +1409,16 @@ function mapRefreshDriverAffinityResponse(
     computedAtUtc: record.computed_at_utc,
     sourceMaxSessionEndUtc: record.source_max_session_end_utc,
     hydratedSessionKeys: record.hydrated_session_keys,
+    ...(record.job_run_id !== undefined ? { jobRunId: record.job_run_id } : {}),
+    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.preflight_summary !== undefined
+      ? {
+          preflightSummary: record.preflight_summary
+            ? mapOperationReadiness(record.preflight_summary)
+            : null,
+        }
+      : {}),
+    ...(record.warnings !== undefined ? { warnings: record.warnings } : {}),
     report: record.report ? mapDriverAffinityReport(record.report) : null,
   };
 }

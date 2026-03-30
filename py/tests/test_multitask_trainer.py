@@ -102,6 +102,9 @@ def test_train_multitask_split_returns_predictions_for_each_head() -> None:
     assert len(result.predictions) == len(test_df)
     assert "brier_score" in result.metrics
     assert "log_loss" in result.metrics
+    assert "realized_pnl_total" in result.metrics
+    assert "roi_pct" in result.metrics
+    assert "family_pnl_share_max" in result.metrics
     assert "family_metrics" in result.metrics
 
 

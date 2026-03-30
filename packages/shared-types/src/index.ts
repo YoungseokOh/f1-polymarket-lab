@@ -274,6 +274,53 @@ export interface CaptureLiveWeekendSummary {
   marketQuotes: CaptureLiveWeekendMarketQuote[];
 }
 
+export interface IngestionJobRunSummary {
+  id: string;
+  jobName: string;
+  status: string;
+  recordsWritten: number | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  errorMessage: string | null;
+}
+
+export interface OperationReadiness {
+  key: string;
+  label: string;
+  status: string;
+  message: string;
+  blockers: string[];
+  warnings: string[];
+  meetingKey: number | null;
+  meetingName: string | null;
+  gpShortCode: string | null;
+  sessionCode: string | null;
+  sessionKey: number | null;
+  actionableAfterUtc: string | null;
+  openf1CredentialsConfigured: boolean;
+  lastJobRun: IngestionJobRunSummary | null;
+  lastReportPath: string | null;
+  linkedMarketCount?: number | null;
+  tokenCount?: number | null;
+  missingSessionKeys?: number[];
+  reportIsFresh?: boolean | null;
+  latestEndedSessionCode?: string | null;
+  latestEndedSessionEndUtc?: string | null;
+}
+
+export interface CurrentWeekendOperationsReadiness {
+  now: string;
+  selectedGpShortCode: string;
+  selectedConfig: GPRegistryItem;
+  meeting: F1Meeting | null;
+  latestEndedSession: F1Session | null;
+  nextActiveSession: F1Session | null;
+  openf1CredentialsConfigured: boolean;
+  actions: OperationReadiness[];
+  blockers: string[];
+  warnings: string[];
+}
+
 export interface CaptureLiveWeekendResponse {
   action: string;
   status: string;
@@ -286,6 +333,9 @@ export interface CaptureLiveWeekendResponse {
   marketCount: number;
   polymarketMarketIds: string[];
   recordsWritten: number;
+  reportPath?: string | null;
+  preflightSummary?: OperationReadiness | null;
+  warnings?: string[];
   summary: CaptureLiveWeekendSummary;
 }
 
@@ -514,6 +564,10 @@ export interface RunWeekendCockpitResponse {
   snapshotId: string | null;
   modelRunId: string | null;
   ptSessionId: string | null;
+  jobRunId?: string | null;
+  reportPath?: string | null;
+  preflightSummary?: OperationReadiness | null;
+  warnings?: string[];
   executedSteps: WeekendCockpitStep[];
   details: RunWeekendCockpitDetails | null;
 }
@@ -533,5 +587,9 @@ export interface RefreshDriverAffinityResponse {
   computedAtUtc: string | null;
   sourceMaxSessionEndUtc: string | null;
   hydratedSessionKeys: number[];
+  jobRunId?: string | null;
+  reportPath?: string | null;
+  preflightSummary?: OperationReadiness | null;
+  warnings?: string[];
   report: DriverAffinityReport | null;
 }

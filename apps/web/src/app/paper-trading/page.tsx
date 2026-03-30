@@ -1,4 +1,5 @@
 import type {
+  CurrentWeekendOperationsReadiness,
   DriverAffinityReport,
   PaperTradePosition,
   PaperTradeSession,
@@ -349,6 +350,11 @@ export default async function PaperTradingPage() {
     null,
     "Weekend cockpit",
   );
+  const readinessState = await loadResource(
+    () => sdk.currentWeekendReadiness(),
+    null as CurrentWeekendOperationsReadiness | null,
+    "Weekend operations readiness",
+  );
   const f1SessionsState = await loadResource(
     () => sdk.sessions({ limit: 250 }),
     [],
@@ -397,6 +403,7 @@ export default async function PaperTradingPage() {
 
   const degradedMessages = collectResourceErrors([
     cockpitState,
+    readinessState,
     f1SessionsState,
     meetingsState,
     paperSessionsState,
@@ -461,11 +468,17 @@ export default async function PaperTradingPage() {
       <section className="grid gap-4 xl:grid-cols-[1.34fr_0.66fr]">
         <WeekendCockpitPanel
           initialStatus={cockpitState.data}
+          initialReadiness={readinessState.data}
           refreshTargetsByGpShortCode={refreshTargetsByGpShortCode}
         />
         <DriverAffinitySummary
           report={affinityReport}
           refreshMessage={affinityRefreshMessage(affinityRefreshState.data)}
+          readiness={
+            readinessState.data?.actions.find(
+              (action) => action.key === "driver_affinity",
+            ) ?? null
+          }
         />
       </section>
 

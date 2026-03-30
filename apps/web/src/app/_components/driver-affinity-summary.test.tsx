@@ -288,10 +288,31 @@ describe("DriverAffinitySummary", () => {
           staleReason: "FP3 has not been hydrated yet.",
         }}
         refreshMessage="Driver affinity needs newer ended session data."
+        readiness={{
+          key: "driver_affinity",
+          label: "Driver affinity refresh",
+          status: "blocked",
+          message:
+            "Driver affinity needs newer ended session data, but OpenF1 credentials are missing.",
+          blockers: [
+            "Driver affinity needs newer ended session data, but OpenF1 credentials are missing.",
+          ],
+          warnings: ["Missing hydration for FP3."],
+          meetingKey: 1281,
+          meetingName: "Japanese Grand Prix",
+          gpShortCode: null,
+          sessionCode: "FP3",
+          sessionKey: 11248,
+          actionableAfterUtc: "2026-03-28T03:30:00Z",
+          openf1CredentialsConfigured: false,
+          lastJobRun: null,
+          lastReportPath: "/tmp/driver-affinity.json",
+        }}
       />,
     );
 
     expect(screen.getByText("Stale")).toBeInTheDocument();
+    expect(screen.getByText("blocked")).toBeInTheDocument();
     expect(
       screen.getByText("FP3 has not been hydrated yet."),
     ).toBeInTheDocument();

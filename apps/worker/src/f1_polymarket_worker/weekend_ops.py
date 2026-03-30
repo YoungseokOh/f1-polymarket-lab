@@ -51,6 +51,7 @@ from f1_polymarket_lab.storage.models import (
 from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy import delete, func, or_, select
 
+from f1_polymarket_worker.driver_affinity import get_driver_affinity_refresh_status
 from f1_polymarket_worker.f1_backfill import (
     _normalize_validation_mode,
     _validation_requires_heavy,
@@ -78,6 +79,12 @@ from f1_polymarket_worker.market_discovery import (
     _ensure_utc,
     _market_session_delta_days,
     discover_session_polymarket,  # noqa: F401
+)
+from f1_polymarket_worker.ops_support import (
+    job_run_summary,
+    latest_job_run_for_name,
+    latest_operation_report_path,
+    write_operation_report,
 )
 from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
 from f1_polymarket_worker.pipeline import (
@@ -214,11 +221,14 @@ def _count_session_rows(ctx: PipelineContext, session: F1Session) -> dict[str, A
         select(F1TelemetryIndex).where(F1TelemetryIndex.session_id == session.id)
     ).all()
     telemetry_by_dataset = Counter(row.dataset_name for row in telemetry_rows)
-    weather_count = ctx.db.scalar(
-        select(func.count())
-        .select_from(F1Weather)
-        .where(F1Weather.meeting_id == session.meeting_id)
-    ) or 0
+    weather_count = (
+        ctx.db.scalar(
+            select(func.count())
+            .select_from(F1Weather)
+            .where(F1Weather.meeting_id == session.meeting_id)
+        )
+        or 0
+    )
     return {
         "session_results": ctx.db.scalar(
             select(func.count())
@@ -700,8 +710,7 @@ def validate_f1_weekend_subset(
 
     q_sq_r_sessions = [session for session in sessions if session.session_code in {"Q", "SQ", "R"}]
     f1_data_ready = all(
-        f1_dataset_counts[str(session.session_key)]["session_results"] > 0
-        for session in sessions
+        f1_dataset_counts[str(session.session_key)]["session_results"] > 0 for session in sessions
     ) and all(
         f1_dataset_counts[str(session.session_key)]["telemetry_total"] > 0
         for session in sessions
@@ -937,8 +946,7 @@ def _primary_action_payload(
         return {
             "primary_action_title": "Update to latest",
             "primary_action_description": (
-                f"This latest update will load {source_name} results first"
-                f"{continuation}"
+                f"This latest update will load {source_name} results first{continuation}"
             ),
             "primary_action_cta": "Update to latest",
         }
@@ -960,11 +968,7 @@ def _primary_action_payload(
             ),
             "primary_action_cta": "Update to latest",
         }
-    rerun_label = (
-        "Update to latest"
-        if latest_paper_session is not None
-        else "Update to latest"
-    )
+    rerun_label = "Update to latest" if latest_paper_session is not None else "Update to latest"
     return {
         "primary_action_title": "Update to latest",
         "primary_action_description": (
@@ -994,13 +998,9 @@ def _meeting_and_sessions_for_config(
     )
     if meeting is None:
         return None, {}
-    sessions = ctx.db.scalars(
-        select(F1Session).where(F1Session.meeting_id == meeting.id)
-    ).all()
+    sessions = ctx.db.scalars(select(F1Session).where(F1Session.meeting_id == meeting.id)).all()
     return meeting, {
-        session.session_code: session
-        for session in sessions
-        if session.session_code is not None
+        session.session_code: session for session in sessions if session.session_code is not None
     }
 
 
@@ -1052,9 +1052,7 @@ def _focus_session_state(
     now: Any,
 ) -> tuple[F1Session | None, str, list[str], str | None]:
     ordered_sessions = [
-        sessions_by_code[code]
-        for code in COCKPIT_TIMELINE_CODES
-        if code in sessions_by_code
+        sessions_by_code[code] for code in COCKPIT_TIMELINE_CODES if code in sessions_by_code
     ]
     completed_codes = [
         session.session_code
@@ -1184,6 +1182,293 @@ def _auto_select_gp_config(ctx: PipelineContext, *, now: Any) -> GPConfig:
         sessions_by_code=sessions_by_code,
         now=now,
     )
+
+
+def _default_config_for_meeting_key(
+    meeting_key: int,
+    *,
+    season: int | None = None,
+) -> GPConfig:
+    configs = [
+        config
+        for config in GP_REGISTRY
+        if config.meeting_key == meeting_key and (season is None or config.season == season)
+    ]
+    if not configs:
+        if season is None:
+            raise ValueError(f"No GP config found for meeting_key={meeting_key}.")
+        raise ValueError(f"No GP config found for meeting_key={meeting_key}, season={season}.")
+    return min(configs, key=lambda config: (config.stage_rank, config.short_code))
+
+
+def _selected_config_for_operations(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str | None = None,
+    season: int | None = None,
+    meeting_key: int | None = None,
+    now: Any,
+) -> GPConfig:
+    if gp_short_code is not None:
+        return get_gp_config(gp_short_code)
+    if meeting_key is not None:
+        return _default_config_for_meeting_key(meeting_key, season=season)
+    auto_config = _auto_select_gp_config(ctx, now=now)
+    if season is not None and auto_config.season != season:
+        season_configs = [config for config in GP_REGISTRY if config.season == season]
+        if not season_configs:
+            raise ValueError(f"No GP config found for season={season}.")
+        return min(season_configs, key=lambda config: (config.stage_rank, config.short_code))
+    return auto_config
+
+
+def _next_active_or_upcoming_session(
+    sessions_by_code: dict[str, F1Session],
+    *,
+    now: Any,
+) -> F1Session | None:
+    ordered_sessions = [
+        session
+        for code in COCKPIT_TIMELINE_CODES
+        if (session := sessions_by_code.get(code)) is not None
+    ]
+    for session in ordered_sessions:
+        if _session_is_live(session, now=now):
+            return session
+    for session in ordered_sessions:
+        if not _session_has_started(session, now=now):
+            return session
+    return None
+
+
+def _weekend_cockpit_action_status(
+    ctx: PipelineContext,
+    *,
+    cockpit_status: dict[str, Any],
+    config: GPConfig,
+) -> dict[str, Any]:
+    meeting = cockpit_status["meeting"]
+    target_session = cockpit_status["target_session"]
+    latest_run = latest_job_run_for_name(ctx.db, job_name="run-weekend-cockpit")
+    latest_report_path = latest_operation_report_path(
+        root=ctx.settings.data_root,
+        season=config.season,
+        meeting_key=config.meeting_key,
+        action="run-weekend-cockpit",
+        job_run_id=None if latest_run is None else latest_run.id,
+    )
+    warnings: list[str] = []
+    latest_paper_session = cockpit_status.get("latest_paper_session")
+    if latest_paper_session is not None:
+        warnings.append(
+            f"Latest paper session {latest_paper_session.id[:8]} already exists for this stage."
+        )
+    status = "ready" if cockpit_status["ready_to_run"] else "blocked"
+    return {
+        "key": "weekend_cockpit",
+        "label": "Weekend cockpit",
+        "status": status,
+        "message": (
+            cockpit_status["primary_action_description"]
+            if status == "ready"
+            else (
+                cockpit_status["blockers"][0]
+                if cockpit_status["blockers"]
+                else "Weekend cockpit is blocked."
+            )
+        ),
+        "blockers": list(cockpit_status["blockers"]),
+        "warnings": warnings,
+        "meeting_key": None if meeting is None else meeting.meeting_key,
+        "meeting_name": None if meeting is None else meeting.meeting_name,
+        "gp_short_code": config.short_code,
+        "session_code": None if target_session is None else target_session.session_code,
+        "session_key": None if target_session is None else target_session.session_key,
+        "actionable_after_utc": next(
+            (
+                step.get("actionable_after_utc")
+                for step in cockpit_status["steps"]
+                if step["status"] == "blocked" and step.get("actionable_after_utc") is not None
+            ),
+            None,
+        ),
+        "openf1_credentials_configured": bool(
+            ctx.settings.openf1_username and ctx.settings.openf1_password
+        ),
+        "last_job_run": job_run_summary(latest_run),
+        "last_report_path": latest_report_path,
+    }
+
+
+def _live_capture_action_status(
+    ctx: PipelineContext,
+    *,
+    config: GPConfig,
+    meeting: F1Meeting | None,
+    target_session: F1Session | None,
+    now: Any,
+) -> dict[str, Any]:
+    latest_run = latest_job_run_for_name(ctx.db, job_name="capture-live-weekend")
+    latest_report_path = latest_operation_report_path(
+        root=ctx.settings.data_root,
+        season=config.season,
+        meeting_key=config.meeting_key,
+        action="capture-live-weekend",
+        job_run_id=None if latest_run is None else latest_run.id,
+    )
+    blockers: list[str] = []
+    warnings: list[str] = []
+    actionable_after_utc = None
+    market_count = 0
+    token_count = 0
+
+    if target_session is None:
+        status = "blocked"
+        message = "Live capture cannot start because the target session is unavailable."
+        blockers.append(message)
+    elif target_session.date_start_utc is None or target_session.date_end_utc is None:
+        status = "blocked"
+        message = "Live capture timing is unavailable for the target session."
+        blockers.append(message)
+    elif not ctx.settings.openf1_username or not ctx.settings.openf1_password:
+        status = "blocked"
+        message = "OpenF1 credentials are required before live capture can run."
+        blockers.append(message)
+    else:
+        live_market_ids = _derive_live_market_ids(
+            ctx,
+            session=target_session,
+            requested_market_ids=None,
+        )
+        market_count = len(live_market_ids)
+        token_count = (
+            int(
+                ctx.db.scalar(
+                    select(func.count())
+                    .select_from(PolymarketToken)
+                    .where(PolymarketToken.market_id.in_(live_market_ids))
+                )
+                or 0
+            )
+            if live_market_ids
+            else 0
+        )
+        if not _session_is_live(target_session, now=now):
+            status = "blocked"
+            if _session_has_started(target_session, now=now):
+                message = (
+                    f"{target_session.session_name} ended at "
+                    f"{_ensure_utc(target_session.date_end_utc).isoformat()}."
+                )
+            else:
+                actionable_after_utc = _ensure_utc(target_session.date_start_utc)
+                message = (
+                    f"{target_session.session_name} live capture becomes available at "
+                    f"{actionable_after_utc.isoformat()}."
+                )
+            blockers.append(message)
+        elif market_count == 0:
+            status = "blocked"
+            message = (
+                f"No linked {target_session.session_code or 'target'} markets are available yet "
+                "for live capture."
+            )
+            blockers.append(message)
+        elif token_count == 0:
+            status = "blocked"
+            message = "Linked live markets do not have Polymarket tokens yet."
+            blockers.append(message)
+        else:
+            status = "ready"
+            message = (
+                f"Ready to capture {target_session.session_name} across {market_count} market(s)."
+            )
+
+    return {
+        "key": "live_capture",
+        "label": "Live capture",
+        "status": status,
+        "message": message,
+        "blockers": blockers,
+        "warnings": warnings,
+        "meeting_key": None if meeting is None else meeting.meeting_key,
+        "meeting_name": None if meeting is None else meeting.meeting_name,
+        "gp_short_code": config.short_code,
+        "session_code": None if target_session is None else target_session.session_code,
+        "session_key": None if target_session is None else target_session.session_key,
+        "actionable_after_utc": actionable_after_utc,
+        "openf1_credentials_configured": bool(
+            ctx.settings.openf1_username and ctx.settings.openf1_password
+        ),
+        "linked_market_count": market_count,
+        "token_count": token_count,
+        "last_job_run": job_run_summary(latest_run),
+        "last_report_path": latest_report_path,
+    }
+
+
+def get_current_weekend_operations_readiness(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str | None = None,
+    season: int | None = None,
+    meeting_key: int | None = None,
+) -> dict[str, Any]:
+    now = _ensure_utc(utc_now())
+    config = _selected_config_for_operations(
+        ctx,
+        gp_short_code=gp_short_code,
+        season=season,
+        meeting_key=meeting_key,
+        now=now,
+    )
+    meeting, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=config)
+    cockpit_status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+    latest_ended_session = (
+        None
+        if meeting is None
+        else _latest_ended_session_for_meeting(ctx, meeting_id=meeting.id, now=now)
+    )
+    next_active_session = _next_active_or_upcoming_session(sessions_by_code, now=now)
+    driver_affinity_status = get_driver_affinity_refresh_status(
+        ctx,
+        season=config.season,
+        meeting_key=config.meeting_key,
+        now=now,
+    )
+    weekend_cockpit_status = _weekend_cockpit_action_status(
+        ctx,
+        cockpit_status=cockpit_status,
+        config=config,
+    )
+    live_capture_status = _live_capture_action_status(
+        ctx,
+        config=config,
+        meeting=meeting,
+        target_session=cockpit_status["target_session"],
+        now=now,
+    )
+    actions = [
+        weekend_cockpit_status,
+        driver_affinity_status,
+        live_capture_status,
+    ]
+    blockers = [action["message"] for action in actions if action["status"] == "blocked"]
+    warnings = [warning for action in actions for warning in action.get("warnings", [])]
+    return {
+        "now": now,
+        "selected_gp_short_code": config.short_code,
+        "selected_config": _config_payload(config),
+        "meeting": meeting,
+        "latest_ended_session": latest_ended_session,
+        "next_active_session": next_active_session,
+        "openf1_credentials_configured": bool(
+            ctx.settings.openf1_username and ctx.settings.openf1_password
+        ),
+        "actions": actions,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
 
 
 def _session_result_count(ctx: PipelineContext, *, session_id: str | None) -> int:
@@ -1602,11 +1887,7 @@ def _refresh_paper_trade_session_summary(
     settled_positions = [position for position in positions if position.status == "settled"]
     open_positions = [position for position in positions if position.status == "open"]
     win_count = len(
-        [
-            position
-            for position in settled_positions
-            if (position.realized_pnl or 0.0) > 0
-        ]
+        [position for position in settled_positions if (position.realized_pnl or 0.0) > 0]
     )
     total_pnl = sum(position.realized_pnl or 0.0 for position in settled_positions)
     existing_summary = dict(paper_session.summary_json or {})
@@ -1616,9 +1897,7 @@ def _refresh_paper_trade_session_summary(
             "settled_positions": len(settled_positions),
             "win_count": win_count,
             "loss_count": len(settled_positions) - win_count,
-            "win_rate": (
-                win_count / len(settled_positions) if settled_positions else None
-            ),
+            "win_rate": (win_count / len(settled_positions) if settled_positions else None),
             "total_pnl": total_pnl,
             "daily_pnl": total_pnl,
         }
@@ -1668,18 +1947,18 @@ def settle_paper_trade_sessions_for_completed_session(
         stage_backed = candidate["gp_config"] is not None
         market_driver_map = _load_snapshot_market_driver_map(ctx, paper_session=paper_session)
         market_ids = sorted(
-            {
-                position.market_id
-                for position in open_positions
-                if position.market_id
-            }
+            {position.market_id for position in open_positions if position.market_id}
         )
-        markets_by_id = {
-            market.id: market
-            for market in ctx.db.scalars(
-                select(PolymarketMarket).where(PolymarketMarket.id.in_(market_ids))
-            ).all()
-        } if market_ids else {}
+        markets_by_id = (
+            {
+                market.id: market
+                for market in ctx.db.scalars(
+                    select(PolymarketMarket).where(PolymarketMarket.id.in_(market_ids))
+                ).all()
+            }
+            if market_ids
+            else {}
+        )
         fee_rate = float((paper_session.config_json or {}).get("fee_rate", 0.02))
 
         resolvable_positions: list[tuple[PaperTradePosition, str]] = []
@@ -1823,8 +2102,7 @@ def get_weekend_cockpit_status(
             label=f"Load {source_name} results",
             status="pending",
             detail=(
-                f"Once the weekend schedule is loaded, {source_name} results "
-                "can be loaded next."
+                f"Once the weekend schedule is loaded, {source_name} results can be loaded next."
             ),
             session_code=selected_config.source_session_code,
             reason_code="waiting_for_calendar",
@@ -1999,8 +2277,7 @@ def get_weekend_cockpit_status(
             label=f"Find {target_name} markets",
             status="pending",
             detail=(
-                f"Once the weekend schedule is loaded, {target_name} markets "
-                "can be searched next."
+                f"Once the weekend schedule is loaded, {target_name} markets can be searched next."
             ),
             session_code=selected_config.target_session_code,
             reason_code="waiting_for_calendar",
@@ -2012,8 +2289,7 @@ def get_weekend_cockpit_status(
             label=f"Find {target_name} markets",
             status="blocked",
             detail=(
-                f"{target_name} session details are unavailable, so market "
-                "discovery cannot start."
+                f"{target_name} session details are unavailable, so market discovery cannot start."
             ),
             session_code=selected_config.target_session_code,
             reason_code="missing_target_session",
@@ -2068,8 +2344,7 @@ def get_weekend_cockpit_status(
             label="Run paper trading",
             status="ready",
             detail=(
-                "All prerequisites are complete. "
-                f"You can run paper trading now. {latest_detail}"
+                f"All prerequisites are complete. You can run paper trading now. {latest_detail}"
             ),
             reason_code="ready_to_run",
             resource_label=run_resource,
@@ -2083,9 +2358,7 @@ def get_weekend_cockpit_status(
             and config.season == selected_config.season
         )
     ]
-    available_configs.sort(
-        key=lambda config: (config["stage_rank"], config["short_code"])
-    )
+    available_configs.sort(key=lambda config: (config["stage_rank"], config["short_code"]))
     primary_action = _primary_action_payload(
         config=selected_config,
         sync_step=sync_step,
@@ -2265,8 +2538,7 @@ def execute_manual_live_paper_trade(
                 "action": "execute-manual-live-paper-trade",
                 "status": "skipped",
                 "message": (
-                    f"Skipped manual paper trade for {market.question}: "
-                    "live spread is unavailable."
+                    f"Skipped manual paper trade for {market.question}: live spread is unavailable."
                 ),
                 "gp_short_code": config.short_code,
                 "market_id": market.id,
@@ -2318,13 +2590,9 @@ def execute_manual_live_paper_trade(
     signal_action = str(signal.get("action") or "skip")
     edge = float(signal.get("edge", 0.0) or 0.0)
     quantity = float(signal["quantity"]) if signal.get("quantity") is not None else None
-    entry_price = (
-        float(signal["entry_price"]) if signal.get("entry_price") is not None else None
-    )
+    entry_price = float(signal["entry_price"]) if signal.get("entry_price") is not None else None
     stake_cost = (
-        quantity * entry_price
-        if quantity is not None and entry_price is not None
-        else None
+        quantity * entry_price if quantity is not None and entry_price is not None else None
     )
     side_label = {"buy_yes": "YES", "buy_no": "NO"}.get(signal_action)
     reason = str(signal.get("reason") or "")
@@ -2419,10 +2687,85 @@ def run_weekend_cockpit(
     discover_max_pages: int = 5,
 ) -> dict[str, Any]:
     status = get_weekend_cockpit_status(ctx, gp_short_code=gp_short_code)
-    if not status["ready_to_run"]:
-        raise ValueError("; ".join(status["blockers"]) or "Weekend cockpit is blocked")
-
     config = get_gp_config(status["selected_gp_short_code"])
+    meeting = status["meeting"]
+    preflight_summary = _weekend_cockpit_action_status(
+        ctx,
+        cockpit_status=status,
+        config=config,
+    )
+    definition = ensure_job_definition(
+        ctx.db,
+        job_name="run-weekend-cockpit",
+        source="hybrid",
+        dataset="weekend_cockpit",
+        description="Run the one-click weekend cockpit orchestration for a GP stage.",
+        schedule_hint="manual",
+    )
+    run = start_job_run(
+        ctx.db,
+        definition=definition,
+        execute=ctx.execute,
+        planned_inputs={
+            "gp_short_code": config.short_code,
+            "baseline": baseline,
+            "min_edge": min_edge,
+            "bet_size": bet_size,
+            "search_fallback": search_fallback,
+            "discover_max_pages": discover_max_pages,
+        },
+    )
+    if not ctx.execute:
+        finish_job_run(ctx.db, run, status="planned", records_written=0)
+        result = {
+            "action": "run-weekend-cockpit",
+            "status": "planned",
+            "message": f"Weekend cockpit planned for {config.name} ({config.short_code}).",
+            "gp_short_code": config.short_code,
+            "snapshot_id": None,
+            "model_run_id": None,
+            "pt_session_id": None,
+            "job_run_id": run.id,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": list(preflight_summary.get("warnings") or []),
+            "executed_steps": [],
+            "details": None,
+        }
+        result["report_path"] = write_operation_report(
+            root=ctx.settings.data_root,
+            season=config.season,
+            meeting_key=config.meeting_key,
+            action="run-weekend-cockpit",
+            payload={**result, "meeting_name": None if meeting is None else meeting.meeting_name},
+            job_run_id=run.id,
+        )
+        return result
+
+    if not status["ready_to_run"]:
+        detail = "; ".join(status["blockers"]) or "Weekend cockpit is blocked"
+        finish_job_run(ctx.db, run, status="failed", records_written=0, error_message=detail)
+        write_operation_report(
+            root=ctx.settings.data_root,
+            season=config.season,
+            meeting_key=config.meeting_key,
+            action="run-weekend-cockpit",
+            payload={
+                "action": "run-weekend-cockpit",
+                "status": "failed",
+                "message": detail,
+                "gp_short_code": config.short_code,
+                "job_run_id": run.id,
+                "preflight_summary": preflight_summary,
+                "warnings": list(preflight_summary.get("warnings") or []),
+                "blockers": list(preflight_summary.get("blockers") or status["blockers"]),
+                "executed_steps": [],
+                "meeting_name": None if meeting is None else meeting.meeting_name,
+            },
+            job_run_id=run.id,
+        )
+        raise ValueError(detail)
+
     executed_steps: list[dict[str, Any]] = []
     settlement_result = {
         "settled_session_ids": [],
@@ -2433,234 +2776,283 @@ def run_weekend_cockpit(
         "unresolved_session_ids": [],
         "winner_driver_id": None,
     }
+    try:
+        sync_step = next(step for step in status["steps"] if step["key"] == "sync_calendar")
+        if sync_step["status"] == "completed":
+            executed_steps.append(
+                _step_payload(
+                    key="sync_calendar",
+                    label="Sync calendar",
+                    status="skipped",
+                    detail="Calendar already loaded.",
+                )
+            )
+        else:
+            sync_result = sync_f1_calendar(ctx, season=config.season)
+            executed_steps.append(
+                _step_payload(
+                    key="sync_calendar",
+                    label="Sync calendar",
+                    status="completed",
+                    detail=f"Calendar sync finished for season {config.season}.",
+                    count=int(sync_result.get("sessions", 0)),
+                )
+            )
+            status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
 
-    sync_step = next(step for step in status["steps"] if step["key"] == "sync_calendar")
-    if sync_step["status"] == "completed":
-        executed_steps.append(
-            _step_payload(
-                key="sync_calendar",
-                label="Sync calendar",
-                status="skipped",
-                detail="Calendar already loaded.",
-            )
-        )
-    else:
-        sync_result = sync_f1_calendar(ctx, season=config.season)
-        executed_steps.append(
-            _step_payload(
-                key="sync_calendar",
-                label="Sync calendar",
-                status="completed",
-                detail=f"Calendar sync finished for season {config.season}.",
-                count=int(sync_result.get("sessions", 0)),
-            )
-        )
-        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
-
-    hydrate_step = next(step for step in status["steps"] if step["key"] == "hydrate_source_session")
-    source_session = status["source_session"]
-    if hydrate_step["status"] == "skipped":
-        executed_steps.append(
-            _step_payload(
-                key="hydrate_source_session",
-                label="Hydrate source session",
-                status="skipped",
-                detail=hydrate_step["detail"],
-            )
-        )
-    elif hydrate_step["status"] == "completed":
-        executed_steps.append(
-            _step_payload(
-                key="hydrate_source_session",
-                label="Hydrate source session",
-                status="skipped",
-                detail=hydrate_step["detail"],
-                session_code=hydrate_step["session_code"],
-                session_key=hydrate_step["session_key"],
-                count=hydrate_step["count"],
-            )
-        )
-    else:
-        if source_session is None:
-            raise ValueError("Source session unavailable after calendar sync")
-        hydrate_result = hydrate_f1_session(
-            ctx,
-            session_key=source_session.session_key,
-            include_extended=True,
-            include_heavy=source_session.session_code in {"Q", "SQ", "R"},
-        )
-        executed_steps.append(
-            _step_payload(
-                key="hydrate_source_session",
-                label="Hydrate source session",
-                status="completed",
-                detail=f"Hydrated {source_session.session_code} session data.",
-                session_code=source_session.session_code,
-                session_key=source_session.session_key,
-                count=int(hydrate_result.get("records_written", 0))
-                if hydrate_result.get("records_written") is not None
-                else None,
-            )
-        )
-        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
         hydrate_step = next(
             step for step in status["steps"] if step["key"] == "hydrate_source_session"
         )
-        if hydrate_step["status"] != "completed":
-            raise ValueError(hydrate_step["detail"])
-
-    settle_step = next(step for step in status["steps"] if step["key"] == "settle_finished_stage")
-    source_session = status["source_session"]
-    if settle_step["status"] == "skipped":
-        executed_steps.append(
-            _step_payload(
-                key="settle_finished_stage",
-                label="Settle finished stage",
-                status="skipped",
-                detail=settle_step["detail"],
-                session_code=settle_step["session_code"],
-                session_key=settle_step["session_key"],
-                count=settle_step["count"],
+        source_session = status["source_session"]
+        if hydrate_step["status"] == "skipped":
+            executed_steps.append(
+                _step_payload(
+                    key="hydrate_source_session",
+                    label="Hydrate source session",
+                    status="skipped",
+                    detail=hydrate_step["detail"],
+                )
             )
-        )
-    else:
-        if source_session is None:
-            raise ValueError("Source session unavailable before settlement")
-        settlement_result = settle_paper_trade_sessions_for_completed_session(
-            ctx,
-            completed_session=source_session,
-            meeting=status["meeting"],
-        )
-        unresolved_positions = int(settlement_result["unresolved_positions"])
-        settlement_detail = (
-            f"Settled {settlement_result['settled_positions']} prior tickets across "
-            f"{len(settlement_result['settled_session_ids'])} runs."
-        )
-        if unresolved_positions:
-            settlement_detail += (
-                f" {unresolved_positions} manual ticket(s) remain open because the "
-                "driver mapping could not be resolved automatically."
+        elif hydrate_step["status"] == "completed":
+            executed_steps.append(
+                _step_payload(
+                    key="hydrate_source_session",
+                    label="Hydrate source session",
+                    status="skipped",
+                    detail=hydrate_step["detail"],
+                    session_code=hydrate_step["session_code"],
+                    session_key=hydrate_step["session_key"],
+                    count=hydrate_step["count"],
+                )
             )
-        executed_steps.append(
-            _step_payload(
-                key="settle_finished_stage",
-                label="Settle finished stage",
-                status="completed",
-                detail=settlement_detail,
-                session_code=source_session.session_code,
+        else:
+            if source_session is None:
+                raise ValueError("Source session unavailable after calendar sync")
+            hydrate_result = hydrate_f1_session(
+                ctx,
                 session_key=source_session.session_key,
-                count=int(settlement_result["settled_positions"]),
+                include_extended=True,
+                include_heavy=source_session.session_code in {"Q", "SQ", "R"},
             )
-        )
-        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+            executed_steps.append(
+                _step_payload(
+                    key="hydrate_source_session",
+                    label="Hydrate source session",
+                    status="completed",
+                    detail=f"Hydrated {source_session.session_code} session data.",
+                    session_code=source_session.session_code,
+                    session_key=source_session.session_key,
+                    count=int(hydrate_result.get("records_written", 0))
+                    if hydrate_result.get("records_written") is not None
+                    else None,
+                )
+            )
+            status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+            hydrate_step = next(
+                step for step in status["steps"] if step["key"] == "hydrate_source_session"
+            )
+            if hydrate_step["status"] != "completed":
+                raise ValueError(hydrate_step["detail"])
+
         settle_step = next(
             step for step in status["steps"] if step["key"] == "settle_finished_stage"
         )
-        if settle_step["status"] == "blocked":
-            raise ValueError(settle_step["detail"])
+        source_session = status["source_session"]
+        if settle_step["status"] == "skipped":
+            executed_steps.append(
+                _step_payload(
+                    key="settle_finished_stage",
+                    label="Settle finished stage",
+                    status="skipped",
+                    detail=settle_step["detail"],
+                    session_code=settle_step["session_code"],
+                    session_key=settle_step["session_key"],
+                    count=settle_step["count"],
+                )
+            )
+        else:
+            if source_session is None:
+                raise ValueError("Source session unavailable before settlement")
+            settlement_result = settle_paper_trade_sessions_for_completed_session(
+                ctx,
+                completed_session=source_session,
+                meeting=status["meeting"],
+            )
+            unresolved_positions = int(settlement_result["unresolved_positions"])
+            settlement_detail = (
+                f"Settled {settlement_result['settled_positions']} prior tickets across "
+                f"{len(settlement_result['settled_session_ids'])} runs."
+            )
+            if unresolved_positions:
+                settlement_detail += (
+                    f" {unresolved_positions} manual ticket(s) remain open because the "
+                    "driver mapping could not be resolved automatically."
+                )
+            executed_steps.append(
+                _step_payload(
+                    key="settle_finished_stage",
+                    label="Settle finished stage",
+                    status="completed",
+                    detail=settlement_detail,
+                    session_code=source_session.session_code,
+                    session_key=source_session.session_key,
+                    count=int(settlement_result["settled_positions"]),
+                )
+            )
+            status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+            settle_step = next(
+                step for step in status["steps"] if step["key"] == "settle_finished_stage"
+            )
+            if settle_step["status"] == "blocked":
+                raise ValueError(settle_step["detail"])
 
-    discover_step = next(
-        step for step in status["steps"] if step["key"] == "discover_target_markets"
-    )
-    target_session = status["target_session"]
-    if discover_step["status"] == "completed":
-        executed_steps.append(
-            _step_payload(
-                key="discover_target_markets",
-                label="Discover target markets",
-                status="skipped",
-                detail=discover_step["detail"],
-                session_code=discover_step["session_code"],
-                session_key=discover_step["session_key"],
-                count=discover_step["count"],
-            )
-        )
-    else:
-        if target_session is None:
-            raise ValueError("Target session unavailable after calendar sync")
-        discovery_result = discover_session_polymarket(
-            ctx,
-            session_key=target_session.session_key,
-            max_pages=discover_max_pages,
-            search_fallback=search_fallback,
-        )
-        executed_steps.append(
-            _step_payload(
-                key="discover_target_markets",
-                label="Discover target markets",
-                status="completed",
-                detail=(
-                    f"Discovered Polymarket markets for {target_session.session_code}."
-                ),
-                session_code=target_session.session_code,
-                session_key=target_session.session_key,
-                count=int(discovery_result.get("auto_mappings", 0))
-                if discovery_result.get("auto_mappings") is not None
-                else None,
-            )
-        )
-        status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
         discover_step = next(
             step for step in status["steps"] if step["key"] == "discover_target_markets"
         )
-        if discover_step["status"] != "completed":
-            raise ValueError(discover_step["detail"])
-
-    if status["blockers"]:
-        raise ValueError("; ".join(status["blockers"]))
-
-    paper_result = run_gp_paper_trade_pipeline(
-        ctx,
-        config=config,
-        baseline=baseline,
-        min_edge=min_edge,
-        bet_size=bet_size,
-    )
-    executed_steps.append(
-        _step_payload(
-            key="run_paper_trade",
-            label="Run paper trade",
-            status="completed",
-            detail=(
-                f"Paper trade complete. Trades: {paper_result['trades_executed']}, "
-                f"PnL: ${paper_result['total_pnl']:.2f}"
-            ),
-            count=int(paper_result["trades_executed"]),
-        )
-    )
-    message = (
-        f"Weekend cockpit complete for {config.name} ({config.short_code}). "
-        f"Trades: {paper_result['trades_executed']}, "
-        f"PnL: ${paper_result['total_pnl']:.2f}"
-    )
-    if settlement_result["settled_positions"]:
-        message += (
-            f" Settled {settlement_result['settled_positions']} prior ticket(s)"
-        )
-        if settlement_result["manual_positions_settled"]:
-            message += (
-                f", including {settlement_result['manual_positions_settled']} manual ticket(s)"
+        target_session = status["target_session"]
+        if discover_step["status"] == "completed":
+            executed_steps.append(
+                _step_payload(
+                    key="discover_target_markets",
+                    label="Discover target markets",
+                    status="skipped",
+                    detail=discover_step["detail"],
+                    session_code=discover_step["session_code"],
+                    session_key=discover_step["session_key"],
+                    count=discover_step["count"],
+                )
             )
-        message += "."
-    if settlement_result["unresolved_positions"]:
-        message += (
-            f" {settlement_result['unresolved_positions']} manual ticket(s) remain open "
-            "because the driver mapping was unresolved."
-        )
-    details = dict(paper_result)
-    details["settlement"] = settlement_result
+        else:
+            if target_session is None:
+                raise ValueError("Target session unavailable after calendar sync")
+            discovery_result = discover_session_polymarket(
+                ctx,
+                session_key=target_session.session_key,
+                max_pages=discover_max_pages,
+                search_fallback=search_fallback,
+            )
+            executed_steps.append(
+                _step_payload(
+                    key="discover_target_markets",
+                    label="Discover target markets",
+                    status="completed",
+                    detail=(f"Discovered Polymarket markets for {target_session.session_code}."),
+                    session_code=target_session.session_code,
+                    session_key=target_session.session_key,
+                    count=int(discovery_result.get("auto_mappings", 0))
+                    if discovery_result.get("auto_mappings") is not None
+                    else None,
+                )
+            )
+            status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
+            discover_step = next(
+                step for step in status["steps"] if step["key"] == "discover_target_markets"
+            )
+            if discover_step["status"] != "completed":
+                raise ValueError(discover_step["detail"])
 
-    return {
-        "action": "run-weekend-cockpit",
-        "status": "ok",
-        "message": message,
-        "gp_short_code": config.short_code,
-        "snapshot_id": paper_result["snapshot_id"],
-        "model_run_id": paper_result["model_run_id"],
-        "pt_session_id": paper_result["pt_session_id"],
-        "executed_steps": executed_steps,
-        "details": details,
-    }
+        if status["blockers"]:
+            raise ValueError("; ".join(status["blockers"]))
+
+        paper_result = run_gp_paper_trade_pipeline(
+            ctx,
+            config=config,
+            baseline=baseline,
+            min_edge=min_edge,
+            bet_size=bet_size,
+        )
+        executed_steps.append(
+            _step_payload(
+                key="run_paper_trade",
+                label="Run paper trade",
+                status="completed",
+                detail=(
+                    f"Paper trade complete. Trades: {paper_result['trades_executed']}, "
+                    f"PnL: ${paper_result['total_pnl']:.2f}"
+                ),
+                count=int(paper_result["trades_executed"]),
+            )
+        )
+        message = (
+            f"Weekend cockpit complete for {config.name} ({config.short_code}). "
+            f"Trades: {paper_result['trades_executed']}, "
+            f"PnL: ${paper_result['total_pnl']:.2f}"
+        )
+        warnings = list(preflight_summary.get("warnings") or [])
+        if settlement_result["settled_positions"]:
+            message += f" Settled {settlement_result['settled_positions']} prior ticket(s)"
+            if settlement_result["manual_positions_settled"]:
+                message += (
+                    f", including {settlement_result['manual_positions_settled']} manual ticket(s)"
+                )
+            message += "."
+        if settlement_result["unresolved_positions"]:
+            warning = (
+                f"{settlement_result['unresolved_positions']} manual ticket(s) remain open "
+                "because the driver mapping was unresolved."
+            )
+            warnings.append(warning)
+            message += f" {warning}"
+        details = dict(paper_result)
+        details["settlement"] = settlement_result
+        finish_job_run(
+            ctx.db,
+            run,
+            status="completed",
+            records_written=int(paper_result.get("trades_executed", 0) or 0),
+        )
+        result = {
+            "action": "run-weekend-cockpit",
+            "status": "ok",
+            "message": message,
+            "gp_short_code": config.short_code,
+            "snapshot_id": paper_result["snapshot_id"],
+            "model_run_id": paper_result["model_run_id"],
+            "pt_session_id": paper_result["pt_session_id"],
+            "job_run_id": run.id,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": warnings,
+            "executed_steps": executed_steps,
+            "details": details,
+        }
+        result["report_path"] = write_operation_report(
+            root=ctx.settings.data_root,
+            season=config.season,
+            meeting_key=config.meeting_key,
+            action="run-weekend-cockpit",
+            payload={**result, "meeting_name": None if meeting is None else meeting.meeting_name},
+            job_run_id=run.id,
+        )
+        return result
+    except Exception as exc:
+        finish_job_run(
+            ctx.db,
+            run,
+            status="failed",
+            records_written=0,
+            error_message=str(exc),
+        )
+        write_operation_report(
+            root=ctx.settings.data_root,
+            season=config.season,
+            meeting_key=config.meeting_key,
+            action="run-weekend-cockpit",
+            payload={
+                "action": "run-weekend-cockpit",
+                "status": "failed",
+                "message": str(exc),
+                "gp_short_code": config.short_code,
+                "job_run_id": run.id,
+                "preflight_summary": preflight_summary,
+                "warnings": list(preflight_summary.get("warnings") or []),
+                "blockers": [str(exc)],
+                "executed_steps": executed_steps,
+                "meeting_name": None if meeting is None else meeting.meeting_name,
+            },
+            job_run_id=run.id,
+        )
+        raise
 
 
 def _latest_ended_session_for_meeting(
@@ -2765,8 +3157,7 @@ def refresh_latest_session_for_meeting(
         "action": "refresh-latest-session",
         "status": "ok",
         "message": (
-            f"Updated latest ended session {session_label} for "
-            f"{refreshed_meeting.meeting_name}."
+            f"Updated latest ended session {session_label} for {refreshed_meeting.meeting_name}."
         ),
         "meeting_id": refreshed_meeting.id,
         "meeting_name": refreshed_meeting.meeting_name,
@@ -2938,20 +3329,14 @@ def _build_live_market_quote(
     condition_id = _normalize_live_text(
         _pick_live_payload_value(item, payload, "market", "condition_id", "conditionId")
     )
-    market_id = (
-        token_to_market_id.get(token_id) if token_id is not None else None
-    ) or (
+    market_id = (token_to_market_id.get(token_id) if token_id is not None else None) or (
         condition_to_market_id.get(condition_id) if condition_id is not None else None
     )
     if market_id is None:
         return None
 
-    best_bid = _normalize_live_float(
-        _pick_live_payload_value(item, payload, "best_bid", "bestBid")
-    )
-    best_ask = _normalize_live_float(
-        _pick_live_payload_value(item, payload, "best_ask", "bestAsk")
-    )
+    best_bid = _normalize_live_float(_pick_live_payload_value(item, payload, "best_bid", "bestBid"))
+    best_ask = _normalize_live_float(_pick_live_payload_value(item, payload, "best_ask", "bestAsk"))
     book_bid = _best_book_price(
         _pick_live_payload_value(item, payload, "bids"),
         side="bid",
@@ -2986,11 +3371,7 @@ def _build_live_market_quote(
     if price is None and best_bid is None and best_ask is None and midpoint is None:
         return None
 
-    spread = (
-        best_ask - best_bid
-        if best_bid is not None and best_ask is not None
-        else None
-    )
+    spread = best_ask - best_bid if best_bid is not None and best_ask is not None else None
     return {
         "market_id": market_id,
         "token_id": token_id,
@@ -3101,6 +3482,14 @@ def capture_live_weekend(
     message_limit: int | None = None,
     capture_seconds: int | None = None,
 ) -> dict[str, Any]:
+    session = ctx.db.scalar(select(F1Session).where(F1Session.session_key == session_key))
+    meeting: F1Meeting | None = None
+    meeting_key_value: int | None = None
+    if session is not None:
+        meeting = None if session.meeting_id is None else ctx.db.get(F1Meeting, session.meeting_id)
+        if meeting is not None:
+            meeting_key_value = meeting.meeting_key
+    season_value = 2026 if meeting is None else meeting.season
     definition = ensure_job_definition(
         ctx.db,
         job_name="capture-live-weekend",
@@ -3124,11 +3513,75 @@ def capture_live_weekend(
             "message_limit": message_limit,
         },
     )
+    if session is not None and meeting is not None:
+        target_config = _selected_config_for_operations(
+            ctx,
+            meeting_key=meeting.meeting_key,
+            season=meeting.season,
+            now=_ensure_utc(utc_now()),
+        )
+        preflight_summary = _live_capture_action_status(
+            ctx,
+            config=target_config,
+            meeting=meeting,
+            target_session=session,
+            now=_ensure_utc(utc_now()),
+        )
+    else:
+        preflight_summary = {
+            "key": "live_capture",
+            "label": "Live capture",
+            "status": "blocked",
+            "message": f"session_key={session_key} not found",
+            "blockers": [f"session_key={session_key} not found"],
+            "warnings": [],
+            "meeting_key": meeting_key_value,
+            "meeting_name": None if meeting is None else meeting.meeting_name,
+            "gp_short_code": None,
+            "session_code": None if session is None else session.session_code,
+            "session_key": session_key,
+            "actionable_after_utc": None,
+            "openf1_credentials_configured": bool(
+                ctx.settings.openf1_username and ctx.settings.openf1_password
+            ),
+            "last_job_run": None,
+            "last_report_path": None,
+        }
     if not ctx.execute:
         finish_job_run(ctx.db, run, status="planned", records_written=0)
-        return {"job_run_id": run.id, "status": "planned", "session_key": session_key}
+        result = {
+            "action": "capture-live-weekend",
+            "job_run_id": run.id,
+            "status": "planned",
+            "message": "Live capture planned.",
+            "session_key": session_key,
+            "capture_seconds": int(capture_seconds or 0),
+            "openf1_messages": 0,
+            "polymarket_messages": 0,
+            "market_count": 0,
+            "polymarket_market_ids": [],
+            "records_written": 0,
+            "report_path": None,
+            "preflight_summary": preflight_summary,
+            "warnings": list(preflight_summary.get("warnings") or []),
+            "summary": {
+                "openf1_topics": [],
+                "polymarket_event_types": [],
+                "observed_market_count": 0,
+                "observed_token_count": 0,
+                "market_quotes": [],
+            },
+        }
+        result["report_path"] = write_operation_report(
+            root=ctx.settings.data_root,
+            season=season_value,
+            meeting_key=meeting_key_value or 0,
+            action="capture-live-weekend",
+            payload={**result, "meeting_name": None if meeting is None else meeting.meeting_name},
+            job_run_id=run.id,
+        )
+        return result
 
-    session = ctx.db.scalar(select(F1Session).where(F1Session.session_key == session_key))
     if session is None:
         finish_job_run(
             ctx.db,
@@ -3136,6 +3589,23 @@ def capture_live_weekend(
             status="failed",
             error_message=f"session_key={session_key} not found",
         )
+        if meeting_key_value is not None:
+            write_operation_report(
+                root=ctx.settings.data_root,
+                season=season_value,
+                meeting_key=meeting_key_value,
+                action="capture-live-weekend",
+                payload={
+                    "action": "capture-live-weekend",
+                    "status": "failed",
+                    "message": f"session_key={session_key} not found",
+                    "job_run_id": run.id,
+                    "preflight_summary": preflight_summary,
+                    "blockers": [f"session_key={session_key} not found"],
+                    "warnings": [],
+                },
+                job_run_id=run.id,
+            )
         raise ValueError(f"session_key={session_key} not found")
     meeting_key = None
     if session.raw_payload is not None and session.raw_payload.get("meeting_key") is not None:
@@ -3158,6 +3628,23 @@ def capture_live_weekend(
                 status="failed",
                 error_message=detail,
             )
+            write_operation_report(
+                root=ctx.settings.data_root,
+                season=season_value,
+                meeting_key=(meeting_key_value or meeting_key or 0),
+                action="capture-live-weekend",
+                payload={
+                    "action": "capture-live-weekend",
+                    "status": "failed",
+                    "message": detail,
+                    "job_run_id": run.id,
+                    "preflight_summary": preflight_summary,
+                    "blockers": [detail],
+                    "warnings": list(preflight_summary.get("warnings") or []),
+                    "meeting_name": None if meeting is None else meeting.meeting_name,
+                },
+                job_run_id=run.id,
+            )
             raise ValueError(detail)
         resolved_capture_seconds = max(float(capture_seconds), 1.0)
     else:
@@ -3171,6 +3658,23 @@ def capture_live_weekend(
             run,
             status="failed",
             error_message="OPENF1_USERNAME and OPENF1_PASSWORD are required for live capture",
+        )
+        write_operation_report(
+            root=ctx.settings.data_root,
+            season=season_value,
+            meeting_key=(meeting_key_value or meeting_key or 0),
+            action="capture-live-weekend",
+            payload={
+                "action": "capture-live-weekend",
+                "status": "failed",
+                "message": "OpenF1 live capture requires OPENF1_USERNAME and OPENF1_PASSWORD",
+                "job_run_id": run.id,
+                "preflight_summary": preflight_summary,
+                "blockers": ["OpenF1 live capture requires OPENF1_USERNAME and OPENF1_PASSWORD"],
+                "warnings": list(preflight_summary.get("warnings") or []),
+                "meeting_name": None if meeting is None else meeting.meeting_name,
+            },
+            job_run_id=run.id,
         )
         raise ValueError("OpenF1 live capture requires OPENF1_USERNAME and OPENF1_PASSWORD")
 
@@ -3222,11 +3726,7 @@ def capture_live_weekend(
         )
         records_written += len(payloads)
     openf1_topic_counts = Counter(
-        {
-            topic: len(payloads)
-            for topic, payloads in openf1_payloads.items()
-            if payloads
-        }
+        {topic: len(payloads) for topic, payloads in openf1_payloads.items() if payloads}
     )
 
     live_market_ids = _derive_live_market_ids(ctx, session=session, requested_market_ids=market_ids)
@@ -3344,7 +3844,8 @@ def capture_live_weekend(
     )
     market_count = len(live_market_ids)
     duration_seconds = int(round(resolved_capture_seconds))
-    return {
+    result = {
+        "action": "capture-live-weekend",
         "job_run_id": run.id,
         "status": "completed",
         "message": (
@@ -3358,14 +3859,25 @@ def capture_live_weekend(
         "market_count": market_count,
         "polymarket_market_ids": live_market_ids,
         "records_written": records_written,
+        "report_path": None,
+        "preflight_summary": preflight_summary,
+        "warnings": list(preflight_summary.get("warnings") or []),
         "summary": {
             "openf1_topics": _sorted_count_rows(openf1_topic_counts),
             "polymarket_event_types": _sorted_count_rows(polymarket_event_type_counts),
             "observed_market_count": len(observed_market_ids),
             "observed_token_count": len(observed_token_ids),
             "market_quotes": [
-                live_market_quotes[market_id]
-                for market_id in sorted(live_market_quotes)
+                live_market_quotes[market_id] for market_id in sorted(live_market_quotes)
             ],
         },
     }
+    result["report_path"] = write_operation_report(
+        root=ctx.settings.data_root,
+        season=season_value,
+        meeting_key=(meeting_key_value or meeting_key or 0),
+        action="capture-live-weekend",
+        payload={**result, "meeting_name": None if meeting is None else meeting.meeting_name},
+        job_run_id=run.id,
+    )
+    return result

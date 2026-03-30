@@ -1,4 +1,7 @@
-import type { DriverAffinityReport } from "@f1/shared-types";
+import type {
+  DriverAffinityReport,
+  OperationReadiness,
+} from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
 import React from "react";
 import { getDriverAffinitySegments } from "../../lib/driver-affinity";
@@ -29,9 +32,11 @@ function statusLabel(report: DriverAffinityReport | null) {
 export function DriverAffinitySummary({
   report,
   refreshMessage,
+  readiness,
 }: {
   report: DriverAffinityReport | null;
   refreshMessage?: string | null;
+  readiness?: OperationReadiness | null;
 }) {
   const segments = report ? getDriverAffinitySegments(report) : [];
   return (
@@ -43,6 +48,31 @@ export function DriverAffinitySummary({
             {report ? formatDateTime(report.computedAtUtc) : "No report yet"}
           </p>
         </div>
+
+        {readiness ? (
+          <div className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <Badge
+                tone={
+                  readiness.status === "ready"
+                    ? "good"
+                    : readiness.status === "blocked"
+                      ? "warn"
+                      : "default"
+                }
+              >
+                {readiness.status}
+              </Badge>
+              <p className="text-xs text-[#9ca3af]">{readiness.message}</p>
+            </div>
+            {readiness.lastJobRun ? (
+              <p className="mt-1 text-[11px] text-[#6b7280]">
+                Last run: {readiness.lastJobRun.status} ·{" "}
+                {formatDateTime(readiness.lastJobRun.finishedAt)}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
 
         {report ? (
           <>

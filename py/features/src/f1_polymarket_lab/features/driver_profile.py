@@ -92,6 +92,26 @@ def compute_driver_sector_profiles(
 ) -> dict[str, dict[str, Any]]:
     """Return per-driver sector strength profiles keyed by canonical identity."""
     session_codes_sql = ", ".join(f"'{c}'" for c in session_codes)
+    conditions = [
+        f"s.session_code IN ({session_codes_sql})",
+        "m.season >= :min_season",
+        "l.sector_1_seconds IS NOT NULL",
+        "l.sector_1_seconds > 5",
+        "l.sector_2_seconds IS NOT NULL",
+        "l.sector_2_seconds > 5",
+        "l.sector_3_seconds IS NOT NULL",
+        "l.sector_3_seconds > 5",
+    ]
+    params: dict[str, Any] = {"min_season": min_season}
+    if season_exact is not None:
+        conditions.append("m.season = :season_exact")
+        params["season_exact"] = season_exact
+    if meeting_key is not None:
+        conditions.append("m.meeting_key = :meeting_key")
+        params["meeting_key"] = meeting_key
+    if as_of_utc is not None:
+        conditions.append("s.date_end_utc <= :as_of_utc")
+        params["as_of_utc"] = as_of_utc
     query = text(f"""
         SELECT l.driver_id,
                s.id AS session_id,
@@ -105,30 +125,12 @@ def compute_driver_sector_profiles(
         FROM f1_laps l
         JOIN f1_sessions s ON s.id = l.session_id
         JOIN f1_meetings m ON m.id = s.meeting_id
-        WHERE s.session_code IN ({session_codes_sql})
-          AND m.season >= :min_season
-          AND (:season_exact IS NULL OR m.season = :season_exact)
-          AND (:meeting_key IS NULL OR m.meeting_key = :meeting_key)
-          AND (:as_of_utc IS NULL OR s.date_end_utc <= :as_of_utc)
-          AND l.sector_1_seconds IS NOT NULL
-          AND l.sector_1_seconds > 5
-          AND l.sector_2_seconds IS NOT NULL
-          AND l.sector_2_seconds > 5
-          AND l.sector_3_seconds IS NOT NULL
-          AND l.sector_3_seconds > 5
+        WHERE {" AND ".join(conditions)}
         GROUP BY l.driver_id, s.id, m.id
         HAVING COUNT(*) >= 2
         ORDER BY s.date_end_utc DESC, s.id
     """)
-    rows = db.execute(
-        query,
-        {
-            "min_season": min_season,
-            "season_exact": season_exact,
-            "meeting_key": meeting_key,
-            "as_of_utc": as_of_utc,
-        },
-    ).fetchall()
+    rows = db.execute(query, params).fetchall()
 
     identity_map = build_driver_identity_map(db)
     session_code_weights = session_code_weights or DEFAULT_AFFINITY_SESSION_WEIGHTS
@@ -233,6 +235,22 @@ def compute_track_sector_weights(
     """Return sector time fractions for a circuit."""
     sector_total = "l.sector_1_seconds + l.sector_2_seconds + l.sector_3_seconds"
     session_codes_sql = ", ".join(f"'{c}'" for c in session_codes)
+    conditions = [
+        f"s.session_code IN ({session_codes_sql})",
+        "m.circuit_short_name = :circuit",
+        "m.season >= :min_season",
+        "l.sector_1_seconds > 5",
+        "l.sector_2_seconds > 5",
+        "l.sector_3_seconds > 5",
+        "l.sector_1_seconds IS NOT NULL",
+    ]
+    params: dict[str, Any] = {
+        "circuit": circuit_short_name,
+        "min_season": min_season,
+    }
+    if as_of_utc is not None:
+        conditions.append("s.date_end_utc <= :as_of_utc")
+        params["as_of_utc"] = as_of_utc
     query = text(f"""
         SELECT
             AVG(l.sector_1_seconds / ({sector_total})) AS s1_frac,
@@ -242,23 +260,9 @@ def compute_track_sector_weights(
         FROM f1_laps l
         JOIN f1_sessions s ON s.id = l.session_id
         JOIN f1_meetings m ON m.id = s.meeting_id
-        WHERE s.session_code IN ({session_codes_sql})
-          AND m.circuit_short_name = :circuit
-          AND m.season >= :min_season
-          AND (:as_of_utc IS NULL OR s.date_end_utc <= :as_of_utc)
-          AND l.sector_1_seconds > 5
-          AND l.sector_2_seconds > 5
-          AND l.sector_3_seconds > 5
-          AND l.sector_1_seconds IS NOT NULL
+        WHERE {" AND ".join(conditions)}
     """)
-    row = db.execute(
-        query,
-        {
-            "circuit": circuit_short_name,
-            "min_season": min_season,
-            "as_of_utc": as_of_utc,
-        },
-    ).fetchone()
+    row = db.execute(query, params).fetchone()
 
     if row is None or row.lap_count < 20 or row.s1_frac is None:
         return {"s1_fraction": 1 / 3, "s2_fraction": 1 / 3, "s3_fraction": 1 / 3}

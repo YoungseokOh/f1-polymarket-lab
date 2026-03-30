@@ -110,6 +110,16 @@ class IngestionJobRunResponse(BaseModel):
     finished_at: datetime | None
 
 
+class IngestionJobRunSummaryResponse(BaseModel):
+    id: str
+    job_name: str
+    status: str
+    records_written: int | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+
+
 class CursorStateResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -328,6 +338,9 @@ class CaptureLiveWeekendResponse(BaseModel):
     market_count: int
     polymarket_market_ids: list[str]
     records_written: int
+    report_path: str | None = None
+    preflight_summary: OperationReadinessResponse | None = None
+    warnings: list[str] = Field(default_factory=list)
     summary: CaptureLiveWeekendSummaryResponse
 
 
@@ -420,6 +433,43 @@ class WeekendCockpitStatusResponse(BaseModel):
     primary_action_description: str
     primary_action_cta: str
     explanation: str
+
+
+class OperationReadinessResponse(BaseModel):
+    key: str
+    label: str
+    status: str
+    message: str
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    meeting_key: int | None = None
+    meeting_name: str | None = None
+    gp_short_code: str | None = None
+    session_code: str | None = None
+    session_key: int | None = None
+    actionable_after_utc: datetime | None = None
+    openf1_credentials_configured: bool
+    last_job_run: IngestionJobRunSummaryResponse | None = None
+    last_report_path: str | None = None
+    linked_market_count: int | None = None
+    token_count: int | None = None
+    missing_session_keys: list[int] = Field(default_factory=list)
+    report_is_fresh: bool | None = None
+    latest_ended_session_code: str | None = None
+    latest_ended_session_end_utc: datetime | None = None
+
+
+class CurrentWeekendOperationsReadinessResponse(BaseModel):
+    now: datetime
+    selected_gp_short_code: str
+    selected_config: GPRegistryItem
+    meeting: F1MeetingResponse | None = None
+    latest_ended_session: F1SessionResponse | None = None
+    next_active_session: F1SessionResponse | None = None
+    openf1_credentials_configured: bool
+    actions: list[OperationReadinessResponse] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
 
 
 class DriverAffinityEntryResponse(BaseModel):
@@ -523,6 +573,10 @@ class RunWeekendCockpitResponse(BaseModel):
     snapshot_id: str | None
     model_run_id: str | None
     pt_session_id: str | None
+    job_run_id: str | None = None
+    report_path: str | None = None
+    preflight_summary: OperationReadinessResponse | None = None
+    warnings: list[str] = Field(default_factory=list)
     executed_steps: list[WeekendCockpitStepResponse]
     details: RunWeekendCockpitDetailsResponse | None = None
 
@@ -542,6 +596,10 @@ class RefreshDriverAffinityResponse(BaseModel):
     computed_at_utc: datetime | None
     source_max_session_end_utc: datetime | None
     hydrated_session_keys: list[int]
+    job_run_id: str | None = None
+    report_path: str | None = None
+    preflight_summary: OperationReadinessResponse | None = None
+    warnings: list[str] = Field(default_factory=list)
     report: DriverAffinityReportResponse | None = None
 
 
