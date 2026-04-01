@@ -18,9 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 from f1_polymarket_lab.common import MarketTaxonomy, ensure_dir, stable_uuid, utc_now
 from f1_polymarket_lab.features.driver_profile import enrich_rows_with_driver_profiles
+from f1_polymarket_lab.models.calibration import serialize_reliability_diagram
 from f1_polymarket_lab.storage.models import (
     DatasetVersionManifest,
     EntityMappingF1ToPolymarket,
@@ -657,15 +659,36 @@ def _match_market_driver(
         if exact is not None:
             return exact
     question_text = f"{market.question} {market.description or ''}".lower()
-    matches = []
+    matches_by_key: dict[str, F1Driver] = {}
     for driver in drivers:
         for value in [driver.full_name, driver.broadcast_name, driver.last_name]:
             if value and value.lower() in question_text:
-                matches.append(driver)
+                dedupe_key = (
+                    str(driver.driver_number)
+                    if driver.driver_number is not None
+                    else _normalize_name(driver.full_name or driver.id)
+                )
+                matches_by_key.setdefault(dedupe_key, driver)
                 break
-    if len(matches) == 1:
-        return matches[0]
+    if len(matches_by_key) == 1:
+        return next(iter(matches_by_key.values()))
     return None
+
+
+def _resolve_driver_with_available_results(
+    *,
+    driver: F1Driver,
+    drivers: list[F1Driver],
+    available_driver_ids: set[str],
+) -> F1Driver:
+    if driver.id in available_driver_ids:
+        return driver
+    if driver.driver_number is None:
+        return driver
+    for candidate in drivers:
+        if candidate.driver_number == driver.driver_number and candidate.id in available_driver_ids:
+            return candidate
+    return driver
 
 
 def _select_entry_price_point(
@@ -994,10 +1017,19 @@ def _evaluate_probability_rows(
         if selected
         else None
     )
+    calibration_buckets = (
+        {}
+        if not labeled_rows
+        else serialize_reliability_diagram(
+            np.array(labels, dtype=float),
+            np.array([float(row[probability_key]) for row in labeled_rows], dtype=float),
+        )
+    )
     return {
         "row_count": len(rows),
         "brier_score": brier,
         "log_loss": log_loss,
+        "calibration_buckets": calibration_buckets,
         "top1_hit": top1_hit,
         "top3_hit": top3_hit,
         "bet_count": len(selected),
@@ -1249,7 +1281,23 @@ def _build_session_to_target_snapshot(
         if q_session else []
     )
 
+    fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
+    fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
+    q_results_by_driver = {r.driver_id: r for r in q_results if r.driver_id is not None}
     results_by_driver = {r.driver_id: r for r in fp1_results if r.driver_id is not None}
+    source_results_by_driver = {
+        "FP1": results_by_driver,
+        "FP2": fp2_results_by_driver,
+        "FP3": fp3_results_by_driver,
+        "Q": q_results_by_driver,
+    }.get(config.source_session_code or "FP1", results_by_driver)
+    all_result_driver_ids = (
+        set(results_by_driver)
+        | set(fp2_results_by_driver)
+        | set(fp3_results_by_driver)
+        | set(q_results_by_driver)
+    )
+    source_result_reason = f"missing_{(config.source_session_code or 'fp1').lower()}_result"
     target_is_practice = config.target_session_code in {"FP1", "FP2", "FP3"}
     winner_driver_id = (
         None
@@ -1270,10 +1318,6 @@ def _build_session_to_target_snapshot(
 
     driver_map = _build_driver_map(drivers)
     team_best_gap = _team_best_gap_to_leader(drivers=drivers, fp1_results=fp1_results)
-
-    fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
-    fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
-    q_results_by_driver = {r.driver_id: r for r in q_results if r.driver_id is not None}
     fp2_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=fp2_results)
         if fp2_results else {}
@@ -1322,10 +1366,16 @@ def _build_session_to_target_snapshot(
         if driver is None:
             exclusion_reasons.increment("missing_driver_match")
             continue
-        fp1_result = results_by_driver.get(driver.id)
-        if fp1_result is None:
-            exclusion_reasons.increment("missing_fp1_result")
+        driver = _resolve_driver_with_available_results(
+            driver=driver,
+            drivers=drivers,
+            available_driver_ids=all_result_driver_ids,
+        )
+        source_result = source_results_by_driver.get(driver.id)
+        if source_result is None:
+            exclusion_reasons.increment(source_result_reason)
             continue
+        fp1_result = results_by_driver.get(driver.id)
         entry = _select_entry_price_point(
             rows=price_history.get(market.id, []),
             window_start=entry_floor,
@@ -1335,8 +1385,8 @@ def _build_session_to_target_snapshot(
             exclusion_reasons.increment(f"missing_pre_{target_code_lower}_price_history")
             continue
 
-        driver_gap = _result_gap_seconds(fp1_result)
-        team_gap = team_best_gap.get(driver.team_id or "")
+        driver_gap = _result_gap_seconds(fp1_result) if fp1_result is not None else None
+        team_gap = team_best_gap.get(driver.team_id or "") if fp1_result is not None else None
         teammate_gap = (
             None if driver_gap is None or team_gap is None else driver_gap - team_gap
         )
@@ -1371,7 +1421,7 @@ def _build_session_to_target_snapshot(
 
         # Best-practice aggregates
         _all_gaps = [g for g in [driver_gap, _fp2_gap, _fp3_gap] if g is not None]
-        _fp1_pos = fp1_result.position
+        _fp1_pos = fp1_result.position if fp1_result is not None else None
         _fp2_pos = _fp2_r.position if _fp2_r is not None else None
         _fp3_pos = _fp3_r.position if _fp3_r is not None else None
         _all_positions = [p for p in [_fp1_pos, _fp2_pos, _fp3_pos] if p is not None]
@@ -1431,14 +1481,22 @@ def _build_session_to_target_snapshot(
                 "entry_spread": _coalesce_spread(entry.best_bid, entry.best_ask),
                 "trade_count_pre_entry": len(pre_entry_trades),
                 "last_trade_age_seconds": last_trade_age_seconds,
-                "fp1_position": fp1_result.position,
-                "fp1_result_time_seconds": fp1_result.result_time_seconds,
+                "fp1_position": _fp1_pos,
+                "fp1_result_time_seconds": (
+                    fp1_result.result_time_seconds if fp1_result is not None else None
+                ),
                 "fp1_gap_to_leader_seconds": driver_gap,
                 "fp1_teammate_gap_seconds": teammate_gap,
                 "fp1_team_best_gap_to_leader_seconds": team_gap,
-                "fp1_lap_count": lap_count_by_driver.counts.get(driver.id, 0),
-                "fp1_stint_count": len(
-                    stint_count_by_driver.distinct_counts.get(driver.id, set())
+                "fp1_lap_count": (
+                    lap_count_by_driver.counts.get(driver.id, 0)
+                    if fp1_result is not None
+                    else None
+                ),
+                "fp1_stint_count": (
+                    len(stint_count_by_driver.distinct_counts.get(driver.id, set()))
+                    if fp1_result is not None
+                    else None
                 ),
                 # FP2 features
                 "fp2_position": _fp2_pos,
@@ -1705,6 +1763,7 @@ def _build_pre_weekend_snapshot(
     for fr in form_results:
         if fr.driver_id is not None:
             form_by_driver[fr.driver_id] = fr
+    form_driver_ids = set(form_by_driver)
 
     q_results = list(
         ctx.db.scalars(
@@ -1728,6 +1787,11 @@ def _build_pre_weekend_snapshot(
         if driver is None:
             exclusion_reasons.increment("missing_driver_match")
             continue
+        driver = _resolve_driver_with_available_results(
+            driver=driver,
+            drivers=drivers,
+            available_driver_ids=form_driver_ids,
+        )
         form_result = form_by_driver.get(driver.id)
         if form_result is None:
             exclusion_reasons.increment("missing_form_result")

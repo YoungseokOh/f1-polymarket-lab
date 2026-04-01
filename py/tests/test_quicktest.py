@@ -454,6 +454,7 @@ def test_run_china_sq_pole_baseline_and_report(
     assert len(model_runs) == 3
     assert len(predictions) == 66
     assert {row.model_name for row in model_runs} == {"market_implied", "fp1_pace", "hybrid"}
+    assert all("calibration_buckets" in (row.metrics_json or {}) for row in model_runs)
 
     report_result = report_china_sq_pole_quicktest(context, snapshot_id=snapshot_id, min_edge=0.05)
     assert report_result["status"] == "completed"
@@ -1387,4 +1388,3 @@ def test_report_japan_fp1_q_pole_quicktest(
     assert report["snapshot_id"] == snapshot_id
     assert report["market_count"] == 22
     assert set(report["baselines"]) == {"market_implied", "fp1_pace", "hybrid"}
-

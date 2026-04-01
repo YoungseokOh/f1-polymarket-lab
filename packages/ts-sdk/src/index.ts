@@ -1,10 +1,14 @@
 import { getWebEnv } from "@f1/config";
 import type {
   ActionStatusResponse,
+  ArtifactRefreshSummary,
   ApiHealth,
+  BackfillBacktestsRequest,
   BacktestResult,
   CaptureLiveWeekendRequest,
   CaptureLiveWeekendResponse,
+  CursorState,
+  DataQualityResult,
   DriverAffinityEntry,
   DriverAffinityReport,
   DriverAffinitySegment,
@@ -19,6 +23,7 @@ import type {
   FreshnessRecord,
   GPRegistryItem,
   IngestDemoRequest,
+  IngestionJobRun,
   MarketTaxonomy,
   ModelPrediction,
   ModelRun,
@@ -145,6 +150,35 @@ type FreshnessApi = {
   records_fetched: number;
 };
 
+type IngestionJobRunApi = {
+  id: string;
+  job_name: string;
+  source: string;
+  dataset: string;
+  status: string;
+  execute_mode: string;
+  records_written: number | null;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type CursorStateApi = {
+  id: string;
+  source: string;
+  dataset: string;
+  cursor_key: string;
+  cursor_value: Record<string, unknown> | null;
+  updated_at: string;
+};
+
+type DataQualityResultApi = {
+  id: string;
+  dataset: string;
+  status: string;
+  metrics_json: Record<string, unknown> | null;
+  observed_at: string;
+};
+
 type F1MeetingApi = {
   id: string;
   meeting_key: number;
@@ -218,6 +252,41 @@ function mapFreshness(record: FreshnessApi): FreshnessRecord {
     status: record.status,
     lastFetchAt: record.last_fetch_at,
     recordsFetched: record.records_fetched,
+  };
+}
+
+function mapIngestionJobRun(record: IngestionJobRunApi): IngestionJobRun {
+  return {
+    id: record.id,
+    jobName: record.job_name,
+    source: record.source,
+    dataset: record.dataset,
+    status: record.status,
+    executeMode: record.execute_mode,
+    recordsWritten: record.records_written,
+    startedAt: record.started_at,
+    finishedAt: record.finished_at,
+  };
+}
+
+function mapCursorState(record: CursorStateApi): CursorState {
+  return {
+    id: record.id,
+    source: record.source,
+    dataset: record.dataset,
+    cursorKey: record.cursor_key,
+    cursorValue: record.cursor_value,
+    updatedAt: record.updated_at,
+  };
+}
+
+function mapDataQualityResult(record: DataQualityResultApi): DataQualityResult {
+  return {
+    id: record.id,
+    dataset: record.dataset,
+    status: record.status,
+    metricsJson: record.metrics_json,
+    observedAt: record.observed_at,
   };
 }
 
@@ -305,6 +374,24 @@ export const sdk = {
         limit: options?.limit,
       })
     ).map(mapFreshness),
+  ingestionJobs: async (options?: ListOptions) =>
+    (
+      await apiGet<IngestionJobRunApi[]>("/api/v1/lineage/jobs", {
+        limit: options?.limit,
+      })
+    ).map(mapIngestionJobRun),
+  cursorStates: async (options?: ListOptions) =>
+    (
+      await apiGet<CursorStateApi[]>("/api/v1/lineage/cursors", {
+        limit: options?.limit,
+      })
+    ).map(mapCursorState),
+  qualityResults: async (options?: ListOptions) =>
+    (
+      await apiGet<DataQualityResultApi[]>("/api/v1/quality/results", {
+        limit: options?.limit,
+      })
+    ).map(mapDataQualityResult),
   meetings: async (options?: MeetingListOptions) =>
     (
       await apiGet<F1MeetingApi[]>("/api/v1/f1/meetings", {
@@ -417,6 +504,11 @@ export const sdk = {
     apiPost<RunBacktestRequest, ActionStatusResponse>(
       "/api/v1/actions/run-backtest",
       body,
+    ),
+  backfillBacktests: (body?: BackfillBacktestsRequest) =>
+    apiPost<BackfillBacktestsRequest, ActionStatusResponse>(
+      "/api/v1/actions/backfill-backtests",
+      body ?? {},
     ),
   syncF1Markets: (body?: SyncF1MarketsRequest) =>
     apiPost<SyncF1MarketsRequest, ActionStatusResponse>(
@@ -785,6 +877,16 @@ type RefreshedSessionSummaryApi = {
   date_end_utc: string | null;
 };
 
+type ArtifactRefreshSummaryApi = {
+  gp_short_code: string;
+  status: string;
+  snapshot_id: string | null;
+  rebuilt_snapshot: boolean;
+  bet_count: number | null;
+  total_pnl: number | null;
+  reason: string | null;
+};
+
 type RefreshLatestSessionResponseApi = {
   action: string;
   status: string;
@@ -796,6 +898,7 @@ type RefreshLatestSessionResponseApi = {
   markets_discovered: number;
   mappings_written: number;
   markets_hydrated: number;
+  artifacts_refreshed: ArtifactRefreshSummaryApi[];
 };
 
 type CaptureLiveWeekendResponseApi = {
@@ -1095,6 +1198,21 @@ function mapRefreshLatestSessionResponse(
     marketsDiscovered: record.markets_discovered,
     mappingsWritten: record.mappings_written,
     marketsHydrated: record.markets_hydrated,
+    artifactsRefreshed: record.artifacts_refreshed.map(mapArtifactRefreshSummary),
+  };
+}
+
+function mapArtifactRefreshSummary(
+  record: ArtifactRefreshSummaryApi,
+): ArtifactRefreshSummary {
+  return {
+    gpShortCode: record.gp_short_code,
+    status: record.status,
+    snapshotId: record.snapshot_id,
+    rebuiltSnapshot: record.rebuilt_snapshot,
+    betCount: record.bet_count,
+    totalPnl: record.total_pnl,
+    reason: record.reason,
   };
 }
 

@@ -20,46 +20,52 @@ if TYPE_CHECKING:
 else:
     try:
         from .lgbm_trainer import LGBMTrainerConfig, train_one_split_lgbm
-    except ModuleNotFoundError as exc:
+    except (ImportError, OSError) as exc:
         _LGBM_IMPORT_ERROR = exc
 
         class LGBMTrainerConfig:  # type: ignore[no-redef]
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "LightGBM support requires the optional 'lightgbm' dependency. "
-                    "Install it with `uv sync --group modeling`."
+                    "Install it with `make bootstrap` or "
+                    "`uv sync --all-packages --group modeling`. "
+                    "On macOS, ensure `libomp` is installed."
                 )
                 raise ImportError(msg) from _LGBM_IMPORT_ERROR
 
         def train_one_split_lgbm(*args: Any, **kwargs: Any) -> Any:
             msg = (
                 "LightGBM support requires the optional 'lightgbm' dependency. "
-                "Install it with `uv sync --group modeling`."
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`. "
+                "On macOS, ensure `libomp` is installed."
             )
             raise ImportError(msg) from _LGBM_IMPORT_ERROR
 
     try:
         from .tuner import tune_xgb
-    except ModuleNotFoundError as exc:
+    except (ImportError, OSError) as exc:
         _TUNER_IMPORT_ERROR = exc
 
         def tune_xgb(*args: Any, **kwargs: Any) -> Any:
             msg = (
                 "Optuna tuning requires the optional 'optuna' dependency. "
-                "Install it with `uv sync --group modeling`."
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`."
             )
             raise ImportError(msg) from _TUNER_IMPORT_ERROR
 
     try:
         from .multitask_model import MultitaskModelConfig, MultitaskTabularModel
-    except ModuleNotFoundError as exc:
+    except (ImportError, OSError) as exc:
         _MULTITASK_IMPORT_ERROR = exc
 
         class MultitaskModelConfig:  # type: ignore[no-redef]
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask modeling requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or "
+                    "`uv sync --all-packages --group modeling`."
                 )
                 raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
 
@@ -67,27 +73,30 @@ else:
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask modeling requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or "
+                    "`uv sync --all-packages --group modeling`."
                 )
                 raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
 
     try:
         from .multitask_trainer import MultitaskTrainerConfig, train_multitask_split
-    except ModuleNotFoundError as exc:
+    except (ImportError, OSError) as exc:
         _MULTITASK_TRAINER_IMPORT_ERROR = exc
 
         class MultitaskTrainerConfig:  # type: ignore[no-redef]
             def __init__(self, *args: Any, **kwargs: Any) -> None:
                 msg = (
                     "Multitask training requires the optional 'torch' dependency. "
-                    "Install it with `uv sync --package f1-polymarket-models`."
+                    "Install it with `make bootstrap` or "
+                    "`uv sync --all-packages --group modeling`."
                 )
                 raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
 
         def train_multitask_split(*args: Any, **kwargs: Any) -> Any:
             msg = (
                 "Multitask training requires the optional 'torch' dependency. "
-                "Install it with `uv sync --package f1-polymarket-models`."
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`."
             )
             raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
 

@@ -10,6 +10,11 @@ make db-upgrade
 make ingest-demo
 ```
 
+`make bootstrap` installs the workspace Python packages plus the optional
+modeling dependencies needed for the full local test suite. On macOS it also
+verifies the `libomp` runtime that LightGBM needs, using Homebrew bottles when
+available and a source-build fallback on older Intel macOS installs.
+
 ## Full Historical Backfill
 
 ```bash
@@ -42,6 +47,16 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli discove
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli hydrate-polymarket-f1-history --execute
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli reconcile-mappings
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
+```
+
+To rebuild labeled snapshots, baseline runs, and settled backtests for the
+matching GP stage after results arrive:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-backtests
+
+# Use this only when you explicitly want to reuse stored snapshots as-is.
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-backtests --stored-only
 ```
 
 ## Weekend Validation

@@ -27,6 +27,12 @@ class ReliabilityBin:
     count: int
 
 
+def _bucket_label(bin_lower: float, bin_upper: float) -> str:
+    lower = int(round(bin_lower * 100))
+    upper = int(round(bin_upper * 100))
+    return f"{lower}-{upper}%"
+
+
 def reliability_diagram(
     y_true: np.ndarray,
     y_prob: np.ndarray,
@@ -54,6 +60,25 @@ def reliability_diagram(
             count=count,
         ))
     return bins
+
+
+def serialize_reliability_diagram(
+    y_true: np.ndarray,
+    y_prob: np.ndarray,
+    n_bins: int = 10,
+) -> dict[str, dict[str, float | int]]:
+    """Return reliability bins in a JSON-serializable shape."""
+    bins = reliability_diagram(y_true, y_prob, n_bins=n_bins)
+    return {
+        _bucket_label(item.bin_lower, item.bin_upper): {
+            "bin_lower": round(item.bin_lower, 6),
+            "bin_upper": round(item.bin_upper, 6),
+            "avg_predicted": round(item.avg_predicted, 6),
+            "avg_actual": round(item.avg_actual, 6),
+            "count": item.count,
+        }
+        for item in bins
+    }
 
 
 def expected_calibration_error(

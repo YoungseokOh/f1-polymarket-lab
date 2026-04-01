@@ -1,5 +1,9 @@
 import { sdk } from "@f1/ts-sdk";
 import { StatCard } from "@f1/ui";
+import {
+  backtestBetCount,
+  backtestPnl,
+} from "../../lib/backtest-metrics";
 import { BacktestActions } from "../_components/backtest-actions";
 import { BacktestTableSection } from "../_components/backtest-table-section";
 
@@ -13,12 +17,12 @@ export default async function BacktestPage() {
 
   const totalBets = backtestResults.reduce((sum, r) => {
     const metrics = r.metricsJson as Record<string, number> | null;
-    return sum + (metrics?.total_bets ?? 0);
+    return sum + (backtestBetCount(metrics) ?? 0);
   }, 0);
 
   const totalPnl = backtestResults.reduce((sum, r) => {
     const metrics = r.metricsJson as Record<string, number> | null;
-    return sum + (metrics?.realized_pnl_total ?? 0);
+    return sum + (backtestPnl(metrics) ?? 0);
   }, 0);
 
   // Build cumulative PnL chart data
@@ -31,8 +35,7 @@ export default async function BacktestPage() {
   const pnlCumulative: number[] = [];
   let running = 0;
   for (const r of backtestResults) {
-    running +=
-      (r.metricsJson as Record<string, number> | null)?.realized_pnl_total ?? 0;
+    running += backtestPnl(r.metricsJson as Record<string, number> | null) ?? 0;
     pnlCumulative.push(running);
   }
 

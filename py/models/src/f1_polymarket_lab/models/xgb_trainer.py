@@ -14,6 +14,8 @@ from typing import Any
 import numpy as np
 import polars as pl
 
+from .calibration import serialize_reliability_diagram
+
 xgb: Any
 try:
     import xgboost as xgb_module
@@ -131,6 +133,7 @@ def _evaluate(
         y_true * np.log(np.clip(y_prob, EPSILON, 1.0))
         + (1 - y_true) * np.log(np.clip(1 - y_prob, EPSILON, 1.0))
     ))
+    calibration_buckets = serialize_reliability_diagram(y_true, y_prob)
     edges = y_prob - prices
     selected = edges >= min_edge
     bet_count = int(np.sum(selected))
@@ -152,6 +155,7 @@ def _evaluate(
         "row_count": n,
         "brier_score": brier,
         "log_loss": log_loss,
+        "calibration_buckets": calibration_buckets,
         "bet_count": bet_count,
         "paper_edge_hit_rate": hit_rate,
         "average_edge": avg_edge,

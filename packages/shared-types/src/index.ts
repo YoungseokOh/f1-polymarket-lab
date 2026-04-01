@@ -32,6 +32,35 @@ export interface FreshnessRecord {
   recordsFetched: number;
 }
 
+export interface IngestionJobRun {
+  id: string;
+  jobName: string;
+  source: string;
+  dataset: string;
+  status: string;
+  executeMode: string;
+  recordsWritten: number | null;
+  startedAt: string;
+  finishedAt: string | null;
+}
+
+export interface CursorState {
+  id: string;
+  source: string;
+  dataset: string;
+  cursorKey: string;
+  cursorValue: Record<string, unknown> | null;
+  updatedAt: string;
+}
+
+export interface DataQualityResult {
+  id: string;
+  dataset: string;
+  status: string;
+  metricsJson: Record<string, unknown> | null;
+  observedAt: string;
+}
+
 export interface F1Meeting {
   id: string;
   meetingKey: number;
@@ -202,6 +231,13 @@ export interface RunBacktestRequest {
   bet_size?: number;
 }
 
+export interface BackfillBacktestsRequest {
+  gp_short_code?: string | null;
+  min_edge?: number;
+  bet_size?: number;
+  rebuild_missing?: boolean;
+}
+
 export interface SyncF1MarketsRequest {
   max_pages?: number;
   search_fallback?: boolean;
@@ -224,6 +260,16 @@ export interface RefreshedSessionSummary {
   dateEndUtc: string | null;
 }
 
+export interface ArtifactRefreshSummary {
+  gpShortCode: string;
+  status: string;
+  snapshotId: string | null;
+  rebuiltSnapshot: boolean;
+  betCount: number | null;
+  totalPnl: number | null;
+  reason: string | null;
+}
+
 export interface RefreshLatestSessionResponse {
   action: string;
   status: string;
@@ -235,6 +281,7 @@ export interface RefreshLatestSessionResponse {
   marketsDiscovered: number;
   mappingsWritten: number;
   marketsHydrated: number;
+  artifactsRefreshed: ArtifactRefreshSummary[];
 }
 
 export interface CaptureLiveWeekendRequest {

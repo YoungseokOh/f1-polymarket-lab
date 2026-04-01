@@ -1,5 +1,7 @@
 import { sdk } from "@f1/ts-sdk";
 import { StatCard } from "@f1/ui";
+
+import { calibrationSummaryFromModelRuns } from "../../lib/calibration";
 import { PredictionsTableSection } from "../_components/predictions-table-section";
 
 export const revalidate = 300;
@@ -12,13 +14,11 @@ export default async function PredictionsPage() {
 
   const uniqueStages = [...new Set(modelRuns.map((r) => r.stage))];
   const uniqueFamilies = [...new Set(modelRuns.map((r) => r.modelFamily))];
-
-  // Build calibration data: predicted vs itself (perfect calibration line)
-  // Real outcomes are unavailable; plot predictions only to avoid
-  // Math.random() SSR hydration mismatches.
-  const calibrationPoints: [number, number][] = predictions
-    .filter((p) => p.probabilityYes != null)
-    .map((p) => [p.probabilityYes, p.probabilityYes] as [number, number]);
+  const calibration = calibrationSummaryFromModelRuns(modelRuns);
+  const calibrationMessage =
+    calibration.points.length > 0
+      ? `${calibration.sampleCount} labeled forecasts bucketed across ${calibration.runCount} model run(s).`
+      : "The current API only exposes forecast probabilities, not joined outcomes, so the dashboard cannot draw a real predicted-vs-actual chart yet.";
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -55,7 +55,8 @@ export default async function PredictionsPage() {
       <PredictionsTableSection
         modelRuns={modelRuns}
         predictions={predictions}
-        calibrationPoints={calibrationPoints}
+        calibrationPoints={calibration.points}
+        calibrationMessage={calibrationMessage}
       />
     </div>
   );

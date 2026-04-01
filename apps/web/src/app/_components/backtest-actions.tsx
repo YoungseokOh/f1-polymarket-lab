@@ -54,6 +54,19 @@ export function BacktestActions() {
             return res.message;
           }}
         />
+        <ActionButton
+          label="Backfill Latest"
+          variant="secondary"
+          onAction={async () => {
+            if (!selected) throw new Error("Select a GP first");
+            const res = await sdk.backfillBacktests({
+              gp_short_code: selected,
+              rebuild_missing: true,
+            });
+            router.refresh();
+            return res.message;
+          }}
+        />
       </div>
     </Panel>
   );

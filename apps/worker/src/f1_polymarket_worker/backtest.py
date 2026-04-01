@@ -23,6 +23,8 @@ from f1_polymarket_lab.storage.models import (
     BacktestPosition,
     BacktestResult,
     F1Meeting,
+    F1Session,
+    F1SessionResult,
     FeatureSnapshot,
     PolymarketMarket,
     PolymarketResolution,
@@ -935,4 +937,240 @@ def settle_single_gp(
         "season": season,
         "resolution": res,
         "backtest": settle,
+    }
+
+
+def _snapshot_label_counts(snapshot: FeatureSnapshot) -> tuple[int, int]:
+    if snapshot.storage_path is None:
+        return 0, 0
+
+    path = Path(snapshot.storage_path)
+    if not path.exists():
+        return 0, 0
+
+    try:
+        labels = pl.read_parquet(path)
+    except Exception:
+        return 0, 0
+
+    if "label_yes" not in labels.columns:
+        return labels.height, 0
+
+    non_null = labels.get_column("label_yes").drop_nulls().len()
+    return labels.height, int(non_null)
+
+
+def _snapshot_meeting_identity(
+    ctx: PipelineContext,
+    snapshot: FeatureSnapshot,
+) -> tuple[int | None, int | None]:
+    if snapshot.session_id:
+        session = ctx.db.get(F1Session, snapshot.session_id)
+        if session is not None and session.meeting_id is not None:
+            meeting = ctx.db.get(F1Meeting, session.meeting_id)
+            if meeting is not None:
+                return int(meeting.meeting_key), int(meeting.season)
+
+    if snapshot.storage_path is None:
+        return None, None
+
+    path = Path(snapshot.storage_path)
+    if not path.exists():
+        return None, None
+
+    try:
+        probe = pl.read_parquet(path, columns=["meeting_key"], n_rows=1)
+    except Exception:
+        return None, None
+    if probe.height == 0 or "meeting_key" not in probe.columns:
+        return None, None
+
+    meeting_key = probe.item(0, "meeting_key")
+    if meeting_key is None:
+        return None, None
+
+    meeting = ctx.db.scalar(select(F1Meeting).where(F1Meeting.meeting_key == int(meeting_key)))
+    if meeting is None:
+        return int(meeting_key), None
+    return int(meeting.meeting_key), int(meeting.season)
+
+
+def _latest_snapshot_for_config(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int,
+    season: int,
+    snapshot_type: str,
+) -> FeatureSnapshot | None:
+    snapshots = ctx.db.scalars(
+        select(FeatureSnapshot)
+        .where(FeatureSnapshot.snapshot_type == snapshot_type)
+        .order_by(FeatureSnapshot.as_of_ts.desc())
+    ).all()
+
+    for snapshot in snapshots:
+        snapshot_meeting_key, snapshot_season = _snapshot_meeting_identity(ctx, snapshot)
+        if snapshot_meeting_key != meeting_key:
+            continue
+        if snapshot_season is not None and snapshot_season != season:
+            continue
+        return snapshot
+    return None
+
+
+def _target_session_result_count(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int,
+    season: int,
+    session_code: str,
+) -> int:
+    meeting = ctx.db.scalar(
+        select(F1Meeting).where(
+            F1Meeting.meeting_key == meeting_key,
+            F1Meeting.season == season,
+        )
+    )
+    if meeting is None:
+        return 0
+
+    target_session = ctx.db.scalar(
+        select(F1Session).where(
+            F1Session.meeting_id == meeting.id,
+            F1Session.session_code == session_code,
+        )
+    )
+    if target_session is None:
+        return 0
+
+    return int(
+        ctx.db.scalar(
+            select(func.count())
+            .select_from(F1SessionResult)
+            .where(F1SessionResult.session_id == target_session.id)
+        )
+        or 0
+    )
+
+
+def backfill_backtests(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str | None = None,
+    min_edge: float = DEFAULT_MIN_EDGE,
+    bet_size: float = DEFAULT_BET_SIZE,
+    rebuild_missing: bool = True,
+) -> dict[str, Any]:
+    from f1_polymarket_worker.gp_registry import (
+        GP_REGISTRY,
+        build_snapshot,
+        get_gp_config,
+        resolve_baseline_name,
+        run_baseline,
+    )
+
+    configs = [get_gp_config(gp_short_code)] if gp_short_code else list(GP_REGISTRY)
+    processed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    for config in configs:
+        target_result_count = _target_session_result_count(
+            ctx,
+            meeting_key=config.meeting_key,
+            season=config.season,
+            session_code=config.target_session_code,
+        )
+        snapshot = _latest_snapshot_for_config(
+            ctx,
+            meeting_key=config.meeting_key,
+            season=config.season,
+            snapshot_type=config.snapshot_type,
+        )
+        built_snapshot_id: str | None = None
+
+        if snapshot is None and rebuild_missing and target_result_count > 0:
+            snapshot_result = build_snapshot(ctx, config)
+            built_snapshot_id = str(snapshot_result.get("snapshot_id") or "")
+            if built_snapshot_id:
+                snapshot = ctx.db.get(FeatureSnapshot, built_snapshot_id)
+
+        if snapshot is None:
+            skipped.append(
+                {
+                    "gp_short_code": config.short_code,
+                    "reason": (
+                        "target_results_unavailable"
+                        if target_result_count == 0
+                        else "snapshot_missing"
+                    ),
+                    "target_result_count": target_result_count,
+                }
+            )
+            continue
+
+        row_count, labeled_count = _snapshot_label_counts(snapshot)
+        if (
+            labeled_count == 0
+            and rebuild_missing
+            and built_snapshot_id is None
+            and target_result_count > 0
+        ):
+            snapshot_result = build_snapshot(ctx, config)
+            rebuilt_snapshot_id = str(snapshot_result.get("snapshot_id") or "")
+            if rebuilt_snapshot_id:
+                rebuilt_snapshot = ctx.db.get(FeatureSnapshot, rebuilt_snapshot_id)
+                if rebuilt_snapshot is not None:
+                    snapshot = rebuilt_snapshot
+                    built_snapshot_id = rebuilt_snapshot_id
+                    row_count, labeled_count = _snapshot_label_counts(snapshot)
+
+        if labeled_count == 0:
+            skipped.append(
+                {
+                    "gp_short_code": config.short_code,
+                    "snapshot_id": snapshot.id,
+                    "reason": (
+                        "target_results_unavailable"
+                        if target_result_count == 0
+                        else "labels_unavailable"
+                    ),
+                    "row_count": row_count,
+                    "target_result_count": target_result_count,
+                }
+            )
+            continue
+
+        run_baseline(ctx, config, snapshot_id=snapshot.id, min_edge=min_edge)
+        model_name = resolve_baseline_name(config, "hybrid")
+        settle_result = settle_single_gp(
+            ctx,
+            meeting_key=config.meeting_key,
+            season=config.season,
+            snapshot_id=snapshot.id,
+            model_name=model_name,
+            min_edge=min_edge,
+            bet_size=bet_size,
+        )
+        metrics = settle_result.get("backtest", {}).get("metrics", {})
+        processed.append(
+            {
+                "gp_short_code": config.short_code,
+                "snapshot_id": snapshot.id,
+                "model_name": model_name,
+                "row_count": row_count,
+                "labeled_row_count": labeled_count,
+                "rebuilt_snapshot": built_snapshot_id is not None,
+                "bet_count": int(metrics.get("bet_count", 0) or 0),
+                "total_pnl": float(metrics.get("total_pnl", 0.0) or 0.0),
+                "backtest_run_id": settle_result.get("backtest", {}).get("backtest_run_id"),
+            }
+        )
+
+    return {
+        "status": "completed",
+        "gp_short_code": gp_short_code,
+        "processed": processed,
+        "skipped": skipped,
+        "processed_count": len(processed),
+        "skipped_count": len(skipped),
     }

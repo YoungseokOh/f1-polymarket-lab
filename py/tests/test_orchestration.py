@@ -3041,6 +3041,100 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
         session.close()
 
 
+def test_refresh_latest_session_for_meeting_refreshes_matching_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting:1281",
+            meeting_key=1281,
+            season=2026,
+            meeting_name="Japanese Grand Prix",
+        )
+        fp1_session = F1Session(
+            id="session:11246",
+            session_key=11246,
+            meeting_id=meeting.id,
+            session_name="Practice 1",
+            session_type="Practice",
+            session_code="FP1",
+            date_start_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 27, 3, 30, tzinfo=timezone.utc),
+            is_practice=True,
+        )
+        q_session = F1Session(
+            id="session:11249",
+            session_key=11249,
+            meeting_id=meeting.id,
+            session_name="Qualifying",
+            session_type="Qualifying",
+            session_code="Q",
+            date_start_utc=datetime(2026, 3, 28, 6, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 28, 7, 0, tzinfo=timezone.utc),
+            is_practice=False,
+        )
+        session.add_all([meeting, fp1_session, q_session])
+        session.commit()
+
+        refreshed_configs: list[str] = []
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.sync_f1_calendar",
+            lambda *_args, **_kwargs: {"status": "completed"},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.hydrate_f1_session",
+            lambda *_args, **_kwargs: {"records_written": 4},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.discover_session_polymarket",
+            lambda *_args, **_kwargs: {"markets": 0},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.reconcile_mappings",
+            lambda *_args, **_kwargs: {"mapping_rows": 0},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.backfill_backtests",
+            lambda _ctx, *, gp_short_code, **_kwargs: refreshed_configs.append(gp_short_code)
+            or {
+                "processed": [
+                    {
+                        "gp_short_code": gp_short_code,
+                        "snapshot_id": f"snapshot:{gp_short_code}",
+                        "rebuilt_snapshot": True,
+                        "bet_count": 1,
+                        "total_pnl": 2.5,
+                    }
+                ],
+                "skipped": [],
+            },
+        )
+
+        result = refresh_latest_session_for_meeting(
+            context,
+            meeting_id=meeting.id,
+            hydrate_market_history=False,
+        )
+
+        assert set(refreshed_configs) == {
+            "japan_pre",
+            "japan_fp1",
+            "japan_fp2_q",
+            "japan_fp3",
+        }
+        assert len(result["artifacts_refreshed"]) == 4
+        assert all(item["status"] == "processed" for item in result["artifacts_refreshed"])
+    finally:
+        session.close()
+
+
 def test_run_weekend_cockpit_hydrates_settles_and_runs_q_to_race_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

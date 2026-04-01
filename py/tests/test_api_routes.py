@@ -441,6 +441,44 @@ def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
     assert "FP1 ends at 2026-03-27T03:30:00+00:00" in response.text
 
 
+def test_backfill_backtests_endpoint_serializes_worker_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.backtest.backfill_backtests",
+        lambda *args, **kwargs: {
+            "status": "completed",
+            "gp_short_code": "japan_fp3",
+            "processed": [
+                {
+                    "gp_short_code": "japan_fp3",
+                    "snapshot_id": "snapshot-1",
+                    "bet_count": 1,
+                    "total_pnl": 9.6,
+                }
+            ],
+            "skipped": [],
+            "processed_count": 1,
+            "skipped_count": 0,
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/backfill-backtests",
+            json={"gp_short_code": "japan_fp3"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "backfill-backtests"
+    assert payload["details"]["processed_count"] == 1
+    assert "Settled 1 snapshot" in payload["message"]
+
+
 def test_refresh_latest_session_endpoint_serializes_worker_result(
     tmp_path: Path,
     monkeypatch,
@@ -450,7 +488,10 @@ def test_refresh_latest_session_endpoint_serializes_worker_result(
         lambda *args, **kwargs: {
             "action": "refresh-latest-session",
             "status": "ok",
-            "message": "Updated latest ended session Q for Japanese Grand Prix.",
+            "message": (
+                "Updated latest ended session Q for Japanese Grand Prix. "
+                "Artifacts refreshed: 1, skipped: 0."
+            ),
             "meeting_id": "meeting:1281",
             "meeting_name": "Japanese Grand Prix",
             "refreshed_session": {
@@ -464,6 +505,17 @@ def test_refresh_latest_session_endpoint_serializes_worker_result(
             "markets_discovered": 3,
             "mappings_written": 1,
             "markets_hydrated": 2,
+            "artifacts_refreshed": [
+                {
+                    "gp_short_code": "japan_fp3",
+                    "status": "processed",
+                    "snapshot_id": "snapshot:fp3",
+                    "rebuilt_snapshot": True,
+                    "bet_count": 1,
+                    "total_pnl": 9.6,
+                    "reason": None,
+                }
+            ],
         },
     )
 
@@ -480,6 +532,7 @@ def test_refresh_latest_session_endpoint_serializes_worker_result(
     assert payload["meeting_id"] == "meeting:1281"
     assert payload["refreshed_session"]["session_code"] == "Q"
     assert payload["markets_hydrated"] == 2
+    assert payload["artifacts_refreshed"][0]["gp_short_code"] == "japan_fp3"
 
 
 def test_refresh_latest_session_endpoint_returns_404_for_missing_meeting(

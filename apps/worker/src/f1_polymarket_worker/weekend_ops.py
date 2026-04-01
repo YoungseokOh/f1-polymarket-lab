@@ -2697,6 +2697,57 @@ def _linked_market_ids_for_session(
     }
 
 
+def _refresh_artifacts_for_session(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int,
+    session_code: str | None,
+) -> list[dict[str, Any]]:
+    if session_code is None:
+        return []
+
+    from f1_polymarket_worker.backtest import backfill_backtests
+
+    updates: list[dict[str, Any]] = []
+    for config in GP_REGISTRY:
+        if config.meeting_key != meeting_key:
+            continue
+        if config.target_session_code != session_code:
+            continue
+
+        result = backfill_backtests(
+            ctx,
+            gp_short_code=config.short_code,
+            rebuild_missing=True,
+        )
+        for item in result.get("processed", []):
+            updates.append(
+                {
+                    "gp_short_code": item["gp_short_code"],
+                    "status": "processed",
+                    "snapshot_id": item.get("snapshot_id"),
+                    "rebuilt_snapshot": bool(item.get("rebuilt_snapshot", False)),
+                    "bet_count": item.get("bet_count"),
+                    "total_pnl": item.get("total_pnl"),
+                    "reason": None,
+                }
+            )
+        for item in result.get("skipped", []):
+            updates.append(
+                {
+                    "gp_short_code": item["gp_short_code"],
+                    "status": "skipped",
+                    "snapshot_id": item.get("snapshot_id"),
+                    "rebuilt_snapshot": False,
+                    "bet_count": None,
+                    "total_pnl": None,
+                    "reason": item.get("reason"),
+                }
+            )
+
+    return updates
+
+
 def refresh_latest_session_for_meeting(
     ctx: PipelineContext,
     *,
@@ -2761,12 +2812,20 @@ def refresh_latest_session_for_meeting(
             markets_hydrated += 1
 
     session_label = refreshed_session.session_code or refreshed_session.session_name
+    artifact_updates = _refresh_artifacts_for_session(
+        ctx,
+        meeting_key=refreshed_meeting.meeting_key,
+        session_code=refreshed_session.session_code,
+    )
+    processed_artifacts = sum(1 for item in artifact_updates if item["status"] == "processed")
+    skipped_artifacts = sum(1 for item in artifact_updates if item["status"] == "skipped")
     return {
         "action": "refresh-latest-session",
         "status": "ok",
         "message": (
             f"Updated latest ended session {session_label} for "
-            f"{refreshed_meeting.meeting_name}."
+            f"{refreshed_meeting.meeting_name}. "
+            f"Artifacts refreshed: {processed_artifacts}, skipped: {skipped_artifacts}."
         ),
         "meeting_id": refreshed_meeting.id,
         "meeting_name": refreshed_meeting.meeting_name,
@@ -2781,6 +2840,7 @@ def refresh_latest_session_for_meeting(
         "markets_discovered": int(discover_result.get("markets", 0) or 0),
         "mappings_written": len(linked_market_ids_after - linked_market_ids_before),
         "markets_hydrated": markets_hydrated,
+        "artifacts_refreshed": artifact_updates,
     }
 
 

@@ -5,6 +5,7 @@ import logging
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
+    BackfillBacktestsRequest,
     CaptureLiveWeekendRequest,
     CaptureLiveWeekendResponse,
     ExecuteManualLivePaperTradeRequest,
@@ -146,6 +147,43 @@ def action_run_backtest(
         )
     except Exception as exc:
         log.exception("run-backtest failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@action_router.post("/actions/backfill-backtests", response_model=ActionStatusResponse)
+def action_backfill_backtests(
+    body: BackfillBacktestsRequest,
+    db: Session = Depends(get_db_session),
+) -> ActionStatusResponse:
+    from f1_polymarket_worker.backtest import backfill_backtests
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = backfill_backtests(
+            ctx,
+            gp_short_code=body.gp_short_code,
+            min_edge=body.min_edge,
+            bet_size=body.bet_size,
+            rebuild_missing=body.rebuild_missing,
+        )
+        db.commit()
+        processed = result.get("processed", [])
+        skipped = result.get("skipped", [])
+        total_pnl = sum(float(item.get("total_pnl", 0.0) or 0.0) for item in processed)
+        scope = f" for {body.gp_short_code}" if body.gp_short_code else ""
+        return ActionStatusResponse(
+            action="backfill-backtests",
+            status="ok",
+            message=(
+                f"Backfill complete{scope}. "
+                f"Settled {len(processed)} snapshot(s), skipped {len(skipped)}. "
+                f"PnL: ${total_pnl:.2f}"
+            ),
+            details=result,
+        )
+    except Exception as exc:
+        log.exception("backfill-backtests failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 

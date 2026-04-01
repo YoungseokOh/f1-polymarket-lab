@@ -7,6 +7,7 @@ from f1_polymarket_lab.common import get_settings
 from f1_polymarket_lab.storage.db import Base, build_engine, db_session
 
 from f1_polymarket_worker.backtest import (
+    backfill_backtests,
     collect_resolutions,
     run_walk_forward_backtest,
     save_backtest_report,
@@ -760,6 +761,26 @@ def settle_backtest_command(
             model_name=model_name,
             min_edge=min_edge,
             bet_size=bet_size,
+        )
+    typer.echo(result)
+
+
+@app.command("backfill-backtests")
+def backfill_backtests_command(
+    gp_short_code: str | None = None,
+    min_edge: float = 0.05,
+    bet_size: float = 10.0,
+    rebuild_missing: bool = typer.Option(True, "--rebuild-missing/--stored-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=True)
+        result = backfill_backtests(
+            context,
+            gp_short_code=gp_short_code,
+            min_edge=min_edge,
+            bet_size=bet_size,
+            rebuild_missing=rebuild_missing,
         )
     typer.echo(result)
 

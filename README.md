@@ -15,6 +15,13 @@ make api
 make web
 ```
 
+`make bootstrap` installs the shared workspace packages, base dev tooling, and
+the modeling stack so the full Python test suite, including multitask trainer
+coverage, can run locally. On macOS it also verifies the `libomp` runtime that
+LightGBM needs. Sonoma-or-newer machines use the Homebrew bottle path; older
+Intel macOS installs fall back to a local source build so `lightgbm` imports
+without manual runtime fixes.
+
 Override the demo backfill scope if needed:
 
 ```bash

@@ -71,6 +71,7 @@ describe("MeetingRefreshButton", () => {
       marketsDiscovered: 2,
       mappingsWritten: 1,
       marketsHydrated: 1,
+      artifactsRefreshed: [],
     });
 
     render(

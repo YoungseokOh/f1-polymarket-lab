@@ -2,8 +2,10 @@
 
 import type { ModelPrediction, ModelRun } from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
-import { CalibrationChart } from "./charts/calibration-chart";
+import type { CalibrationPoint } from "../../lib/calibration";
 import { type Column, DataTable } from "./data-table";
+import { CalibrationChart } from "./charts/calibration-chart";
+import { EmptyState } from "./empty-state";
 
 const runColumns: Column<ModelRun>[] = [
   {
@@ -127,10 +129,12 @@ export function PredictionsTableSection({
   modelRuns,
   predictions,
   calibrationPoints,
+  calibrationMessage,
 }: {
   modelRuns: ModelRun[];
   predictions: ModelPrediction[];
-  calibrationPoints: [number, number][];
+  calibrationPoints: CalibrationPoint[];
+  calibrationMessage: string;
 }) {
   return (
     <>
@@ -143,8 +147,18 @@ export function PredictionsTableSection({
           />
         </Panel>
 
-        <Panel title="Calibration" eyebrow="Predicted vs Actual">
-          <CalibrationChart points={calibrationPoints} height={300} />
+        <Panel title="Calibration Status" eyebrow="Outcome calibration">
+          {calibrationPoints.length > 0 ? (
+            <div className="space-y-3">
+              <CalibrationChart points={calibrationPoints} />
+              <p className="text-xs text-[#6b7280]">{calibrationMessage}</p>
+            </div>
+          ) : (
+            <EmptyState
+              title="Outcome-level calibration is not exposed yet."
+              description={calibrationMessage}
+            />
+          )}
         </Panel>
       </div>
 

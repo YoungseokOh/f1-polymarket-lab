@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import polars as pl
 import pytest
 from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.storage.db import Base
@@ -25,6 +26,7 @@ from f1_polymarket_lab.storage.models import (
     F1Session,
     F1SessionResult,
     F1Stint,
+    FeatureSnapshot,
     PolymarketEvent,
     PolymarketMarket,
     PolymarketPriceHistory,
@@ -36,9 +38,11 @@ from f1_polymarket_worker.backtest import (
     _compute_backtest_metrics,
     _get_executable_entry_price,
     _resolve_market_outcome,
+    backfill_backtests,
     collect_resolutions,
     settle_backtest,
 )
+from f1_polymarket_worker.gp_registry import get_gp_config
 from f1_polymarket_worker.pipeline import PipelineContext
 from f1_polymarket_worker.quicktest import (
     _enrich_snapshot_probabilities,
@@ -649,3 +653,182 @@ class TestCalibrationBucketClamp:
         metrics = _compute_backtest_metrics(settled, bet_size=10.0)
         buckets = metrics["calibration_buckets"]
         assert "0-10%" in buckets
+
+
+def _seed_snapshot_for_backfill(
+    session: Session,
+    tmp_path: Path,
+    *,
+    gp_short_code: str,
+    labels: list[int | None],
+    snapshot_id: str | None = None,
+    seed_target_results: bool = False,
+) -> FeatureSnapshot:
+    config = get_gp_config(gp_short_code)
+    meeting = session.get(F1Meeting, f"meeting:{config.meeting_key}") or F1Meeting(
+        id=f"meeting:{config.meeting_key}",
+        meeting_key=config.meeting_key,
+        season=config.season,
+        meeting_name=config.name,
+        raw_payload={},
+    )
+    session_record = session.get(F1Session, f"session:{config.meeting_key}:{config.short_code}") or F1Session(
+        id=f"session:{config.meeting_key}:{config.short_code}",
+        meeting_id=meeting.id,
+        session_key=config.meeting_key,
+        session_name=config.target_session_code,
+        session_code=config.target_session_code,
+        raw_payload={},
+    )
+    session.merge(meeting)
+    session.merge(session_record)
+    if seed_target_results:
+        session.merge(
+            F1SessionResult(
+                id=f"result:{config.short_code}",
+                session_id=session_record.id,
+                driver_id="driver:test",
+                position=1,
+                raw_payload={},
+            )
+        )
+
+    snapshot_name = snapshot_id or f"snapshot-{config.short_code}"
+    snapshot_path = tmp_path / f"{snapshot_name}.parquet"
+    pl.DataFrame(
+        {
+            "meeting_key": [config.meeting_key] * len(labels),
+            "market_id": [f"market-{idx}" for idx in range(len(labels))],
+            "label_yes": labels,
+        }
+    ).write_parquet(snapshot_path)
+
+    snapshot = FeatureSnapshot(
+        id=snapshot_name,
+        session_id=session_record.id,
+        as_of_ts=datetime(2026, 3, 28, 3, 40, tzinfo=timezone.utc),
+        snapshot_type=config.snapshot_type,
+        feature_version="v1",
+        storage_path=str(snapshot_path),
+        row_count=len(labels),
+    )
+    session.add(snapshot)
+    session.commit()
+    return snapshot
+
+
+class TestBackfillBacktests:
+    def test_backfills_labeled_snapshot(self, tmp_path: Path, monkeypatch) -> None:
+        session, ctx = build_context(tmp_path)
+        snapshot = _seed_snapshot_for_backfill(
+            session,
+            tmp_path,
+            gp_short_code="japan_fp3",
+            labels=[1, 0, 0],
+        )
+
+        baseline_calls: list[str] = []
+        settle_calls: list[str] = []
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.gp_registry.run_baseline",
+            lambda *_args, snapshot_id, **_kwargs: baseline_calls.append(snapshot_id) or {},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.settle_single_gp",
+            lambda *_args, snapshot_id, **_kwargs: settle_calls.append(snapshot_id)
+            or {"backtest": {"backtest_run_id": "bt-1", "metrics": {"bet_count": 2, "total_pnl": 4.5}}},
+        )
+
+        result = backfill_backtests(ctx, gp_short_code="japan_fp3")
+
+        assert result["processed_count"] == 1
+        assert result["skipped_count"] == 0
+        assert baseline_calls == [snapshot.id]
+        assert settle_calls == [snapshot.id]
+        assert result["processed"][0]["labeled_row_count"] == 3
+        assert result["processed"][0]["bet_count"] == 2
+
+    def test_skips_unlabeled_snapshot(self, tmp_path: Path, monkeypatch) -> None:
+        session, ctx = build_context(tmp_path)
+        _seed_snapshot_for_backfill(
+            session,
+            tmp_path,
+            gp_short_code="japan_q_race",
+            labels=[None, None],
+        )
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.gp_registry.run_baseline",
+            lambda *_args, **_kwargs: pytest.fail("run_baseline should not be called"),
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.settle_single_gp",
+            lambda *_args, **_kwargs: pytest.fail("settle_single_gp should not be called"),
+        )
+
+        result = backfill_backtests(ctx, gp_short_code="japan_q_race")
+
+        assert result["processed_count"] == 0
+        assert result["skipped_count"] == 1
+        assert result["skipped"][0]["reason"] == "target_results_unavailable"
+
+    def test_rebuilds_stale_snapshot_when_target_results_exist(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        session, ctx = build_context(tmp_path)
+        stale = _seed_snapshot_for_backfill(
+            session,
+            tmp_path,
+            gp_short_code="japan_q_race",
+            labels=[None, None],
+            snapshot_id="snapshot-stale",
+            seed_target_results=True,
+        )
+        rebuilt = _seed_snapshot_for_backfill(
+            session,
+            tmp_path,
+            gp_short_code="japan_q_race",
+            labels=[1, 0],
+            snapshot_id="snapshot-rebuilt",
+            seed_target_results=True,
+        )
+
+        build_calls: list[str] = []
+        baseline_calls: list[str] = []
+        settle_calls: list[str] = []
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.gp_registry.build_snapshot",
+            lambda _ctx, config, **_kwargs: build_calls.append(config.short_code)
+            or {"snapshot_id": rebuilt.id},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.gp_registry.run_baseline",
+            lambda *_args, snapshot_id, **_kwargs: baseline_calls.append(snapshot_id) or {},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.settle_single_gp",
+            lambda *_args, snapshot_id, **_kwargs: settle_calls.append(snapshot_id)
+            or {
+                "backtest": {
+                    "backtest_run_id": "bt-race",
+                    "metrics": {"bet_count": 1, "total_pnl": 3.25},
+                }
+            },
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest._latest_snapshot_for_config",
+            lambda *_args, **_kwargs: stale,
+        )
+
+        result = backfill_backtests(ctx, gp_short_code="japan_q_race")
+
+        assert result["processed_count"] == 1
+        assert result["skipped_count"] == 0
+        assert build_calls == ["japan_q_race"]
+        assert baseline_calls == [rebuilt.id]
+        assert settle_calls == [rebuilt.id]
+        assert result["processed"][0]["rebuilt_snapshot"] is True

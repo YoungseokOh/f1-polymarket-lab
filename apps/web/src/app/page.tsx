@@ -5,6 +5,7 @@ import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
 
 import { PageStatusBanner } from "../components/page-status-banner";
+import { backtestPnl } from "../lib/backtest-metrics";
 import { collectResourceErrors, loadResource } from "../lib/resource-state";
 import { DashboardActions } from "./_components/dashboard-actions";
 import { SessionTimeline } from "./_components/session-timeline";
@@ -308,7 +309,7 @@ export default async function HomePage() {
             ) : (
               backtestResults.slice(0, 5).map((bt) => {
                 const metrics = bt.metricsJson as Record<string, number> | null;
-                const pnl = metrics?.realized_pnl_total;
+                const pnl = backtestPnl(metrics);
                 return (
                   <div
                     key={bt.id}

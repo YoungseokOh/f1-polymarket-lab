@@ -18,11 +18,14 @@ modeling = [
   "catboost>=1.2.8",
   "lightgbm>=4.6.0",
   "mlflow>=2.20.3",
+  "numpy>=1.26; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "numpy>=1.26,<2; sys_platform == 'darwin' and platform_machine == 'x86_64'",
   "optuna>=4.2.1",
   "pymc>=5.20.1",
   "scikit-learn>=1.6.1",
   "shap>=0.47.1",
-  "torch>=2.6.0",
+  "torch>=2.6.0; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+  "torch>=2.2.0,<2.3.0; sys_platform == 'darwin' and platform_machine == 'x86_64'",
   "xgboost>=2.1.4"
 ]
 

@@ -266,6 +266,16 @@ class RefreshedSessionResponse(BaseModel):
     date_end_utc: datetime | None
 
 
+class ArtifactRefreshResponse(BaseModel):
+    gp_short_code: str
+    status: str
+    snapshot_id: str | None = None
+    rebuilt_snapshot: bool = False
+    bet_count: int | None = None
+    total_pnl: float | None = None
+    reason: str | None = None
+
+
 class RefreshLatestSessionResponse(BaseModel):
     action: str
     status: str
@@ -277,6 +287,7 @@ class RefreshLatestSessionResponse(BaseModel):
     markets_discovered: int
     mappings_written: int
     markets_hydrated: int
+    artifacts_refreshed: list[ArtifactRefreshResponse] = Field(default_factory=list)
 
 
 class CaptureLiveWeekendRequest(BaseModel):
@@ -369,6 +380,13 @@ class RunBacktestRequest(BaseModel):
     gp_short_code: str
     min_edge: float = 0.05
     bet_size: float = 10.0
+
+
+class BackfillBacktestsRequest(BaseModel):
+    gp_short_code: str | None = None
+    min_edge: float = 0.05
+    bet_size: float = 10.0
+    rebuild_missing: bool = True
 
 
 class GPRegistryItem(BaseModel):

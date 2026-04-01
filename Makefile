@@ -11,7 +11,8 @@ bootstrap:
 	corepack prepare pnpm@10.6.3 --activate
 	pnpm install
 	uv lock
-	uv sync --group dev
+	uv sync --all-packages --group dev --group modeling
+	bash scripts/bootstrap/install-libomp.sh
 
 infra-up:
 	docker compose -f $(COMPOSE_FILE) up -d

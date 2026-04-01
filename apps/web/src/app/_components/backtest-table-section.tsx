@@ -2,6 +2,11 @@
 
 import type { BacktestResult, FeatureSnapshot } from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
+import {
+  backtestBetCount,
+  backtestHitRate,
+  backtestPnl,
+} from "../../lib/backtest-metrics";
 import { PnlAreaChart } from "./charts/pnl-area-chart";
 import { type Column, DataTable } from "./data-table";
 
@@ -25,7 +30,7 @@ const btColumns: Column<BacktestResult>[] = [
     header: "PnL",
     render: (r) => {
       const metrics = r.metricsJson as Record<string, number> | null;
-      const pnl = metrics?.realized_pnl_total;
+      const pnl = backtestPnl(metrics);
       if (pnl == null) return <span className="text-xs text-[#6b7280]">—</span>;
       return (
         <span
@@ -35,45 +40,38 @@ const btColumns: Column<BacktestResult>[] = [
         </span>
       );
     },
-    sortValue: (r) =>
-      (r.metricsJson as Record<string, number> | null)?.realized_pnl_total ?? 0,
+    sortValue: (r) => backtestPnl(r.metricsJson as Record<string, number> | null) ?? 0,
   },
   {
     key: "bets",
     header: "Bets",
     render: (r) => {
       const totalBets = (r.metricsJson as Record<string, number> | null)
-        ?.total_bets;
+        ? backtestBetCount(r.metricsJson as Record<string, number> | null)
+        : null;
       return (
         <span className="tabular-nums text-sm text-[#d1d5db]">
           {totalBets ?? "—"}
         </span>
       );
     },
-    sortValue: (r) =>
-      (r.metricsJson as Record<string, number> | null)?.total_bets ?? 0,
+    sortValue: (r) => backtestBetCount(r.metricsJson as Record<string, number> | null) ?? 0,
   },
   {
     key: "winRate",
     header: "Win Rate",
     render: (r) => {
       const metrics = r.metricsJson as Record<string, number> | null;
-      const wins = metrics?.winning_bets;
-      const total = metrics?.total_bets;
-      if (wins == null || !total)
+      const hitRate = backtestHitRate(metrics);
+      if (hitRate == null)
         return <span className="text-xs text-[#6b7280]">—</span>;
       return (
         <span className="tabular-nums text-sm text-[#d1d5db]">
-          {((wins / total) * 100).toFixed(1)}%
+          {(hitRate * 100).toFixed(1)}%
         </span>
       );
     },
-    sortValue: (r) => {
-      const m = r.metricsJson as Record<string, number> | null;
-      return m?.winning_bets && m?.total_bets
-        ? m.winning_bets / m.total_bets
-        : 0;
-    },
+    sortValue: (r) => backtestHitRate(r.metricsJson as Record<string, number> | null) ?? 0,
   },
   {
     key: "created",

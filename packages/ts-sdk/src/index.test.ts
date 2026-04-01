@@ -78,6 +78,101 @@ describe("sdk", () => {
     ]);
   });
 
+  it("maps lineage observability resources", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "job-1",
+            job_name: "sync-calendar",
+            source: "openf1",
+            dataset: "sessions",
+            status: "completed",
+            execute_mode: "execute",
+            records_written: 22,
+            started_at: "2026-03-28T01:00:00Z",
+            finished_at: "2026-03-28T01:01:00Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "cursor-1",
+            source: "polymarket",
+            dataset: "markets",
+            cursor_key: "next_cursor",
+            cursor_value: { page: 3 },
+            updated_at: "2026-03-28T01:02:00Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "dq-1",
+            dataset: "polymarket_ws_message_manifest",
+            status: "fail",
+            metrics_json: { row_count: 0 },
+            observed_at: "2026-03-28T01:03:00Z",
+          },
+        ],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [jobs, cursors, qualityResults] = await Promise.all([
+      sdk.ingestionJobs({ limit: 5 }),
+      sdk.cursorStates({ limit: 10 }),
+      sdk.qualityResults({ limit: 10 }),
+    ]);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/v1/lineage/jobs?limit=5",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/v1/lineage/cursors?limit=10",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "http://127.0.0.1:8000/api/v1/quality/results?limit=10",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(jobs[0]).toEqual(
+      expect.objectContaining({
+        jobName: "sync-calendar",
+        executeMode: "execute",
+        recordsWritten: 22,
+      }),
+    );
+    expect(cursors[0]).toEqual(
+      expect.objectContaining({
+        cursorKey: "next_cursor",
+        cursorValue: { page: 3 },
+      }),
+    );
+    expect(qualityResults[0]).toEqual(
+      expect.objectContaining({
+        dataset: "polymarket_ws_message_manifest",
+        status: "fail",
+        metricsJson: { row_count: 0 },
+      }),
+    );
+  });
+
   it("maps weekend cockpit status payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -234,6 +329,17 @@ describe("sdk", () => {
         markets_discovered: 4,
         mappings_written: 2,
         markets_hydrated: 3,
+        artifacts_refreshed: [
+          {
+            gp_short_code: "japan_fp3",
+            status: "processed",
+            snapshot_id: "snapshot:fp3",
+            rebuilt_snapshot: true,
+            bet_count: 1,
+            total_pnl: 9.6,
+            reason: null,
+          },
+        ],
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -257,6 +363,13 @@ describe("sdk", () => {
         marketsDiscovered: 4,
         mappingsWritten: 2,
         marketsHydrated: 3,
+        artifactsRefreshed: [
+          expect.objectContaining({
+            gpShortCode: "japan_fp3",
+            rebuiltSnapshot: true,
+            totalPnl: 9.6,
+          }),
+        ],
         refreshedSession: expect.objectContaining({
           sessionCode: "Q",
           sessionKey: 11249,
