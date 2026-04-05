@@ -8,6 +8,7 @@ import type {
   IngestionJobRun,
 } from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
+import { describeQualityDataset } from "../../lib/display";
 import { type Column, DataTable } from "./data-table";
 import { StatusIndicator } from "./status-indicator";
 
@@ -68,10 +69,7 @@ const freshnessColumns: Column<FreshnessRecord>[] = [
     key: "status",
     header: "Status",
     render: (r) => (
-        <StatusIndicator
-          status={statusVariant(r.status)}
-          label={r.status}
-      />
+      <StatusIndicator status={statusVariant(r.status)} label={r.status} />
     ),
     sortValue: (r) => r.status,
   },
@@ -218,12 +216,18 @@ const cursorColumns: Column<CursorState>[] = [
 
 const qualityColumns: Column<DataQualityResult>[] = [
   {
-    key: "dataset",
-    header: "Dataset",
-    render: (result) => (
-      <span className="font-medium text-white">{result.dataset}</span>
-    ),
-    sortValue: (result) => result.dataset,
+    key: "check",
+    header: "Check",
+    render: (result) => {
+      const info = describeQualityDataset(result.dataset);
+      return (
+        <div>
+          <p className="font-medium text-white">{info.label}</p>
+          <p className="mt-1 text-xs text-[#9ca3af]">{info.impact}</p>
+        </div>
+      );
+    },
+    sortValue: (result) => describeQualityDataset(result.dataset).label,
   },
   {
     key: "status",
@@ -338,6 +342,15 @@ export function LineageTableSection({
   mappings: EntityMapping[];
   mappedMarkets: number;
 }) {
+  const sortedQualityResults = [...qualityResults].sort((a, b) => {
+    const aFail = a.status !== "pass";
+    const bFail = b.status !== "pass";
+    if (aFail !== bFail) {
+      return aFail ? -1 : 1;
+    }
+    return b.observedAt.localeCompare(a.observedAt);
+  });
+
   return (
     <>
       <Panel title="Data Freshness" eyebrow={`${freshness.length} sources`}>
@@ -372,7 +385,7 @@ export function LineageTableSection({
       >
         <DataTable
           columns={qualityColumns}
-          data={qualityResults}
+          data={sortedQualityResults}
           emptyMessage="No data quality checks recorded."
         />
       </Panel>

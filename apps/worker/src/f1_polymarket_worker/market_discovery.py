@@ -933,6 +933,8 @@ def discover_session_polymarket(
     batch_size: int = 100,
     max_pages: int = 5,
     search_fallback: bool = True,
+    probe_exact_slugs: bool = True,
+    exact_slug_candidate_limit: int | None = None,
 ) -> dict[str, Any]:
     definition = ensure_job_definition(
         ctx.db,
@@ -951,6 +953,8 @@ def discover_session_polymarket(
             "batch_size": batch_size,
             "max_pages": max_pages,
             "search_fallback": search_fallback,
+            "probe_exact_slugs": probe_exact_slugs,
+            "exact_slug_candidate_limit": exact_slug_candidate_limit,
         },
     )
     session = ctx.db.scalar(select(F1Session).where(F1Session.session_key == session_key))
@@ -972,32 +976,36 @@ def discover_session_polymarket(
     discovered_events: dict[str, dict[str, Any]] = {}
     discovery_meta: dict[str, dict[str, Any]] = {}
 
-    for slug_candidate in _session_slug_candidates(session, meeting):
-        payload = connector.list_events(limit=5, slug=slug_candidate)
-        persist_fetch(
-            ctx,
-            job_run_id=run.id,
-            batch=FetchBatch(
-                source="polymarket",
-                dataset="session_event_by_slug",
-                endpoint="/events",
-                params={"slug": slug_candidate, "limit": 5},
-                payload=payload,
-                response_status=200,
-                checkpoint=slug_candidate,
-            ),
-            partition={"session_key": str(session_key), "slug": slug_candidate},
-        )
-        for event in payload:
-            if not _event_looks_f1(event):
-                continue
-            _record_discovered_event(
-                discovered_events,
-                discovery_meta,
-                event=event,
-                source="exact_slug",
-                matched_slug=slug_candidate,
+    if probe_exact_slugs:
+        slug_candidates = _session_slug_candidates(session, meeting)
+        if exact_slug_candidate_limit is not None:
+            slug_candidates = slug_candidates[:exact_slug_candidate_limit]
+        for slug_candidate in slug_candidates:
+            payload = connector.list_events(limit=5, slug=slug_candidate)
+            persist_fetch(
+                ctx,
+                job_run_id=run.id,
+                batch=FetchBatch(
+                    source="polymarket",
+                    dataset="session_event_by_slug",
+                    endpoint="/events",
+                    params={"slug": slug_candidate, "limit": 5},
+                    payload=payload,
+                    response_status=200,
+                    checkpoint=slug_candidate,
+                ),
+                partition={"session_key": str(session_key), "slug": slug_candidate},
             )
+            for event in payload:
+                if not _event_looks_f1(event):
+                    continue
+                _record_discovered_event(
+                    discovered_events,
+                    discovery_meta,
+                    event=event,
+                    source="exact_slug",
+                    matched_slug=slug_candidate,
+                )
 
     for tag_id in DEFAULT_F1_TAG_IDS:
         for offset, batch in connector.iterate_events(

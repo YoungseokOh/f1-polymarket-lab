@@ -3,6 +3,7 @@
 import { sdk } from "@f1/ts-sdk";
 import { Panel } from "@f1/ui";
 import { useRouter } from "next/navigation";
+import { buildDashboardMarketSyncRequest } from "../../lib/action-defaults";
 import { ActionButton } from "./action-button";
 
 export function DashboardActions() {
@@ -23,7 +24,9 @@ export function DashboardActions() {
           label="Sync F1 Markets"
           variant="secondary"
           onAction={async () => {
-            const res = await sdk.syncF1Markets();
+            const res = await sdk.syncF1Markets(
+              buildDashboardMarketSyncRequest(),
+            );
             router.refresh();
             return res.message;
           }}

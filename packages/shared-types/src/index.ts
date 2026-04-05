@@ -250,6 +250,11 @@ export interface RefreshLatestSessionRequest {
   search_fallback?: boolean;
   discover_max_pages?: number;
   hydrate_market_history?: boolean;
+  sync_calendar?: boolean;
+  hydrate_f1_session_data?: boolean;
+  include_extended_f1_data?: boolean;
+  include_heavy_f1_data?: boolean;
+  refresh_artifacts?: boolean;
 }
 
 export interface RefreshedSessionSummary {

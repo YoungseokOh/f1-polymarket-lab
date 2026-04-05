@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,12 +12,14 @@ from f1_polymarket_lab.storage.models import (
     EntityMappingF1ToPolymarket,
     F1Meeting,
     F1Session,
+    FeatureSnapshot,
     PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
 )
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -479,13 +482,73 @@ def test_backfill_backtests_endpoint_serializes_worker_result(
     assert "Settled 1 snapshot" in payload["message"]
 
 
-def test_refresh_latest_session_endpoint_serializes_worker_result(
+def test_run_backtest_endpoint_returns_409_for_missing_polymarket_mappings(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "f1_polymarket_worker.weekend_ops.refresh_latest_session_for_meeting",
-        lambda *args, **kwargs: {
+        "f1_polymarket_worker.gp_registry.build_snapshot",
+        lambda *args, **kwargs: {"snapshot_id": "snapshot-1"},
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.gp_registry.run_baseline",
+        lambda *args, **kwargs: None,
+    )
+
+    def fail_settlement(*args, **kwargs):
+        raise ValueError("No Polymarket mappings found for SQ session")
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.backtest.settle_single_gp",
+        fail_settlement,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/run-backtest",
+            json={"gp_short_code": "china"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "No Polymarket mappings found for SQ session"
+
+
+def test_ingest_demo_endpoint_returns_409_for_sqlite_lock(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fail_ingest(*args, **kwargs):
+        raise OperationalError(
+            "insert into demo",
+            {},
+            sqlite3.OperationalError("database is locked"),
+        )
+
+    monkeypatch.setattr("f1_polymarket_worker.demo_ingest.ingest_demo", fail_ingest)
+
+    with build_test_client(tmp_path) as client:
+        response = client.post("/api/v1/actions/ingest-demo", json={})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "Another write action is still running against the SQLite lab database. "
+        "Wait for it to finish, then retry."
+    )
+
+
+def test_refresh_latest_session_endpoint_serializes_worker_result(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_refresh(*args, **kwargs):
+        calls.update(kwargs)
+        return {
             "action": "refresh-latest-session",
             "status": "ok",
             "message": (
@@ -516,13 +579,27 @@ def test_refresh_latest_session_endpoint_serializes_worker_result(
                     "reason": None,
                 }
             ],
-        },
+        }
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.refresh_latest_session_for_meeting",
+        fake_refresh,
     )
 
     with build_test_client(tmp_path) as client:
         response = client.post(
             "/api/v1/actions/refresh-latest-session",
-            json={"meeting_id": "meeting:1281"},
+            json={
+                "meeting_id": "meeting:1281",
+                "search_fallback": False,
+                "discover_max_pages": 1,
+                "hydrate_market_history": False,
+                "sync_calendar": False,
+                "hydrate_f1_session_data": False,
+                "include_extended_f1_data": False,
+                "include_heavy_f1_data": False,
+                "refresh_artifacts": False,
+            },
         )
 
     app.dependency_overrides.clear()
@@ -533,7 +610,52 @@ def test_refresh_latest_session_endpoint_serializes_worker_result(
     assert payload["refreshed_session"]["session_code"] == "Q"
     assert payload["markets_hydrated"] == 2
     assert payload["artifacts_refreshed"][0]["gp_short_code"] == "japan_fp3"
+    assert calls == {
+        "meeting_id": "meeting:1281",
+        "search_fallback": False,
+        "discover_max_pages": 1,
+        "hydrate_market_history": False,
+        "sync_calendar": False,
+        "hydrate_f1_session_data": False,
+        "include_extended_f1_data": False,
+        "include_heavy_f1_data": False,
+        "refresh_artifacts": False,
+    }
 
+
+def test_gp_registry_endpoint_prioritizes_runnable_configs(tmp_path: Path) -> None:
+    database_path = tmp_path / "api-test.sqlite"
+    with build_test_client(tmp_path) as client:
+        engine = create_engine(f"sqlite+pysqlite:///{database_path}", future=True)
+        with Session(engine) as session:
+            session.add(
+                FeatureSnapshot(
+                    id="snapshot-japan-fp3",
+                    session_id="session:11249",
+                    as_of_ts=datetime(2026, 3, 28, 3, 40, tzinfo=timezone.utc),
+                    snapshot_type="japan_fp3_to_q_pole_quicktest",
+                    feature_version="v1",
+                    row_count=20,
+                )
+            )
+            session.add(
+                EntityMappingF1ToPolymarket(
+                    id="mapping-japan-q",
+                    f1_session_id="session:11249",
+                    polymarket_market_id="market-good",
+                    mapping_type="driver_pole_position",
+                    confidence=0.95,
+                )
+            )
+            session.commit()
+
+        response = client.get("/api/v1/actions/gp-registry")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["short_code"] == "japan_fp3"
 
 def test_refresh_latest_session_endpoint_returns_404_for_missing_meeting(
     tmp_path: Path,

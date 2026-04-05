@@ -2,34 +2,20 @@ import Link from "next/link";
 
 import type { PolymarketMarket } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
-import { Badge, StatCard } from "@f1/ui";
+import { Badge, Panel, StatCard } from "@f1/ui";
 
 import { PageStatusBanner } from "../../components/page-status-banner";
+import {
+  formatCompactUsd,
+  formatPriceCents,
+  formatSessionCodeLabel,
+  formatTaxonomyLabel,
+  formatTaxonomySummary,
+} from "../../lib/display";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
 
 export const revalidate = 300;
 
-const TAXONOMY_LABELS: Record<string, string> = {
-  head_to_head_session: "Head-to-Head (Session)",
-  head_to_head_practice: "Head-to-Head (Practice)",
-  driver_pole_position: "Driver Pole Position",
-  constructor_pole_position: "Constructor Pole",
-  race_winner: "Race Winner",
-  sprint_winner: "Sprint Winner",
-  qualifying_winner: "Qualifying Winner",
-  driver_podium: "Driver Podium",
-  constructor_scores_first: "Constructor First",
-  constructor_fastest_lap_practice: "Constructor Fastest Lap",
-  constructor_fastest_lap_session: "Constructor Fastest Lap",
-  driver_fastest_lap_practice: "Driver Fastest Lap",
-  driver_fastest_lap_session: "Driver Fastest Lap",
-  drivers_champion: "Drivers Champion",
-  constructors_champion: "Constructors Champion",
-  red_flag: "Red Flag",
-  safety_car: "Safety Car",
-};
-
-// Preferred display order for categories
 const TAXONOMY_ORDER: Record<string, number> = {
   race_winner: 0,
   driver_pole_position: 1,
@@ -50,17 +36,12 @@ const TAXONOMY_ORDER: Record<string, number> = {
   safety_car: 16,
 };
 
-function formatPrice(v: number | null) {
-  if (v == null) return "—";
-  return `${(v * 100).toFixed(1)}¢`;
-}
-
 function groupByTaxonomy(markets: PolymarketMarket[]) {
   const groups = new Map<string, PolymarketMarket[]>();
-  for (const m of markets) {
-    const key = m.taxonomy ?? "other";
+  for (const market of markets) {
+    const key = market.taxonomy ?? "other";
     const list = groups.get(key) ?? [];
-    list.push(m);
+    list.push(market);
     groups.set(key, list);
   }
   return groups;
@@ -73,24 +54,29 @@ export default async function MarketsPage() {
     "Market feed",
   );
   const allMarkets = marketsState.data;
-  const markets = allMarkets.filter((m) => (m.taxonomy ?? "other") !== "other");
   const degradedMessages = collectResourceErrors([marketsState]);
 
-  const activeMarkets = markets.filter((m) => m.active && !m.closed);
-  const closedMarkets = markets.filter((m) => m.closed);
-  const totalVolume = markets.reduce((s, m) => s + (m.volume ?? 0), 0);
+  const markets = allMarkets.filter((market) => market.taxonomy !== "other");
+  const activeMarkets = markets.filter(
+    (market) => market.active && !market.closed,
+  );
+  const pricedMarkets = markets.filter(
+    (market) => market.lastTradePrice != null,
+  );
+  const totalVolume = markets.reduce(
+    (sum, market) => sum + (market.volume ?? 0),
+    0,
+  );
 
   const groups = groupByTaxonomy(markets);
-
-  // Sort categories by preferred order, then by active count desc
   const sortedCategories = [...groups.entries()].sort(
     ([keyA, listA], [keyB, listB]) => {
       const orderA = TAXONOMY_ORDER[keyA] ?? 50;
       const orderB = TAXONOMY_ORDER[keyB] ?? 50;
-      if (orderA !== orderB) return orderA - orderB;
-      const activeA = listA.filter((m) => m.active && !m.closed).length;
-      const activeB = listB.filter((m) => m.active && !m.closed).length;
-      return activeB - activeA;
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      return listB.length - listA.length;
     },
   );
 
@@ -99,54 +85,87 @@ export default async function MarketsPage() {
       <PageStatusBanner messages={degradedMessages} />
 
       <div>
-        <h1 className="text-xl font-bold text-white">Markets</h1>
-        <p className="mt-1 text-sm text-[#6b7280]">
-          Polymarket F1 prediction markets by category
+        <h1 className="text-xl font-bold text-white">Market board</h1>
+        <p className="mt-1 max-w-3xl text-sm text-[#6b7280]">
+          Browse the F1 questions currently tracked on Polymarket, grouped by
+          market family and labeled with the session they are meant to settle
+          against.
         </p>
       </div>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-        <StatCard label="Total" value={markets.length} hint="F1 markets" />
         <StatCard
-          label="Active"
+          label="Tracked markets"
+          value={markets.length}
+          hint="F1-linked questions"
+        />
+        <StatCard
+          label="Open now"
           value={activeMarkets.length}
-          hint="currently trading"
+          hint="Markets still trading"
         />
         <StatCard
-          label="Closed"
-          value={closedMarkets.length}
-          hint="settled markets"
+          label="With prices"
+          value={pricedMarkets.length}
+          hint="Markets with a latest trade price"
         />
         <StatCard
-          label="Volume"
-          value={`$${(totalVolume / 1000).toFixed(0)}k`}
-          hint="total traded"
+          label="Total volume"
+          value={formatCompactUsd(totalVolume)}
+          hint="Combined traded volume"
         />
       </section>
+
+      <Panel title="How to read this board" eyebrow="Quick guide">
+        <div className="grid gap-3 md:grid-cols-3">
+          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
+            <p className="text-sm font-medium text-white">
+              Read the question first
+            </p>
+            <p className="mt-2 text-sm text-[#9ca3af]">
+              Every row starts with the exact Polymarket question, so you can
+              understand the bet without decoding taxonomy labels.
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
+            <p className="text-sm font-medium text-white">
+              Use the session badge as context
+            </p>
+            <p className="mt-2 text-sm text-[#9ca3af]">
+              The session badge tells you whether the market should settle from
+              practice, qualifying, sprint, or race results.
+            </p>
+          </div>
+          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
+            <p className="text-sm font-medium text-white">
+              Price, volume, and liquidity are separate
+            </p>
+            <p className="mt-2 text-sm text-[#9ca3af]">
+              The price shows the latest implied YES probability, while volume
+              and liquidity show how actively the market is trading.
+            </p>
+          </div>
+        </div>
+      </Panel>
 
       {markets.length === 0 ? (
         <div className="rounded-xl border border-white/[0.06] bg-gradient-to-br from-[#1e1e2e] to-[#1a1a28] p-8 text-center">
           <p className="text-sm text-[#6b7280]">
-            No F1 markets loaded.{" "}
+            No F1 markets are loaded yet.{" "}
             <Link href="/" className="text-[#e10600] hover:underline">
               Run Sync F1 Markets
             </Link>{" "}
-            to populate data.
+            to populate the board.
           </p>
         </div>
       ) : (
         <div className="flex flex-col gap-4">
           {sortedCategories.map(([taxonomy, list]) => {
+            const categoryLabel = formatTaxonomyLabel(taxonomy);
+            const categorySummary = formatTaxonomySummary(taxonomy);
             const activeCount = list.filter(
-              (m) => m.active && !m.closed,
+              (market) => market.active && !market.closed,
             ).length;
-            const closedCount = list.filter((m) => m.closed).length;
-            const categoryVolume = list.reduce(
-              (s, m) => s + (m.volume ?? 0),
-              0,
-            );
-
-            // Sort within category: active first, then by volume desc
             const sortedList = [...list].sort((a, b) => {
               if (a.active && !a.closed && !(b.active && !b.closed)) return -1;
               if (!(a.active && !a.closed) && b.active && !b.closed) return 1;
@@ -158,86 +177,87 @@ export default async function MarketsPage() {
                 key={taxonomy}
                 className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-gradient-to-br from-[#1e1e2e] to-[#1a1a28] shadow-xl shadow-black/30"
               >
-                {/* left accent */}
                 <div className="absolute left-0 top-0 h-full w-[3px] bg-[#e10600]" />
                 <div className="absolute left-0 top-0 h-full w-[6px] bg-[#e10600]/20 blur-sm" />
 
-                {/* Category header */}
-                <div className="flex items-center justify-between gap-4 px-5 py-4 pl-7">
-                  <div className="flex min-w-0 flex-col gap-0.5">
+                <div className="flex items-start justify-between gap-4 px-5 py-4 pl-7">
+                  <div className="min-w-0">
                     <p className="text-[10px] font-bold uppercase tracking-[0.35em] text-[#e10600]">
-                      {taxonomy.replace(/_/g, "_").toUpperCase()}
+                      Market family
                     </p>
-                    <h2 className="text-sm font-semibold text-white">
-                      {TAXONOMY_LABELS[taxonomy] ?? taxonomy}
+                    <h2 className="mt-1 text-lg font-semibold text-white">
+                      {categoryLabel}
                     </h2>
+                    <p className="mt-2 max-w-3xl text-sm text-[#9ca3af]">
+                      {categorySummary}
+                    </p>
                   </div>
-                  <div className="flex shrink-0 items-center gap-2 text-xs text-[#6b7280]">
-                    {activeCount > 0 && (
-                      <Badge tone="good">{activeCount} active</Badge>
-                    )}
-                    {closedCount > 0 && (
-                      <Badge tone="default">{closedCount} closed</Badge>
-                    )}
-                    {categoryVolume > 0 && (
-                      <span className="tabular-nums text-[11px]">
-                        ${(categoryVolume / 1000).toFixed(0)}k vol
-                      </span>
-                    )}
+                  <div className="flex shrink-0 items-center gap-2">
+                    <Badge tone="good">{activeCount} open</Badge>
+                    <Badge>{list.length} tracked</Badge>
                   </div>
                 </div>
 
-                {/* Market rows */}
                 <div className="border-t border-white/[0.04]">
-                  {sortedList.map((m, idx) => (
+                  {sortedList.map((market, index) => (
                     <Link
-                      key={m.id}
-                      href={`/markets/${m.id}`}
-                      className={`flex items-center gap-3 px-5 py-3 pl-7 transition-colors hover:bg-white/[0.03] ${
-                        idx < sortedList.length - 1
+                      key={market.id}
+                      href={`/markets/${market.id}`}
+                      className={`flex items-center justify-between gap-4 px-5 py-4 pl-7 transition-colors hover:bg-white/[0.03] ${
+                        index < sortedList.length - 1
                           ? "border-b border-white/[0.03]"
                           : ""
                       }`}
                     >
-                      {/* Question */}
-                      <span className="min-w-0 flex-1 truncate text-[13px] text-[#d1d5db]">
-                        {m.question}
-                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-medium text-white">
+                          {market.question}
+                        </p>
+                        <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-[#9ca3af]">
+                          {market.targetSessionCode ? (
+                            <Badge>
+                              {formatSessionCodeLabel(market.targetSessionCode)}
+                            </Badge>
+                          ) : null}
+                          {market.taxonomyConfidence != null ? (
+                            <span>
+                              {(market.taxonomyConfidence * 100).toFixed(0)}%
+                              taxonomy confidence
+                            </span>
+                          ) : null}
+                          {market.volume != null ? (
+                            <span>
+                              Volume {formatCompactUsd(market.volume)}
+                            </span>
+                          ) : null}
+                          {market.liquidity != null ? (
+                            <span>
+                              Liquidity {formatCompactUsd(market.liquidity)}
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
 
-                      {/* Price */}
                       <div className="flex shrink-0 items-center gap-3">
                         <div className="text-right">
-                          <p className="tabular-nums text-sm font-semibold text-white">
-                            {formatPrice(m.lastTradePrice)}
+                          <p className="text-sm font-semibold tabular-nums text-white">
+                            {formatPriceCents(market.lastTradePrice)}
                           </p>
-                          {m.bestBid != null && m.bestAsk != null && (
-                            <p className="tabular-nums text-[10px] text-[#6b7280]">
-                              <span className="text-emerald-400">
-                                {formatPrice(m.bestBid)}
-                              </span>
-                              {" / "}
-                              <span className="text-amber-400">
-                                {formatPrice(m.bestAsk)}
-                              </span>
+                          {(market.bestBid != null ||
+                            market.bestAsk != null) && (
+                            <p className="mt-1 text-[11px] tabular-nums text-[#6b7280]">
+                              Bid {formatPriceCents(market.bestBid)} · Ask{" "}
+                              {formatPriceCents(market.bestAsk)}
                             </p>
                           )}
                         </div>
                         <Badge
                           tone={
-                            m.active && !m.closed
-                              ? "good"
-                              : m.closed
-                                ? "warn"
-                                : "default"
+                            market.active && !market.closed ? "good" : "default"
                           }
                         >
-                          {m.active && !m.closed
-                            ? "Active"
-                            : m.closed
-                              ? "Closed"
-                              : "Inactive"}
+                          {market.active && !market.closed ? "Open" : "Closed"}
                         </Badge>
-                        <span className="text-[#4b5563]">→</span>
                       </div>
                     </Link>
                   ))}

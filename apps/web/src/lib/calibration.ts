@@ -55,12 +55,7 @@ export function calibrationSummaryFromModelRuns(modelRuns: ModelRun[]): {
       const count = metricNumber(bucket, "count");
       const predicted = metricNumber(bucket, "avg_predicted", "avg_prob");
       const actual = metricNumber(bucket, "avg_actual", "actual_rate");
-      if (
-        count == null ||
-        count <= 0 ||
-        predicted == null ||
-        actual == null
-      ) {
+      if (count == null || count <= 0 || predicted == null || actual == null) {
         continue;
       }
 
@@ -89,7 +84,9 @@ export function calibrationSummaryFromModelRuns(modelRuns: ModelRun[]): {
       predicted: value.predictedWeighted / value.count,
     }))
     .sort((left, right) => {
-      return parseBucketLower(left.bucketLabel) - parseBucketLower(right.bucketLabel);
+      return (
+        parseBucketLower(left.bucketLabel) - parseBucketLower(right.bucketLabel)
+      );
     });
 
   return {

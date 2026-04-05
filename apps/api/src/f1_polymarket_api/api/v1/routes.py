@@ -34,6 +34,7 @@ from f1_polymarket_lab.storage.models import (
     F1Driver,
     F1Meeting,
     F1Session,
+    F1SessionResult,
     F1Team,
     FeatureSnapshot,
     IngestionJobRun,
@@ -48,7 +49,7 @@ from f1_polymarket_lab.storage.models import (
     SourceFetchLog,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 router = APIRouter(prefix="/api/v1")
@@ -385,13 +386,95 @@ def snapshots(db: Session = Depends(get_db_session)) -> list[FeatureSnapshotResp
 
 
 @router.get("/actions/gp-registry", response_model=list[GPRegistryItem])
-def gp_registry() -> list[GPRegistryItem]:
+def gp_registry(db: Session = Depends(get_db_session)) -> list[GPRegistryItem]:
     from f1_polymarket_worker.gp_registry import (
         GP_REGISTRY,
         config_display_description,
         config_display_label,
         config_stage_label,
     )
+
+    registry_configs = list(GP_REGISTRY)
+    target_meeting_keys = {gp.meeting_key for gp in registry_configs}
+    target_seasons = {gp.season for gp in registry_configs}
+    target_session_codes = {gp.target_session_code for gp in registry_configs}
+    target_snapshot_types = {gp.snapshot_type for gp in registry_configs}
+
+    target_sessions = db.execute(
+        select(
+            F1Meeting.meeting_key,
+            F1Meeting.season,
+            F1Session.session_code,
+            F1Session.id,
+        )
+        .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+        .where(
+            F1Meeting.meeting_key.in_(target_meeting_keys),
+            F1Meeting.season.in_(target_seasons),
+            F1Session.session_code.in_(target_session_codes),
+        )
+    ).all()
+    session_ids = [row.id for row in target_sessions]
+    session_id_by_target = {
+        (row.meeting_key, row.season, row.session_code): row.id
+        for row in target_sessions
+    }
+
+    mapped_market_counts: dict[str, int] = {}
+    result_counts: dict[str, int] = {}
+    if session_ids:
+        mapped_market_counts = {
+            str(row.f1_session_id): int(row.mapped_count)
+            for row in db.execute(
+                select(
+                    EntityMappingF1ToPolymarket.f1_session_id,
+                    func.count(
+                        func.distinct(EntityMappingF1ToPolymarket.polymarket_market_id)
+                    ).label("mapped_count"),
+                )
+                .where(
+                    EntityMappingF1ToPolymarket.f1_session_id.in_(session_ids),
+                    EntityMappingF1ToPolymarket.polymarket_market_id.is_not(None),
+                )
+                .group_by(EntityMappingF1ToPolymarket.f1_session_id)
+            ).all()
+        }
+        result_counts = {
+            str(row.session_id): int(row.result_count)
+            for row in db.execute(
+                select(
+                    F1SessionResult.session_id,
+                    func.count(F1SessionResult.id).label("result_count"),
+                )
+                .where(F1SessionResult.session_id.in_(session_ids))
+                .group_by(F1SessionResult.session_id)
+            ).all()
+        }
+
+    snapshot_types_with_data = {
+        row[0]
+        for row in db.execute(
+            select(FeatureSnapshot.snapshot_type)
+            .where(FeatureSnapshot.snapshot_type.in_(target_snapshot_types))
+            .distinct()
+        ).all()
+    }
+
+    def sort_key(gp) -> tuple[int, int, int, int, int, int]:
+        session_id = session_id_by_target.get(
+            (gp.meeting_key, gp.season, gp.target_session_code)
+        )
+        mapped_count = 0 if session_id is None else mapped_market_counts.get(session_id, 0)
+        result_count = 0 if session_id is None else result_counts.get(session_id, 0)
+        has_snapshot = int(gp.snapshot_type in snapshot_types_with_data)
+        return (
+            has_snapshot,
+            mapped_count,
+            result_count,
+            gp.season,
+            gp.meeting_key,
+            gp.stage_rank,
+        )
 
     return [
         GPRegistryItem(
@@ -408,7 +491,7 @@ def gp_registry() -> list[GPRegistryItem]:
             display_label=config_display_label(gp),
             display_description=config_display_description(gp),
         )
-        for gp in GP_REGISTRY
+        for gp in sorted(registry_configs, key=sort_key, reverse=True)
     ]
 
 

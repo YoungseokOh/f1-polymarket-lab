@@ -2756,18 +2756,26 @@ def refresh_latest_session_for_meeting(
     discover_max_pages: int = 5,
     hydrate_market_history: bool = True,
     market_history_fidelity: int = 60,
+    sync_calendar: bool = True,
+    hydrate_f1_session_data: bool = True,
+    include_extended_f1_data: bool = True,
+    include_heavy_f1_data: bool = True,
+    refresh_artifacts: bool = True,
 ) -> dict[str, Any]:
     meeting = ctx.db.get(F1Meeting, meeting_id)
     if meeting is None:
         raise KeyError(f"Meeting not found: {meeting_id}")
 
-    sync_f1_calendar(ctx, season=meeting.season)
-    refreshed_meeting = ctx.db.scalar(
-        select(F1Meeting).where(
-            F1Meeting.meeting_key == meeting.meeting_key,
-            F1Meeting.season == meeting.season,
+    if sync_calendar:
+        sync_f1_calendar(ctx, season=meeting.season)
+        refreshed_meeting = ctx.db.scalar(
+            select(F1Meeting).where(
+                F1Meeting.meeting_key == meeting.meeting_key,
+                F1Meeting.season == meeting.season,
+            )
         )
-    )
+    else:
+        refreshed_meeting = meeting
     if refreshed_meeting is None:
         raise KeyError(
             "Meeting missing after calendar sync: "
@@ -2786,17 +2794,26 @@ def refresh_latest_session_for_meeting(
         )
 
     linked_market_ids_before = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
-    hydrate_result = hydrate_f1_session(
-        ctx,
-        session_key=refreshed_session.session_key,
-        include_extended=True,
-        include_heavy=refreshed_session.session_code in {"Q", "SQ", "R"},
-    )
+    hydrate_result = {"records_written": 0, "status": "skipped"}
+    if hydrate_f1_session_data:
+        hydrate_result = hydrate_f1_session(
+            ctx,
+            session_key=refreshed_session.session_key,
+            include_extended=include_extended_f1_data,
+            include_heavy=include_heavy_f1_data,
+        )
+    exact_slug_candidate_limit = 64 if (
+        refreshed_session.session_code == "R"
+        and not search_fallback
+        and discover_max_pages <= 1
+        and not hydrate_f1_session_data
+    ) else None
     discover_result = discover_session_polymarket(
         ctx,
         session_key=refreshed_session.session_key,
         max_pages=discover_max_pages,
         search_fallback=search_fallback,
+        exact_slug_candidate_limit=exact_slug_candidate_limit,
     )
     reconcile_mappings(ctx)
     linked_market_ids_after = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
@@ -2812,20 +2829,27 @@ def refresh_latest_session_for_meeting(
             markets_hydrated += 1
 
     session_label = refreshed_session.session_code or refreshed_session.session_name
-    artifact_updates = _refresh_artifacts_for_session(
-        ctx,
-        meeting_key=refreshed_meeting.meeting_key,
-        session_code=refreshed_session.session_code,
-    )
+    artifact_updates: list[dict[str, Any]] = []
+    if refresh_artifacts:
+        artifact_updates = _refresh_artifacts_for_session(
+            ctx,
+            meeting_key=refreshed_meeting.meeting_key,
+            session_code=refreshed_session.session_code,
+        )
     processed_artifacts = sum(1 for item in artifact_updates if item["status"] == "processed")
     skipped_artifacts = sum(1 for item in artifact_updates if item["status"] == "skipped")
+    artifact_message = (
+        f"Artifacts refreshed: {processed_artifacts}, skipped: {skipped_artifacts}."
+        if refresh_artifacts
+        else "Artifacts refresh skipped."
+    )
     return {
         "action": "refresh-latest-session",
         "status": "ok",
         "message": (
             f"Updated latest ended session {session_label} for "
             f"{refreshed_meeting.meeting_name}. "
-            f"Artifacts refreshed: {processed_artifacts}, skipped: {skipped_artifacts}."
+            f"{artifact_message}"
         ),
         "meeting_id": refreshed_meeting.id,
         "meeting_name": refreshed_meeting.meeting_name,

@@ -256,6 +256,11 @@ class RefreshLatestSessionRequest(BaseModel):
     search_fallback: bool = True
     discover_max_pages: int = 5
     hydrate_market_history: bool = True
+    sync_calendar: bool = True
+    hydrate_f1_session_data: bool = True
+    include_extended_f1_data: bool = True
+    include_heavy_f1_data: bool = True
+    refresh_artifacts: bool = True
 
 
 class RefreshedSessionResponse(BaseModel):

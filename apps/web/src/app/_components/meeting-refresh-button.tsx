@@ -4,12 +4,16 @@ import type { RefreshedSessionSummary } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { useRouter } from "next/navigation";
 import React, { startTransition, useState } from "react";
+import { buildLatestSessionRefreshRequest } from "../../lib/action-defaults";
+import { formatSessionCodeLabel } from "../../lib/display";
 
 type ActionState = "idle" | "loading" | "success" | "error";
 
 function sessionLabel(session: RefreshedSessionSummary | null) {
   if (!session) return null;
-  return session.sessionCode ?? session.sessionName;
+  return session.sessionCode
+    ? formatSessionCodeLabel(session.sessionCode)
+    : session.sessionName;
 }
 
 export function MeetingRefreshButton({
@@ -36,9 +40,9 @@ export function MeetingRefreshButton({
     setState("loading");
     setMessage("");
     try {
-      const result = await sdk.refreshLatestSession({
-        meeting_id: meetingId,
-      });
+      const result = await sdk.refreshLatestSession(
+        buildLatestSessionRefreshRequest(meetingId, latestEndedSession),
+      );
       setMessage(result.message);
       setState("success");
       startTransition(() => {
@@ -61,7 +65,7 @@ export function MeetingRefreshButton({
         {state === "loading" && (
           <span className="inline-block h-3.5 w-3.5 animate-spin rounded-full border-2 border-current border-t-transparent" />
         )}
-        {label ? `Update latest: ${label}` : "No ended session yet"}
+        {label ? `Refresh ${label}` : "No finished session yet"}
       </button>
       {message ? (
         <p
@@ -76,7 +80,7 @@ export function MeetingRefreshButton({
           <p
             className={`max-w-[220px] text-[11px] ${textAlignClass} text-[#6b7280]`}
           >
-            This GP does not have an ended session yet.
+            This Grand Prix does not have a finished session yet.
           </p>
         )
       )}

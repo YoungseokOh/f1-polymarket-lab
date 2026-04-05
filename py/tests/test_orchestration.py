@@ -2966,10 +2966,14 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
             batch_size: int = 100,
             max_pages: int = 5,
             search_fallback: bool = True,
+            probe_exact_slugs: bool = True,
+            exact_slug_candidate_limit: int | None = None,
         ) -> dict[str, Any]:
             calls["discovered_session_key"] = session_key
             calls["max_pages"] = max_pages
             calls["search_fallback"] = search_fallback
+            calls["probe_exact_slugs"] = probe_exact_slugs
+            calls["exact_slug_candidate_limit"] = exact_slug_candidate_limit
             return {"markets": 2, "auto_mappings": 1}
 
         def fake_reconcile(_ctx: PipelineContext) -> dict[str, Any]:
@@ -3030,6 +3034,8 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
         assert calls["discovered_session_key"] == 9102
         assert calls["max_pages"] == 7
         assert calls["search_fallback"] is True
+        assert calls["probe_exact_slugs"] is True
+        assert calls["exact_slug_candidate_limit"] is None
         assert calls["reconcile_called"] is True
         assert calls["hydrated_market_ids"] == ["market-q"]
         assert result["refreshed_session"]["session_code"] == "Q"
@@ -3131,6 +3137,91 @@ def test_refresh_latest_session_for_meeting_refreshes_matching_artifacts(
         }
         assert len(result["artifacts_refreshed"]) == 4
         assert all(item["status"] == "processed" for item in result["artifacts_refreshed"])
+    finally:
+        session.close()
+
+
+def test_refresh_latest_session_for_meeting_limits_exact_slug_probe_for_race_fast_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 8, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting:race-fast",
+            meeting_key=9002,
+            season=2026,
+            meeting_name="Race Fast Path Grand Prix",
+        )
+        race_session = F1Session(
+            id="session:race",
+            session_key=9201,
+            meeting_id=meeting.id,
+            session_name="Race",
+            session_type="Race",
+            session_code="R",
+            date_start_utc=datetime(2026, 3, 8, 5, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc),
+            is_practice=False,
+        )
+        session.add_all([meeting, race_session])
+        session.commit()
+
+        calls: dict[str, Any] = {}
+
+        def fake_discover(
+            _ctx: PipelineContext,
+            *,
+            session_key: int,
+            batch_size: int = 100,
+            max_pages: int = 5,
+            search_fallback: bool = True,
+            probe_exact_slugs: bool = True,
+            exact_slug_candidate_limit: int | None = None,
+        ) -> dict[str, Any]:
+            calls["session_key"] = session_key
+            calls["max_pages"] = max_pages
+            calls["search_fallback"] = search_fallback
+            calls["probe_exact_slugs"] = probe_exact_slugs
+            calls["exact_slug_candidate_limit"] = exact_slug_candidate_limit
+            return {"markets": 21}
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.discover_session_polymarket",
+            fake_discover,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.reconcile_mappings",
+            lambda *_args, **_kwargs: {"mapping_rows": 0},
+        )
+
+        result = refresh_latest_session_for_meeting(
+            context,
+            meeting_id=meeting.id,
+            search_fallback=False,
+            discover_max_pages=1,
+            hydrate_market_history=False,
+            sync_calendar=False,
+            hydrate_f1_session_data=False,
+            include_extended_f1_data=False,
+            include_heavy_f1_data=False,
+            refresh_artifacts=False,
+        )
+
+        assert calls == {
+            "session_key": 9201,
+            "max_pages": 1,
+            "search_fallback": False,
+            "probe_exact_slugs": True,
+            "exact_slug_candidate_limit": 64,
+        }
+        assert result["refreshed_session"]["session_code"] == "R"
+        assert result["markets_discovered"] == 21
+        assert result["message"].endswith("Artifacts refresh skipped.")
     finally:
         session.close()
 

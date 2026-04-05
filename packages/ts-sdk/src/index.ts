@@ -1,8 +1,8 @@
 import { getWebEnv } from "@f1/config";
 import type {
   ActionStatusResponse,
-  ArtifactRefreshSummary,
   ApiHealth,
+  ArtifactRefreshSummary,
   BackfillBacktestsRequest,
   BacktestResult,
   CaptureLiveWeekendRequest,
@@ -99,6 +99,31 @@ function buildPath(path: string, query?: Record<string, QueryValue>): string {
   return `${path}?${search}`;
 }
 
+async function readErrorDetail(response: Response): Promise<string> {
+  const raw = await response.text().catch(() => "");
+  if (!raw) {
+    return response.statusText;
+  }
+
+  try {
+    const payload = JSON.parse(raw) as {
+      detail?: unknown;
+      message?: unknown;
+    };
+    if (typeof payload.detail === "string") {
+      return payload.detail;
+    }
+    if (payload.detail !== undefined) {
+      return JSON.stringify(payload.detail);
+    }
+    if (typeof payload.message === "string") {
+      return payload.message;
+    }
+  } catch {}
+
+  return raw;
+}
+
 async function apiGet<T>(
   path: string,
   query?: Record<string, QueryValue>,
@@ -115,9 +140,8 @@ async function apiGet<T>(
   );
 
   if (!response.ok) {
-    throw new Error(
-      `API request failed: ${response.status} ${response.statusText}`,
-    );
+    const detail = await readErrorDetail(response);
+    throw new Error(`API request failed: ${response.status} ${detail}`);
   }
 
   return (await response.json()) as T;
@@ -135,7 +159,7 @@ async function apiPost<TReq, TRes>(path: string, body: TReq): Promise<TRes> {
   });
 
   if (!response.ok) {
-    const detail = await response.text().catch(() => response.statusText);
+    const detail = await readErrorDetail(response);
     throw new Error(`API request failed: ${response.status} ${detail}`);
   }
 
@@ -1198,7 +1222,9 @@ function mapRefreshLatestSessionResponse(
     marketsDiscovered: record.markets_discovered,
     mappingsWritten: record.mappings_written,
     marketsHydrated: record.markets_hydrated,
-    artifactsRefreshed: record.artifacts_refreshed.map(mapArtifactRefreshSummary),
+    artifactsRefreshed: record.artifacts_refreshed.map(
+      mapArtifactRefreshSummary,
+    ),
   };
 }
 

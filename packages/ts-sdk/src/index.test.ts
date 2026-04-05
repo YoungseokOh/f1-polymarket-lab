@@ -173,6 +173,23 @@ describe("sdk", () => {
     );
   });
 
+  it("extracts detail strings from failed action responses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: "Conflict",
+      text: async () =>
+        JSON.stringify({
+          detail: "No Polymarket mappings found for SQ session",
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sdk.runBacktest({ gp_short_code: "china" })).rejects.toThrow(
+      "API request failed: 409 No Polymarket mappings found for SQ session",
+    );
+  });
+
   it("maps weekend cockpit status payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,

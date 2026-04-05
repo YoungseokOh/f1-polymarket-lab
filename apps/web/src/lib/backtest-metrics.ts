@@ -1,9 +1,6 @@
 type RawMetrics = Record<string, unknown> | null | undefined;
 
-function metricNumber(
-  metrics: RawMetrics,
-  ...keys: string[]
-): number | null {
+function metricNumber(metrics: RawMetrics, ...keys: string[]): number | null {
   for (const key of keys) {
     const value = metrics?.[key];
     if (typeof value === "number" && Number.isFinite(value)) {

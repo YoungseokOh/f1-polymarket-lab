@@ -358,7 +358,7 @@ describe("WeekendCockpitPanel", () => {
       screen.getByRole("button", { name: "Update to latest" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Update latest: FP1" }),
+      screen.getByRole("button", { name: "Refresh Practice 1" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Capture 20s live sample" }),
