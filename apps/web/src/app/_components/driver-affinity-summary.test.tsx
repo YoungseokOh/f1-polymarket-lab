@@ -17,6 +17,8 @@ const baseReport: DriverAffinityReport = {
     season: 2026,
     roundNumber: 3,
     meetingName: "Japanese Grand Prix",
+    meetingSlug: "japanese-grand-prix",
+    eventFormat: "conventional",
     circuitShortName: "Suzuka",
     countryName: "Japan",
     location: "Suzuka",

@@ -5,8 +5,12 @@ import type {
   ArtifactRefreshSummary,
   BackfillBacktestsRequest,
   BacktestResult,
+  CancelLiveTradeTicketRequest,
+  CancelLiveTradeTicketResponse,
   CaptureLiveWeekendRequest,
   CaptureLiveWeekendResponse,
+  CreateLiveTradeTicketRequest,
+  CreateLiveTradeTicketResponse,
   CursorState,
   DataQualityResult,
   DriverAffinityEntry,
@@ -24,6 +28,10 @@ import type {
   GPRegistryItem,
   IngestDemoRequest,
   IngestionJobRun,
+  OpsCalendarMeeting,
+  LiveTradeExecution,
+  LiveTradeSignalBoard,
+  LiveTradeTicket,
   MarketTaxonomy,
   ModelPrediction,
   ModelRun,
@@ -32,6 +40,8 @@ import type {
   PolymarketEvent,
   PolymarketMarket,
   PricePoint,
+  RecordLiveTradeFillRequest,
+  RecordLiveTradeFillResponse,
   RefreshDriverAffinityRequest,
   RefreshDriverAffinityResponse,
   RefreshLatestSessionRequest,
@@ -42,6 +52,8 @@ import type {
   RunWeekendCockpitDetails,
   RunWeekendCockpitRequest,
   RunWeekendCockpitResponse,
+  ClearCalendarOverrideRequest,
+  SetCalendarOverrideRequest,
   SyncCalendarRequest,
   SyncF1MarketsRequest,
   WeekendCockpitSettlementSummary,
@@ -209,6 +221,8 @@ type F1MeetingApi = {
   season: number;
   round_number: number | null;
   meeting_name: string;
+  meeting_slug: string | null;
+  event_format: string | null;
   circuit_short_name: string | null;
   country_name: string | null;
   location: string | null;
@@ -321,11 +335,36 @@ function mapMeeting(record: F1MeetingApi): F1Meeting {
     season: record.season,
     roundNumber: record.round_number,
     meetingName: record.meeting_name,
+    meetingSlug: record.meeting_slug,
+    eventFormat: record.event_format,
     circuitShortName: record.circuit_short_name,
     countryName: record.country_name,
     location: record.location,
     startDateUtc: record.start_date_utc,
     endDateUtc: record.end_date_utc,
+  };
+}
+
+function mapOpsCalendarMeeting(
+  record: OpsCalendarMeetingApi,
+): OpsCalendarMeeting {
+  return {
+    season: record.season,
+    meetingKey: record.meeting_key,
+    meetingSlug: record.meeting_slug,
+    opsSlug: record.ops_slug,
+    meetingName: record.meeting_name,
+    roundNumber: record.round_number,
+    eventFormat: record.event_format,
+    startDateUtc: record.start_date_utc,
+    endDateUtc: record.end_date_utc,
+    countryName: record.country_name,
+    location: record.location,
+    status: record.status,
+    sourceConflict: record.source_conflict,
+    sourceLabel: record.source_label,
+    sourceUrl: record.source_url,
+    note: record.note,
   };
 }
 
@@ -514,6 +553,19 @@ export const sdk = {
 
   // Action endpoints
   gpRegistry: () => apiGet<GPRegistryItem[]>("/api/v1/actions/gp-registry"),
+  opsCalendar: async (options?: {
+    season?: number;
+    includeCancelled?: boolean;
+  }): Promise<OpsCalendarMeeting[]> => {
+    const records = await apiGet<OpsCalendarMeetingApi[]>(
+      "/api/v1/ops-calendar",
+      {
+        season: options?.season,
+        include_cancelled: options?.includeCancelled,
+      },
+    );
+    return records.map(mapOpsCalendarMeeting);
+  },
   ingestDemo: (body?: IngestDemoRequest) =>
     apiPost<IngestDemoRequest, ActionStatusResponse>(
       "/api/v1/actions/ingest-demo",
@@ -523,6 +575,16 @@ export const sdk = {
     apiPost<SyncCalendarRequest, ActionStatusResponse>(
       "/api/v1/actions/sync-calendar",
       body ?? {},
+    ),
+  setCalendarOverride: (body: SetCalendarOverrideRequest) =>
+    apiPost<SetCalendarOverrideRequest, ActionStatusResponse>(
+      "/api/v1/actions/set-calendar-override",
+      body,
+    ),
+  clearCalendarOverride: (body: ClearCalendarOverrideRequest) =>
+    apiPost<ClearCalendarOverrideRequest, ActionStatusResponse>(
+      "/api/v1/actions/clear-calendar-override",
+      body,
     ),
   runBacktest: (body: RunBacktestRequest) =>
     apiPost<RunBacktestRequest, ActionStatusResponse>(
@@ -549,6 +611,21 @@ export const sdk = {
       "/api/v1/actions/capture-live-weekend",
       body,
     ).then(mapCaptureLiveWeekendResponse),
+  createLiveTradeTicket: (body: CreateLiveTradeTicketRequest) =>
+    apiPost<CreateLiveTradeTicketRequest, CreateLiveTradeTicketResponseApi>(
+      "/api/v1/actions/create-live-trade-ticket",
+      body,
+    ).then(mapCreateLiveTradeTicketResponse),
+  recordLiveTradeFill: (body: RecordLiveTradeFillRequest) =>
+    apiPost<RecordLiveTradeFillRequest, RecordLiveTradeFillResponseApi>(
+      "/api/v1/actions/record-live-trade-fill",
+      body,
+    ).then(mapRecordLiveTradeFillResponse),
+  cancelLiveTradeTicket: (body: CancelLiveTradeTicketRequest) =>
+    apiPost<CancelLiveTradeTicketRequest, CancelLiveTradeTicketResponseApi>(
+      "/api/v1/actions/cancel-live-trade-ticket",
+      body,
+    ).then(mapCancelLiveTradeTicketResponse),
   executeManualLivePaperTrade: (body: ExecuteManualLivePaperTradeRequest) =>
     apiPost<
       ExecuteManualLivePaperTradeRequest,
@@ -588,6 +665,45 @@ export const sdk = {
       "/api/v1/actions/refresh-driver-affinity",
       body ?? {},
     ).then(mapRefreshDriverAffinityResponse),
+
+  liveTradeSignalBoard: async (
+    gpShortCode: string,
+  ): Promise<LiveTradeSignalBoard> => {
+    const record = await apiGet<LiveTradeSignalBoardApi>(
+      `/api/v1/live-trading/signal-board?gp_short_code=${encodeURIComponent(gpShortCode)}`,
+    );
+    return mapLiveTradeSignalBoard(record);
+  },
+  liveTradeTickets: async (options?: {
+    gpSlug?: string;
+    status?: string;
+    limit?: number;
+  }): Promise<LiveTradeTicket[]> => {
+    const records = await apiGet<LiveTradeTicketApi[]>(
+      "/api/v1/live-trading/tickets",
+      {
+        gp_slug: options?.gpSlug,
+        status: options?.status,
+        limit: options?.limit,
+      },
+    );
+    return records.map(mapLiveTradeTicket);
+  },
+  liveTradeExecutions: async (options?: {
+    gpSlug?: string;
+    status?: string;
+    limit?: number;
+  }): Promise<LiveTradeExecution[]> => {
+    const records = await apiGet<LiveTradeExecutionApi[]>(
+      "/api/v1/live-trading/executions",
+      {
+        gp_slug: options?.gpSlug,
+        status: options?.status,
+        limit: options?.limit,
+      },
+    );
+    return records.map(mapLiveTradeExecution);
+  },
 
   // Paper trading
   paperTradeSessions: async (gpSlug?: string): Promise<PaperTradeSession[]> => {
@@ -841,6 +957,12 @@ type WeekendCockpitStatusApi = {
   auto_selected_gp_short_code: string;
   selected_gp_short_code: string;
   selected_config: GPRegistryItem;
+  calendar_status: string;
+  meeting_slug: string;
+  source_conflict: boolean;
+  override_source_url: string | null;
+  calendar_meetings: OpsCalendarMeetingApi[];
+  cancelled_meetings: OpsCalendarMeetingApi[];
   available_configs: GPRegistryItem[];
   meeting: F1MeetingApi | null;
   focus_session: F1SessionApi | null;
@@ -857,10 +979,48 @@ type WeekendCockpitStatusApi = {
   required_stage: string | null;
   active_model_run_id: string | null;
   model_blockers: string[];
+  session_stage_statuses: Array<{
+    gp_short_code: string;
+    target_session_code: string;
+    required_stage: string | null;
+    model_ready: boolean;
+    active_model_run_id: string | null;
+    model_blockers: string[];
+    display_label: string;
+  }>;
+  live_ticket_summary: {
+    ticket_count: number;
+    open_ticket_count: number;
+    filled_ticket_count: number;
+    cancelled_ticket_count: number;
+  };
+  live_execution_summary: {
+    execution_count: number;
+    filled_execution_count: number;
+  };
   primary_action_title: string;
   primary_action_description: string;
   primary_action_cta: string;
   explanation: string;
+};
+
+type OpsCalendarMeetingApi = {
+  season: number;
+  meeting_key: number;
+  meeting_slug: string;
+  ops_slug: string;
+  meeting_name: string;
+  round_number: number | null;
+  event_format: string | null;
+  start_date_utc: string | null;
+  end_date_utc: string | null;
+  country_name: string | null;
+  location: string | null;
+  status: string;
+  source_conflict: boolean;
+  source_label: string | null;
+  source_url: string | null;
+  note: string | null;
 };
 
 type RunWeekendCockpitResponseApi = {
@@ -993,6 +1153,121 @@ type ExecuteManualLivePaperTradeResponseApi = {
   reason: string | null;
 };
 
+type CreateLiveTradeTicketResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  ticket_id: string;
+  gp_short_code: string;
+  market_id: string;
+  model_run_id: string | null;
+  snapshot_id: string | null;
+  promotion_stage: string | null;
+  signal_action: string;
+  side_label: string;
+  recommended_size: number;
+  market_price: number;
+  model_prob: number;
+  edge: number;
+  observed_spread: number | null;
+  max_spread: number | null;
+  observed_at_utc: string;
+  expires_at: string | null;
+};
+
+type RecordLiveTradeFillResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  ticket_id: string;
+  execution_id: string;
+  execution_status: string;
+  ticket_status: string;
+};
+
+type CancelLiveTradeTicketResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  ticket_id: string;
+  ticket_status: string;
+};
+
+type LiveSignalRowApi = {
+  market_id: string;
+  token_id: string | null;
+  question: string;
+  session_code: string;
+  promotion_stage: string | null;
+  model_run_id: string | null;
+  snapshot_id: string | null;
+  model_prob: number;
+  market_price: number | null;
+  edge: number | null;
+  spread: number | null;
+  signal_action: string;
+  side_label: string | null;
+  recommended_size: number;
+  max_spread: number | null;
+  observed_at_utc: string | null;
+  event_type: string | null;
+};
+
+type LiveTradeSignalBoardApi = {
+  gp_short_code: string;
+  required_stage: string | null;
+  active_model_run_id: string | null;
+  model_run_id: string | null;
+  snapshot_id: string | null;
+  rows: LiveSignalRowApi[];
+  blockers: string[];
+};
+
+type LiveTradeTicketApi = {
+  id: string;
+  gp_slug: string;
+  session_code: string;
+  market_id: string;
+  token_id: string | null;
+  snapshot_id: string | null;
+  model_run_id: string | null;
+  promotion_stage: string | null;
+  question: string;
+  signal_action: string;
+  side_label: string;
+  model_prob: number;
+  market_price: number;
+  edge: number;
+  recommended_size: number;
+  observed_spread: number | null;
+  max_spread: number | null;
+  observed_at_utc: string;
+  source_event_type: string | null;
+  status: string;
+  rationale_json: Record<string, unknown> | null;
+  expires_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+type LiveTradeExecutionApi = {
+  id: string;
+  ticket_id: string;
+  market_id: string;
+  side: string;
+  submitted_size: number;
+  actual_fill_size: number | null;
+  actual_fill_price: number | null;
+  submitted_at: string;
+  filled_at: string | null;
+  operator_note: string | null;
+  external_reference: string | null;
+  realized_pnl: number | null;
+  status: string;
+  created_at: string;
+  updated_at: string;
+};
+
 type DriverAffinityEntryApi = {
   canonical_driver_key: string;
   display_driver_id: string | null;
@@ -1098,6 +1373,89 @@ function mapPaperTradePosition(
   };
 }
 
+function mapLiveTradeTicket(record: LiveTradeTicketApi): LiveTradeTicket {
+  return {
+    id: record.id,
+    gpSlug: record.gp_slug,
+    sessionCode: record.session_code,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    snapshotId: record.snapshot_id,
+    modelRunId: record.model_run_id,
+    promotionStage: record.promotion_stage,
+    question: record.question,
+    signalAction: record.signal_action,
+    sideLabel: record.side_label,
+    modelProb: record.model_prob,
+    marketPrice: record.market_price,
+    edge: record.edge,
+    recommendedSize: record.recommended_size,
+    observedSpread: record.observed_spread,
+    maxSpread: record.max_spread,
+    observedAtUtc: record.observed_at_utc,
+    sourceEventType: record.source_event_type,
+    status: record.status,
+    rationaleJson: record.rationale_json,
+    expiresAt: record.expires_at,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+  };
+}
+
+function mapLiveTradeExecution(
+  record: LiveTradeExecutionApi,
+): LiveTradeExecution {
+  return {
+    id: record.id,
+    ticketId: record.ticket_id,
+    marketId: record.market_id,
+    side: record.side,
+    submittedSize: record.submitted_size,
+    actualFillSize: record.actual_fill_size,
+    actualFillPrice: record.actual_fill_price,
+    submittedAt: record.submitted_at,
+    filledAt: record.filled_at,
+    operatorNote: record.operator_note,
+    externalReference: record.external_reference,
+    realizedPnl: record.realized_pnl,
+    status: record.status,
+    createdAt: record.created_at,
+    updatedAt: record.updated_at,
+  };
+}
+
+function mapLiveTradeSignalBoard(
+  record: LiveTradeSignalBoardApi,
+): LiveTradeSignalBoard {
+  return {
+    gpShortCode: record.gp_short_code,
+    requiredStage: record.required_stage,
+    activeModelRunId: record.active_model_run_id,
+    modelRunId: record.model_run_id,
+    snapshotId: record.snapshot_id,
+    blockers: record.blockers,
+    rows: record.rows.map((row) => ({
+      marketId: row.market_id,
+      tokenId: row.token_id,
+      question: row.question,
+      sessionCode: row.session_code,
+      promotionStage: row.promotion_stage,
+      modelRunId: row.model_run_id,
+      snapshotId: row.snapshot_id,
+      modelProb: row.model_prob,
+      marketPrice: row.market_price,
+      edge: row.edge,
+      spread: row.spread,
+      signalAction: row.signal_action,
+      sideLabel: row.side_label,
+      recommendedSize: row.recommended_size,
+      maxSpread: row.max_spread,
+      observedAtUtc: row.observed_at_utc,
+      eventType: row.event_type,
+    })),
+  };
+}
+
 function mapWeekendCockpitStep(
   record: WeekendCockpitStepApi,
 ): WeekendCockpitStep {
@@ -1123,6 +1481,12 @@ function mapWeekendCockpitStatus(
     autoSelectedGpShortCode: record.auto_selected_gp_short_code,
     selectedGpShortCode: record.selected_gp_short_code,
     selectedConfig: record.selected_config,
+    calendarStatus: record.calendar_status,
+    meetingSlug: record.meeting_slug,
+    sourceConflict: record.source_conflict,
+    overrideSourceUrl: record.override_source_url,
+    calendarMeetings: record.calendar_meetings.map(mapOpsCalendarMeeting),
+    cancelledMeetings: record.cancelled_meetings.map(mapOpsCalendarMeeting),
     availableConfigs: record.available_configs,
     meeting: record.meeting ? mapMeeting(record.meeting) : null,
     focusSession: record.focus_session
@@ -1147,6 +1511,26 @@ function mapWeekendCockpitStatus(
     requiredStage: record.required_stage,
     activeModelRunId: record.active_model_run_id,
     modelBlockers: record.model_blockers,
+    sessionStageStatuses: record.session_stage_statuses.map((item) => ({
+      gpShortCode: item.gp_short_code,
+      targetSessionCode: item.target_session_code,
+      requiredStage: item.required_stage,
+      modelReady: item.model_ready,
+      activeModelRunId: item.active_model_run_id,
+      modelBlockers: item.model_blockers,
+      displayLabel: item.display_label,
+    })),
+    liveTicketSummary: {
+      ticketCount: record.live_ticket_summary.ticket_count,
+      openTicketCount: record.live_ticket_summary.open_ticket_count,
+      filledTicketCount: record.live_ticket_summary.filled_ticket_count,
+      cancelledTicketCount: record.live_ticket_summary.cancelled_ticket_count,
+    },
+    liveExecutionSummary: {
+      executionCount: record.live_execution_summary.execution_count,
+      filledExecutionCount:
+        record.live_execution_summary.filled_execution_count,
+    },
     primaryActionTitle: record.primary_action_title,
     primaryActionDescription: record.primary_action_description,
     primaryActionCta: record.primary_action_cta,
@@ -1321,6 +1705,58 @@ function mapExecuteManualLivePaperTradeResponse(
     edge: record.edge,
     sideLabel: record.side_label,
     reason: record.reason,
+  };
+}
+
+function mapCreateLiveTradeTicketResponse(
+  record: CreateLiveTradeTicketResponseApi,
+): CreateLiveTradeTicketResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    ticketId: record.ticket_id,
+    gpShortCode: record.gp_short_code,
+    marketId: record.market_id,
+    modelRunId: record.model_run_id,
+    snapshotId: record.snapshot_id,
+    promotionStage: record.promotion_stage,
+    signalAction: record.signal_action,
+    sideLabel: record.side_label,
+    recommendedSize: record.recommended_size,
+    marketPrice: record.market_price,
+    modelProb: record.model_prob,
+    edge: record.edge,
+    observedSpread: record.observed_spread,
+    maxSpread: record.max_spread,
+    observedAtUtc: record.observed_at_utc,
+    expiresAt: record.expires_at,
+  };
+}
+
+function mapRecordLiveTradeFillResponse(
+  record: RecordLiveTradeFillResponseApi,
+): RecordLiveTradeFillResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    ticketId: record.ticket_id,
+    executionId: record.execution_id,
+    executionStatus: record.execution_status,
+    ticketStatus: record.ticket_status,
+  };
+}
+
+function mapCancelLiveTradeTicketResponse(
+  record: CancelLiveTradeTicketResponseApi,
+): CancelLiveTradeTicketResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    ticketId: record.ticket_id,
+    ticketStatus: record.ticket_status,
   };
 }
 

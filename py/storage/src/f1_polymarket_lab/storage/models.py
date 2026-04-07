@@ -192,13 +192,48 @@ class F1Meeting(Base):
     season: Mapped[int] = mapped_column(Integer, index=True)
     round_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     meeting_name: Mapped[str] = mapped_column(String(255))
+    meeting_slug: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     meeting_official_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    event_format: Mapped[str | None] = mapped_column(String(64), nullable=True)
     circuit_short_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     country_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     location: Mapped[str | None] = mapped_column(String(255), nullable=True)
     start_date_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     end_date_utc: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     raw_payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+
+class F1CalendarOverride(Base):
+    __tablename__ = "f1_calendar_overrides"
+    __table_args__ = (
+        UniqueConstraint(
+            "season",
+            "meeting_slug",
+            name="uq_f1_calendar_overrides_season_meeting_slug",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    season: Mapped[int] = mapped_column(Integer, index=True)
+    meeting_slug: Mapped[str] = mapped_column(String(255), index=True)
+    ops_slug: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="scheduled", index=True)
+    effective_round_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    effective_start_date_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_end_date_utc: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    effective_meeting_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    effective_country_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    effective_location: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class F1Session(Base):
@@ -1054,3 +1089,57 @@ class PaperTradePosition(Base):
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class LiveTradeTicket(Base):
+    """A manually executed live-trade recommendation and operator ticket."""
+
+    __tablename__ = "live_trade_tickets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    gp_slug: Mapped[str] = mapped_column(String(128), index=True)
+    session_code: Mapped[str] = mapped_column(String(16), index=True)
+    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    model_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    promotion_stage: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    question: Mapped[str] = mapped_column(Text)
+    signal_action: Mapped[str] = mapped_column(String(16))
+    side_label: Mapped[str] = mapped_column(String(8))
+    model_prob: Mapped[float] = mapped_column(Float)
+    market_price: Mapped[float] = mapped_column(Float)
+    edge: Mapped[float] = mapped_column(Float)
+    recommended_size: Mapped[float] = mapped_column(Float)
+    observed_spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    observed_at_utc: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    source_event_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="open", index=True)
+    rationale_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class LiveTradeExecution(Base):
+    """Actual operator-entered live execution for a recommendation ticket."""
+
+    __tablename__ = "live_trade_executions"
+    __table_args__ = (UniqueConstraint("ticket_id", name="uq_live_trade_executions_ticket"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    ticket_id: Mapped[str] = mapped_column(String(36), index=True)
+    market_id: Mapped[str] = mapped_column(String(64), index=True)
+    side: Mapped[str] = mapped_column(String(16))
+    submitted_size: Mapped[float] = mapped_column(Float)
+    actual_fill_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    operator_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    external_reference: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    realized_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), default="submitted", index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

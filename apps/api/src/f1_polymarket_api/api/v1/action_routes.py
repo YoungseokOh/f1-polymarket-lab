@@ -7,11 +7,18 @@ from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
     BackfillBacktestsRequest,
+    CancelLiveTradeTicketRequest,
+    CancelLiveTradeTicketResponse,
     CaptureLiveWeekendRequest,
     CaptureLiveWeekendResponse,
+    ClearCalendarOverrideRequest,
+    CreateLiveTradeTicketRequest,
+    CreateLiveTradeTicketResponse,
     ExecuteManualLivePaperTradeRequest,
     ExecuteManualLivePaperTradeResponse,
     IngestDemoRequest,
+    RecordLiveTradeFillRequest,
+    RecordLiveTradeFillResponse,
     RefreshDriverAffinityRequest,
     RefreshDriverAffinityResponse,
     RefreshLatestSessionRequest,
@@ -20,6 +27,7 @@ from f1_polymarket_api.schemas import (
     RunPaperTradeRequest,
     RunWeekendCockpitRequest,
     RunWeekendCockpitResponse,
+    SetCalendarOverrideRequest,
     SyncCalendarRequest,
     SyncF1MarketsRequest,
 )
@@ -132,6 +140,91 @@ def action_sync_calendar(
         )
     except Exception as exc:
         _raise_action_error(db, exc=exc, log_message="sync-calendar failed")
+
+
+@action_router.post("/actions/set-calendar-override", response_model=ActionStatusResponse)
+def action_set_calendar_override(
+    body: SetCalendarOverrideRequest,
+    db: Session = Depends(get_db_session),
+) -> ActionStatusResponse:
+    from f1_polymarket_worker.ops_calendar import set_calendar_override
+
+    try:
+        override = set_calendar_override(
+            db,
+            season=body.season,
+            meeting_slug=body.meeting_slug,
+            status=body.status,
+            ops_slug=body.ops_slug,
+            effective_round_number=body.effective_round_number,
+            effective_start_date_utc=body.effective_start_date_utc,
+            effective_end_date_utc=body.effective_end_date_utc,
+            effective_meeting_name=body.effective_meeting_name,
+            effective_country_name=body.effective_country_name,
+            effective_location=body.effective_location,
+            source_label=body.source_label,
+            source_url=body.source_url,
+            note=body.note,
+        )
+        db.commit()
+        return ActionStatusResponse(
+            action="set-calendar-override",
+            status="ok",
+            message=(
+                f"Calendar override saved for {override.season} {override.meeting_slug} "
+                f"({override.status})."
+            ),
+            details={
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "status": override.status,
+                "ops_slug": override.ops_slug,
+                "source_url": override.source_url,
+            },
+        )
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="set-calendar-override failed",
+            value_error_status=409,
+        )
+
+
+@action_router.post("/actions/clear-calendar-override", response_model=ActionStatusResponse)
+def action_clear_calendar_override(
+    body: ClearCalendarOverrideRequest,
+    db: Session = Depends(get_db_session),
+) -> ActionStatusResponse:
+    from f1_polymarket_worker.ops_calendar import clear_calendar_override
+
+    try:
+        override = clear_calendar_override(
+            db,
+            season=body.season,
+            meeting_slug=body.meeting_slug,
+        )
+        db.commit()
+        return ActionStatusResponse(
+            action="clear-calendar-override",
+            status="ok",
+            message=(
+                f"Calendar override cleared for {override.season} {override.meeting_slug}."
+            ),
+            details={
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "status": override.status,
+                "is_active": override.is_active,
+            },
+        )
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="clear-calendar-override failed",
+            key_error_status=404,
+        )
 
 
 @action_router.post("/actions/run-backtest", response_model=ActionStatusResponse)
@@ -429,6 +522,111 @@ def action_capture_live_weekend(
             db,
             exc=exc,
             log_message="capture-live-weekend failed",
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/create-live-trade-ticket",
+    response_model=CreateLiveTradeTicketResponse,
+)
+def action_create_live_trade_ticket(
+    body: CreateLiveTradeTicketRequest,
+    db: Session = Depends(get_db_session),
+) -> CreateLiveTradeTicketResponse:
+    from f1_polymarket_worker.live_trading import create_live_trade_ticket
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = create_live_trade_ticket(
+            ctx,
+            gp_short_code=body.gp_short_code,
+            market_id=body.market_id,
+            observed_market_price=body.observed_market_price,
+            observed_spread=body.observed_spread,
+            observed_at_utc=body.observed_at_utc,
+            source_event_type=body.source_event_type,
+            bet_size=body.bet_size,
+            min_edge=body.min_edge,
+            max_spread=body.max_spread,
+        )
+        db.commit()
+        return CreateLiveTradeTicketResponse.model_validate(result)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="create-live-trade-ticket failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/record-live-trade-fill",
+    response_model=RecordLiveTradeFillResponse,
+)
+def action_record_live_trade_fill(
+    body: RecordLiveTradeFillRequest,
+    db: Session = Depends(get_db_session),
+) -> RecordLiveTradeFillResponse:
+    from f1_polymarket_worker.live_trading import record_live_trade_fill
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = record_live_trade_fill(
+            ctx,
+            ticket_id=body.ticket_id,
+            submitted_size=body.submitted_size,
+            actual_fill_size=body.actual_fill_size,
+            actual_fill_price=body.actual_fill_price,
+            submitted_at=body.submitted_at,
+            filled_at=body.filled_at,
+            operator_note=body.operator_note,
+            external_reference=body.external_reference,
+            status=body.status,
+            realized_pnl=body.realized_pnl,
+        )
+        db.commit()
+        return RecordLiveTradeFillResponse.model_validate(result)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="record-live-trade-fill failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/cancel-live-trade-ticket",
+    response_model=CancelLiveTradeTicketResponse,
+)
+def action_cancel_live_trade_ticket(
+    body: CancelLiveTradeTicketRequest,
+    db: Session = Depends(get_db_session),
+) -> CancelLiveTradeTicketResponse:
+    from f1_polymarket_worker.live_trading import cancel_live_trade_ticket
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = cancel_live_trade_ticket(
+            ctx,
+            ticket_id=body.ticket_id,
+            operator_note=body.operator_note,
+        )
+        db.commit()
+        return CancelLiveTradeTicketResponse.model_validate(result)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="cancel-live-trade-ticket failed",
+            key_error_status=404,
             value_error_status=409,
         )
 

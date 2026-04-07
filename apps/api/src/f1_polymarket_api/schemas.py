@@ -28,6 +28,8 @@ class F1MeetingResponse(BaseModel):
     season: int
     round_number: int | None = None
     meeting_name: str
+    meeting_slug: str | None = None
+    event_format: str | None = None
     circuit_short_name: str | None = None
     country_name: str | None = None
     location: str | None = None
@@ -237,6 +239,25 @@ class ActionStatusResponse(BaseModel):
     details: dict[str, object] | None = None
 
 
+class OpsCalendarMeetingResponse(BaseModel):
+    season: int
+    meeting_key: int
+    meeting_slug: str
+    ops_slug: str
+    meeting_name: str
+    round_number: int | None = None
+    event_format: str | None = None
+    start_date_utc: datetime | None = None
+    end_date_utc: datetime | None = None
+    country_name: str | None = None
+    location: str | None = None
+    status: str
+    source_conflict: bool = False
+    source_label: str | None = None
+    source_url: str | None = None
+    note: str | None = None
+
+
 class IngestDemoRequest(BaseModel):
     season: int = 2026
     weekends: int = 2
@@ -252,6 +273,27 @@ class SyncF1MarketsRequest(BaseModel):
     search_fallback: bool = True
     start_year: int = 2022
     end_year: int | None = None
+
+
+class SetCalendarOverrideRequest(BaseModel):
+    season: int = 2026
+    meeting_slug: str
+    status: str
+    ops_slug: str | None = None
+    effective_round_number: int | None = None
+    effective_start_date_utc: datetime | None = None
+    effective_end_date_utc: datetime | None = None
+    effective_meeting_name: str | None = None
+    effective_country_name: str | None = None
+    effective_location: str | None = None
+    source_label: str | None = None
+    source_url: str | None = None
+    note: str | None = None
+
+
+class ClearCalendarOverrideRequest(BaseModel):
+    season: int = 2026
+    meeting_slug: str
 
 
 class RefreshLatestSessionRequest(BaseModel):
@@ -402,6 +444,7 @@ class GPRegistryItem(BaseModel):
     short_code: str
     meeting_key: int
     season: int
+    meeting_slug: str | None = None
     target_session_code: str
     variant: str
     source_session_code: str | None
@@ -410,6 +453,36 @@ class GPRegistryItem(BaseModel):
     stage_label: str
     display_label: str
     display_description: str
+    required_model_stage: str | None = None
+    live_bet_size: float | None = None
+    live_min_edge: float | None = None
+    live_max_daily_loss: float | None = None
+    live_max_spread: float | None = None
+    calendar_status: str = "scheduled"
+    source_conflict: bool = False
+    override_source_url: str | None = None
+
+
+class WeekendCockpitSessionStageResponse(BaseModel):
+    gp_short_code: str
+    target_session_code: str
+    required_stage: str | None
+    model_ready: bool
+    active_model_run_id: str | None
+    model_blockers: list[str]
+    display_label: str
+
+
+class LiveTradeTicketSummaryResponse(BaseModel):
+    ticket_count: int
+    open_ticket_count: int
+    filled_ticket_count: int
+    cancelled_ticket_count: int
+
+
+class LiveTradeExecutionSummaryResponse(BaseModel):
+    execution_count: int
+    filled_execution_count: int
 
 
 class WeekendCockpitStepResponse(BaseModel):
@@ -430,6 +503,12 @@ class WeekendCockpitStatusResponse(BaseModel):
     auto_selected_gp_short_code: str
     selected_gp_short_code: str
     selected_config: GPRegistryItem
+    calendar_status: str
+    meeting_slug: str
+    source_conflict: bool
+    override_source_url: str | None = None
+    calendar_meetings: list[OpsCalendarMeetingResponse] = Field(default_factory=list)
+    cancelled_meetings: list[OpsCalendarMeetingResponse] = Field(default_factory=list)
     available_configs: list[GPRegistryItem]
     meeting: F1MeetingResponse | None
     focus_session: F1SessionResponse | None
@@ -446,6 +525,9 @@ class WeekendCockpitStatusResponse(BaseModel):
     required_stage: str | None
     active_model_run_id: str | None
     model_blockers: list[str]
+    session_stage_statuses: list[WeekendCockpitSessionStageResponse]
+    live_ticket_summary: LiveTradeTicketSummaryResponse
+    live_execution_summary: LiveTradeExecutionSummaryResponse
     primary_action_title: str
     primary_action_description: str
     primary_action_cta: str
@@ -515,6 +597,106 @@ class RunWeekendCockpitRequest(BaseModel):
     bet_size: float = 10.0
     search_fallback: bool = True
     discover_max_pages: int = 5
+
+
+class LiveSignalRowResponse(BaseModel):
+    market_id: str
+    token_id: str | None = None
+    question: str
+    session_code: str
+    promotion_stage: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    model_prob: float
+    market_price: float | None = None
+    edge: float | None = None
+    spread: float | None = None
+    signal_action: str
+    side_label: str | None = None
+    recommended_size: float
+    max_spread: float | None = None
+    observed_at_utc: str | None = None
+    event_type: str | None = None
+
+
+class LiveTradeSignalBoardResponse(BaseModel):
+    gp_short_code: str
+    required_stage: str | None = None
+    active_model_run_id: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    rows: list[LiveSignalRowResponse]
+    blockers: list[str]
+
+
+class CreateLiveTradeTicketRequest(BaseModel):
+    gp_short_code: str
+    market_id: str
+    observed_market_price: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at_utc: datetime | None = None
+    source_event_type: str | None = None
+    bet_size: float | None = Field(default=None, gt=0.0, le=1000.0)
+    min_edge: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CreateLiveTradeTicketResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    gp_short_code: str
+    market_id: str
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    promotion_stage: str | None = None
+    signal_action: str
+    side_label: str
+    recommended_size: float
+    market_price: float
+    model_prob: float
+    edge: float
+    observed_spread: float | None = None
+    max_spread: float | None = None
+    observed_at_utc: datetime
+    expires_at: datetime | None = None
+
+
+class RecordLiveTradeFillRequest(BaseModel):
+    ticket_id: str
+    submitted_size: float = Field(gt=0.0, le=1000.0)
+    actual_fill_size: float | None = Field(default=None, gt=0.0, le=1000.0)
+    actual_fill_price: float | None = Field(default=None, gt=0.0, le=1.0)
+    submitted_at: datetime | None = None
+    filled_at: datetime | None = None
+    operator_note: str | None = None
+    external_reference: str | None = None
+    status: str = "filled"
+    realized_pnl: float | None = None
+
+
+class RecordLiveTradeFillResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    execution_id: str
+    execution_status: str
+    ticket_status: str
+
+
+class CancelLiveTradeTicketRequest(BaseModel):
+    ticket_id: str
+    operator_note: str | None = None
+
+
+class CancelLiveTradeTicketResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    ticket_status: str
 
 
 class WeekendCockpitSettlementSummaryResponse(BaseModel):
@@ -593,6 +775,55 @@ class PaperTradePositionResponse(BaseModel):
     exit_price: float | None
     exit_time: datetime | None
     realized_pnl: float | None
+
+
+class LiveTradeTicketResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    gp_slug: str
+    session_code: str
+    market_id: str
+    token_id: str | None
+    snapshot_id: str | None
+    model_run_id: str | None
+    promotion_stage: str | None
+    question: str
+    signal_action: str
+    side_label: str
+    model_prob: float
+    market_price: float
+    edge: float
+    recommended_size: float
+    observed_spread: float | None
+    max_spread: float | None
+    observed_at_utc: datetime
+    source_event_type: str | None
+    status: str
+    rationale_json: dict[str, object] | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LiveTradeExecutionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    ticket_id: str
+    market_id: str
+    side: str
+    submitted_size: float
+    actual_fill_size: float | None
+    actual_fill_price: float | None
+    submitted_at: datetime
+    filled_at: datetime | None
+    operator_note: str | None
+    external_reference: str | None
+    realized_pnl: float | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class PaperTradeSessionResponse(BaseModel):

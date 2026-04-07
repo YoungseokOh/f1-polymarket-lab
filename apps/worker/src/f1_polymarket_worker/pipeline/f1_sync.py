@@ -62,6 +62,9 @@ MODERN_WEEKEND_SESSION_CODE_BY_NAME = {
 }
 MODERN_WEEKEND_SESSION_CODES = frozenset(MODERN_WEEKEND_SESSION_CODE_BY_NAME.values())
 PRACTICE_SESSION_CODES = frozenset({"FP1", "FP2", "FP3"})
+COUNTRY_FALLBACK_MEETING_NAMES = {
+    "saudi arabia": "Saudi Arabian Grand Prix",
+}
 
 
 def session_code_from_name(name: str) -> str | None:
@@ -71,6 +74,44 @@ def session_code_from_name(name: str) -> str | None:
 def is_practice_session_name(name: str) -> bool:
     session_code = session_code_from_name(name)
     return session_code in PRACTICE_SESSION_CODES
+
+
+def _normalize_event_format(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if not text:
+        return None
+    return text.replace(" ", "_").replace("-", "_")
+
+
+def _infer_event_format(records: list[dict[str, Any]]) -> str | None:
+    session_codes = {
+        code
+        for code in (
+            session_code_from_name(str(item.get("session_name") or "")) for item in records
+        )
+        if code is not None
+    }
+    if {"FP1", "SQ", "S", "Q", "R"}.issubset(session_codes):
+        return "sprint"
+    if {"FP1", "FP2", "FP3", "Q", "R"}.issubset(session_codes):
+        return "conventional"
+    return None
+
+
+def _legacy_meeting_slug(first_session: dict[str, Any], meeting_key: int, season: int) -> str:
+    country_name = str(first_session.get("country_name") or "").strip()
+    if country_name:
+        fallback_name = COUNTRY_FALLBACK_MEETING_NAMES.get(
+            country_name.lower(),
+            f"{country_name} Grand Prix",
+        )
+        return slugify(fallback_name)
+    location = str(first_session.get("location") or "").strip()
+    if location:
+        return slugify(f"{location} Grand Prix")
+    return slugify(f"{season}-meeting-{meeting_key}")
 
 
 def _delete_sessions_and_children(ctx: PipelineContext, session_ids: list[str]) -> None:
@@ -216,6 +257,9 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
     )
 
     schedule_by_location = {str(record.get("Location", "")).lower(): record for record in schedule}
+    schedule_by_event_name = {
+        str(record.get("EventName", "")).lower(): record for record in schedule
+    }
     sessions_by_meeting: dict[int, list[dict[str, Any]]] = {}
     for record in sessions:
         session_name = str(record.get("session_name") or "")
@@ -229,6 +273,22 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
     for meeting_key, records in sorted(sessions_by_meeting.items()):
         first_session = sorted(records, key=lambda item: item["date_start"])[0]
         schedule_row = schedule_by_location.get(str(first_session.get("location", "")).lower(), {})
+        if not schedule_row:
+            schedule_row = schedule_by_event_name.get(
+                str(first_session.get("meeting_name", "")).lower(),
+                {},
+            )
+        meeting_name = str(
+            schedule_row.get("EventName")
+            or first_session.get("meeting_name")
+            or first_session.get("country_name")
+            or meeting_key
+        )
+        meeting_slug = (
+            slugify(str(schedule_row.get("EventName")))
+            if schedule_row.get("EventName")
+            else _legacy_meeting_slug(first_session, meeting_key, season)
+        )
         meeting_id = f"meeting:{meeting_key}"
         meeting_rows.append(
             {
@@ -237,12 +297,11 @@ def sync_f1_calendar(ctx: PipelineContext, *, season: int) -> dict[str, Any]:
                 "meeting_key": meeting_key,
                 "season": season,
                 "round_number": schedule_row.get("RoundNumber"),
-                "meeting_name": str(
-                    schedule_row.get("EventName")
-                    or first_session.get("country_name")
-                    or meeting_key
-                ),
+                "meeting_name": meeting_name,
+                "meeting_slug": meeting_slug,
                 "meeting_official_name": schedule_row.get("OfficialEventName"),
+                "event_format": _normalize_event_format(schedule_row.get("EventFormat"))
+                or _infer_event_format(records),
                 "circuit_short_name": first_session.get("circuit_short_name"),
                 "country_name": first_session.get("country_name"),
                 "location": first_session.get("location"),

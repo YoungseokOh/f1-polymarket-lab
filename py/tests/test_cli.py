@@ -70,6 +70,88 @@ def test_sync_polymarket_catalog_command_routes_filters(
     }
 
 
+def test_set_f1_calendar_override_command_routes_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings())
+    monkeypatch.setattr(cli, "db_session", fake_db_session)
+
+    class Override:
+        season = 2026
+        meeting_slug = "miami-grand-prix"
+        status = "postponed"
+        ops_slug = "miami"
+        source_url = "https://example.com"
+
+    def fake_set_calendar_override(session, **kwargs):
+        captured.update(kwargs)
+        return Override()
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.ops_calendar.set_calendar_override",
+        fake_set_calendar_override,
+    )
+
+    cli.set_f1_calendar_override_command(
+        season=2026,
+        meeting_slug="miami-grand-prix",
+        status="postponed",
+        ops_slug="miami",
+        effective_round_number=None,
+        effective_start_date_utc=None,
+        effective_end_date_utc=None,
+        effective_meeting_name=None,
+        effective_country_name=None,
+        effective_location=None,
+        source_label=None,
+        source_url="https://example.com",
+        note=None,
+        execute=True,
+    )
+
+    assert captured["season"] == 2026
+    assert captured["meeting_slug"] == "miami-grand-prix"
+    assert captured["status"] == "postponed"
+    assert captured["ops_slug"] == "miami"
+    assert captured["source_url"] == "https://example.com"
+
+
+def test_clear_f1_calendar_override_command_routes_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "get_settings", lambda: Settings())
+    monkeypatch.setattr(cli, "db_session", fake_db_session)
+
+    class Override:
+        season = 2026
+        meeting_slug = "miami-grand-prix"
+        is_active = False
+
+    def fake_clear_calendar_override(session, **kwargs):
+        captured.update(kwargs)
+        return Override()
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.ops_calendar.clear_calendar_override",
+        fake_clear_calendar_override,
+    )
+
+    cli.clear_f1_calendar_override_command(
+        season=2026,
+        meeting_slug="miami-grand-prix",
+        execute=True,
+    )
+
+    assert captured == {
+        "season": 2026,
+        "meeting_slug": "miami-grand-prix",
+    }
+
+
 def test_worker_command_fails_fast() -> None:
     with pytest.raises(typer.Exit) as exc_info:
         cli.worker()

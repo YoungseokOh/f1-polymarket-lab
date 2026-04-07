@@ -23,6 +23,8 @@ except ImportError as exc:  # pragma: no cover - import availability is environm
     mlflow = None
 
 MULTITASK_PROMOTION_STAGE = "multitask_qr"
+SQ_POLE_LIVE_PROMOTION_STAGE = "sq_pole_live_v1"
+SPRINT_WINNER_LIVE_PROMOTION_STAGE = "sprint_winner_live_v1"
 MULTITASK_EXPERIMENT_NAME = "weekend_ops.multitask_qr"
 SUPPORTED_MULTITASK_SOURCE_CHECKPOINTS = frozenset({"FP1", "FP2", "FP3", "Q"})
 
@@ -57,6 +59,9 @@ def mlflow_experiment_name_for_stage(stage: str) -> str:
 
 
 def required_model_stage_for_gp(config: Any) -> str | None:
+    explicit_stage = getattr(config, "required_model_stage", None)
+    if isinstance(explicit_stage, str) and explicit_stage:
+        return explicit_stage
     target_session_code = getattr(config, "target_session_code", None)
     source_session_code = getattr(config, "source_session_code", None)
     if (

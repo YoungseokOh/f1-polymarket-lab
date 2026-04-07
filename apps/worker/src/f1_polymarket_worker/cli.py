@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 from f1_polymarket_lab.common import get_settings
@@ -78,6 +79,95 @@ def sync_f1_calendar_command(
         context = PipelineContext(db=session, execute=execute)
         result = sync_f1_calendar(context, season=season)
     typer.echo(result)
+
+
+@app.command("set-f1-calendar-override")
+def set_f1_calendar_override_command(
+    season: int = 2026,
+    meeting_slug: str = typer.Option(..., "--meeting-slug"),
+    status: str = typer.Option(..., "--status"),
+    ops_slug: str | None = typer.Option(None, "--ops-slug"),
+    effective_round_number: int | None = typer.Option(None, "--effective-round-number"),
+    effective_start_date_utc: str | None = typer.Option(None, "--effective-start-date-utc"),
+    effective_end_date_utc: str | None = typer.Option(None, "--effective-end-date-utc"),
+    effective_meeting_name: str | None = typer.Option(None, "--effective-meeting-name"),
+    effective_country_name: str | None = typer.Option(None, "--effective-country-name"),
+    effective_location: str | None = typer.Option(None, "--effective-location"),
+    source_label: str | None = typer.Option(None, "--source-label"),
+    source_url: str | None = typer.Option(None, "--source-url"),
+    note: str | None = typer.Option(None, "--note"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.ops_calendar import set_calendar_override
+    from f1_polymarket_worker.pipeline import parse_dt
+
+    payload = {
+        "season": season,
+        "meeting_slug": meeting_slug,
+        "status": status,
+        "ops_slug": ops_slug,
+        "effective_round_number": effective_round_number,
+        "effective_start_date_utc": parse_dt(effective_start_date_utc),
+        "effective_end_date_utc": parse_dt(effective_end_date_utc),
+        "effective_meeting_name": effective_meeting_name,
+        "effective_country_name": effective_country_name,
+        "effective_location": effective_location,
+        "source_label": source_label,
+        "source_url": source_url,
+        "note": note,
+    }
+    if not execute:
+        typer.echo({"status": "planned", **payload})
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        override = set_calendar_override(session, **payload)
+        typer.echo(
+            {
+                "status": "ok",
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "override_status": override.status,
+                "ops_slug": override.ops_slug,
+                "source_url": override.source_url,
+            }
+        )
+
+
+@app.command("clear-f1-calendar-override")
+def clear_f1_calendar_override_command(
+    season: int = 2026,
+    meeting_slug: str = typer.Option(..., "--meeting-slug"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.ops_calendar import clear_calendar_override
+
+    if not execute:
+        typer.echo(
+            {
+                "status": "planned",
+                "season": season,
+                "meeting_slug": meeting_slug,
+            }
+        )
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        override = clear_calendar_override(
+            session,
+            season=season,
+            meeting_slug=meeting_slug,
+        )
+        typer.echo(
+            {
+                "status": "ok",
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "is_active": override.is_active,
+            }
+        )
 
 
 @app.command("hydrate-f1-session")

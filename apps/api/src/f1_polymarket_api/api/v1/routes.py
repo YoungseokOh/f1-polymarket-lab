@@ -17,8 +17,12 @@ from f1_polymarket_api.schemas import (
     FreshnessResponse,
     GPRegistryItem,
     IngestionJobRunResponse,
+    LiveTradeExecutionResponse,
+    LiveTradeSignalBoardResponse,
+    LiveTradeTicketResponse,
     ModelPredictionResponse,
     ModelRunResponse,
+    OpsCalendarMeetingResponse,
     PaperTradePositionResponse,
     PaperTradeSessionResponse,
     PolymarketEventResponse,
@@ -38,6 +42,8 @@ from f1_polymarket_lab.storage.models import (
     F1Team,
     FeatureSnapshot,
     IngestionJobRun,
+    LiveTradeExecution,
+    LiveTradeTicket,
     ModelPrediction,
     ModelRun,
     ModelRunPromotion,
@@ -88,6 +94,18 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
         auto_selected_gp_short_code=payload["auto_selected_gp_short_code"],
         selected_gp_short_code=payload["selected_gp_short_code"],
         selected_config=payload["selected_config"],
+        calendar_status=payload["calendar_status"],
+        meeting_slug=payload["meeting_slug"],
+        source_conflict=payload["source_conflict"],
+        override_source_url=payload["override_source_url"],
+        calendar_meetings=[
+            OpsCalendarMeetingResponse.model_validate(item)
+            for item in payload["calendar_meetings"]
+        ],
+        cancelled_meetings=[
+            OpsCalendarMeetingResponse.model_validate(item)
+            for item in payload["cancelled_meetings"]
+        ],
         available_configs=payload["available_configs"],
         meeting=(
             None
@@ -124,6 +142,9 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
         required_stage=payload["required_stage"],
         active_model_run_id=payload["active_model_run_id"],
         model_blockers=payload["model_blockers"],
+        session_stage_statuses=payload["session_stage_statuses"],
+        live_ticket_summary=payload["live_ticket_summary"],
+        live_execution_summary=payload["live_execution_summary"],
         primary_action_title=payload["primary_action_title"],
         primary_action_description=payload["primary_action_description"],
         primary_action_cta=payload["primary_action_cta"],
@@ -430,18 +451,64 @@ def snapshots(db: Session = Depends(get_db_session)) -> list[FeatureSnapshotResp
 # ---------------------------------------------------------------------------
 
 
+@router.get("/ops-calendar", response_model=list[OpsCalendarMeetingResponse])
+def ops_calendar(
+    season: int | None = Query(None),
+    include_cancelled: bool = Query(False),
+    db: Session = Depends(get_db_session),
+) -> list[OpsCalendarMeetingResponse]:
+    from f1_polymarket_worker.ops_calendar import (
+        resolve_effective_ops_calendar,
+        resolve_ops_season,
+    )
+
+    resolved_season = resolve_ops_season(db) if season is None else season
+    return [
+        OpsCalendarMeetingResponse.model_validate(
+            {
+                "season": meeting.season,
+                "meeting_key": meeting.meeting_key,
+                "meeting_slug": meeting.meeting_slug,
+                "ops_slug": meeting.ops_slug,
+                "meeting_name": meeting.meeting_name,
+                "round_number": meeting.round_number,
+                "event_format": meeting.event_format,
+                "start_date_utc": meeting.start_date_utc,
+                "end_date_utc": meeting.end_date_utc,
+                "country_name": meeting.country_name,
+                "location": meeting.location,
+                "status": meeting.status,
+                "source_conflict": meeting.source_conflict,
+                "source_label": meeting.source_label,
+                "source_url": meeting.source_url,
+                "note": meeting.note,
+            }
+        )
+        for meeting in resolve_effective_ops_calendar(
+            db,
+            season=resolved_season,
+            include_cancelled=include_cancelled,
+        )
+    ]
+
+
 @router.get("/actions/gp-registry", response_model=list[GPRegistryItem])
-def gp_registry(db: Session = Depends(get_db_session)) -> list[GPRegistryItem]:
+def gp_registry(
+    season: int | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> list[GPRegistryItem]:
     from f1_polymarket_worker.gp_registry import (
-        GP_REGISTRY,
         config_display_description,
         config_display_label,
         config_stage_label,
     )
+    from f1_polymarket_worker.ops_calendar import list_ops_stage_configs, resolve_ops_season
 
-    registry_configs = list(GP_REGISTRY)
-    target_meeting_keys = {gp.meeting_key for gp in registry_configs}
-    target_seasons = {gp.season for gp in registry_configs}
+    resolved_season = resolve_ops_season(db) if season is None else season
+    registry_entries = list(list_ops_stage_configs(db, season=resolved_season))
+    registry_configs = [config for _, config in registry_entries]
+    target_meeting_keys = {meeting.meeting_key for meeting, _ in registry_entries}
+    target_seasons = {meeting.season for meeting, _ in registry_entries}
     target_session_codes = {gp.target_session_code for gp in registry_configs}
     target_snapshot_types = {gp.snapshot_type for gp in registry_configs}
 
@@ -505,19 +572,24 @@ def gp_registry(db: Session = Depends(get_db_session)) -> list[GPRegistryItem]:
         ).all()
     }
 
-    def sort_key(gp) -> tuple[int, int, int, int, int, int]:
+    meeting_by_key = {
+        (meeting.meeting_key, meeting.season): meeting for meeting, _ in registry_entries
+    }
+
+    def sort_key(gp) -> tuple[bool, bool, int, int, int, int]:
         session_id = session_id_by_target.get(
             (gp.meeting_key, gp.season, gp.target_session_code)
         )
         mapped_count = 0 if session_id is None else mapped_market_counts.get(session_id, 0)
         result_count = 0 if session_id is None else result_counts.get(session_id, 0)
         has_snapshot = int(gp.snapshot_type in snapshot_types_with_data)
+        meeting = meeting_by_key[(gp.meeting_key, gp.season)]
         return (
-            has_snapshot,
-            mapped_count,
-            result_count,
-            gp.season,
-            gp.meeting_key,
+            meeting.status == "cancelled",
+            meeting.round_number is None,
+            meeting.round_number or 10_000,
+            -has_snapshot,
+            -(mapped_count + result_count),
             gp.stage_rank,
         )
 
@@ -527,6 +599,7 @@ def gp_registry(db: Session = Depends(get_db_session)) -> list[GPRegistryItem]:
             short_code=gp.short_code,
             meeting_key=gp.meeting_key,
             season=gp.season,
+            meeting_slug=meeting_by_key[(gp.meeting_key, gp.season)].meeting_slug,
             target_session_code=gp.target_session_code,
             variant=gp.variant,
             source_session_code=gp.source_session_code,
@@ -535,9 +608,76 @@ def gp_registry(db: Session = Depends(get_db_session)) -> list[GPRegistryItem]:
             stage_label=config_stage_label(gp),
             display_label=config_display_label(gp),
             display_description=config_display_description(gp),
+            required_model_stage=gp.required_model_stage,
+            live_bet_size=gp.live_bet_size,
+            live_min_edge=gp.live_min_edge,
+            live_max_daily_loss=gp.live_max_daily_loss,
+            live_max_spread=gp.live_max_spread,
+            calendar_status=meeting_by_key[(gp.meeting_key, gp.season)].status,
+            source_conflict=meeting_by_key[(gp.meeting_key, gp.season)].source_conflict,
+            override_source_url=meeting_by_key[(gp.meeting_key, gp.season)].source_url,
         )
-        for gp in sorted(registry_configs, key=sort_key, reverse=True)
+        for gp in sorted(registry_configs, key=sort_key)
     ]
+
+
+# ---------------------------------------------------------------------------
+# Live trading endpoints
+# ---------------------------------------------------------------------------
+
+
+@router.get("/live-trading/signal-board", response_model=LiveTradeSignalBoardResponse)
+def live_trade_signal_board(
+    gp_short_code: str,
+    db: Session = Depends(get_db_session),
+) -> LiveTradeSignalBoardResponse:
+    from f1_polymarket_worker.live_trading import build_live_signal_board
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        payload = build_live_signal_board(
+            PipelineContext(db=db, execute=True),
+            gp_short_code=gp_short_code,
+        )
+        return LiveTradeSignalBoardResponse.model_validate(payload)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/live-trading/tickets", response_model=list[LiveTradeTicketResponse])
+def live_trading_tickets(
+    gp_slug: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db_session),
+) -> list[LiveTradeTicketResponse]:
+    stmt = select(LiveTradeTicket).order_by(LiveTradeTicket.created_at.desc()).limit(limit)
+    if gp_slug is not None:
+        stmt = stmt.where(LiveTradeTicket.gp_slug == gp_slug)
+    if status is not None:
+        stmt = stmt.where(LiveTradeTicket.status == status)
+    records = db.scalars(stmt).all()
+    return [LiveTradeTicketResponse.model_validate(record) for record in records]
+
+
+@router.get("/live-trading/executions", response_model=list[LiveTradeExecutionResponse])
+def live_trading_executions(
+    gp_slug: str | None = None,
+    status: str | None = None,
+    limit: int = 50,
+    db: Session = Depends(get_db_session),
+) -> list[LiveTradeExecutionResponse]:
+    stmt = select(LiveTradeExecution).order_by(LiveTradeExecution.submitted_at.desc()).limit(limit)
+    if gp_slug is not None:
+        stmt = stmt.join(LiveTradeTicket, LiveTradeTicket.id == LiveTradeExecution.ticket_id).where(
+            LiveTradeTicket.gp_slug == gp_slug
+        )
+    if status is not None:
+        stmt = stmt.where(LiveTradeExecution.status == status)
+    records = db.scalars(stmt).all()
+    return [LiveTradeExecutionResponse.model_validate(record) for record in records]
 
 
 # ---------------------------------------------------------------------------
@@ -575,6 +715,8 @@ def weekend_cockpit_status(
         )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/driver-affinity", response_model=DriverAffinityReportResponse)
