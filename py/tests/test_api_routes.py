@@ -13,6 +13,8 @@ from f1_polymarket_lab.storage.models import (
     F1Meeting,
     F1Session,
     FeatureSnapshot,
+    ModelRun,
+    ModelRunPromotion,
     PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
@@ -167,6 +169,31 @@ def build_test_client(tmp_path: Path) -> TestClient:
                     mapping_type="other",
                     confidence=0.4,
                 ),
+                ModelRun(
+                    id="model-run-1",
+                    stage="multitask_qr",
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    dataset_version="multitask_v1",
+                    config_json={"seed": 7},
+                    metrics_json={"total_pnl": 11.2, "roi_pct": 14.0, "bet_count": 24},
+                    artifact_uri=str(tmp_path / "artifacts" / "model-run-1"),
+                    registry_run_id="mlflow-run-1",
+                ),
+                ModelRunPromotion(
+                    id="promotion-1",
+                    model_run_id="model-run-1",
+                    stage="multitask_qr",
+                    status="active",
+                    gate_metrics_json={
+                        "total_pnl": 11.2,
+                        "roi_pct": 14.0,
+                        "bet_count": 24,
+                        "ece": 0.05,
+                        "family_pnl_share_max": 0.5,
+                    },
+                    promoted_at=datetime(2026, 3, 26, 8, 0, tzinfo=timezone.utc),
+                ),
                 PaperTradeSession(
                     id="pt-japan-pre",
                     gp_slug="japan_pre",
@@ -241,6 +268,20 @@ def test_mappings_endpoint_filters_by_confidence_and_session(tmp_path: Path) -> 
     assert [row["id"] for row in payload] == ["mapping-high"]
 
 
+def test_model_runs_endpoint_includes_registry_and_promotion_fields(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        response = client.get("/api/v1/model-runs")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["id"] == "model-run-1"
+    assert payload[0]["registry_run_id"] == "mlflow-run-1"
+    assert payload[0]["promotion_status"] == "active"
+    assert payload[0]["promoted_at"].startswith("2026-03-26T08:00:00")
+
+
 def test_weekend_cockpit_status_auto_selects_pre_weekend_before_fp1_end(
     tmp_path: Path,
     monkeypatch,
@@ -260,6 +301,10 @@ def test_weekend_cockpit_status_auto_selects_pre_weekend_before_fp1_end(
     assert payload["auto_selected_gp_short_code"] == "japan_pre"
     assert payload["selected_gp_short_code"] == "japan_pre"
     assert payload["ready_to_run"] is True
+    assert payload["model_ready"] is True
+    assert payload["required_stage"] is None
+    assert payload["active_model_run_id"] is None
+    assert payload["model_blockers"] == []
     assert payload["selected_config"]["source_session_code"] is None
 
 
@@ -294,6 +339,10 @@ def test_weekend_cockpit_status_auto_selects_fp1_to_fp2_between_fp1_end_and_fp2_
         "This latest update will load FP1 results first and prepare FP2 markets."
     )
     assert payload["primary_action_cta"] == "Update to latest"
+    assert payload["model_ready"] is True
+    assert payload["required_stage"] is None
+    assert payload["active_model_run_id"] is None
+    assert payload["model_blockers"] == []
     assert payload["explanation"] == (
         "This stage uses FP1 results to settle finished FP1 tickets, find FP2 markets, "
         "and when ready continue into paper trading."
@@ -334,6 +383,10 @@ def test_weekend_cockpit_status_blocks_fp1_before_session_end(
     assert payload["selected_gp_short_code"] == "japan_fp1"
     assert payload["ready_to_run"] is False
     assert payload["blockers"]
+    assert payload["model_ready"] is True
+    assert payload["required_stage"] == "multitask_qr"
+    assert payload["active_model_run_id"] == "model-run-1"
+    assert payload["model_blockers"] == []
     assert payload["primary_action_title"] == "Wait for this stage"
     assert payload["primary_action_cta"] == "Not ready yet"
     assert payload["steps"][1]["reason_code"] == "session_in_progress"
@@ -365,6 +418,10 @@ def test_weekend_cockpit_status_blocks_fp2_to_q_during_fp2_live(
     assert payload["timeline_completed_codes"] == ["FP1"]
     assert payload["timeline_active_code"] == "FP2"
     assert payload["ready_to_run"] is False
+    assert payload["model_ready"] is True
+    assert payload["required_stage"] == "multitask_qr"
+    assert payload["active_model_run_id"] == "model-run-1"
+    assert payload["model_blockers"] == []
     assert "FP2 is still in progress" in payload["blockers"][0]
 
 

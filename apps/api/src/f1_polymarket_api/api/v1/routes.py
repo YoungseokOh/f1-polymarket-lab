@@ -40,6 +40,7 @@ from f1_polymarket_lab.storage.models import (
     IngestionJobRun,
     ModelPrediction,
     ModelRun,
+    ModelRunPromotion,
     PaperTradePosition,
     PaperTradeSession,
     PolymarketEvent,
@@ -119,6 +120,10 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
         steps=payload["steps"],
         blockers=payload["blockers"],
         ready_to_run=payload["ready_to_run"],
+        model_ready=payload["model_ready"],
+        required_stage=payload["required_stage"],
+        active_model_run_id=payload["active_model_run_id"],
+        model_blockers=payload["model_blockers"],
         primary_action_title=payload["primary_action_title"],
         primary_action_description=payload["primary_action_description"],
         primary_action_cta=payload["primary_action_cta"],
@@ -349,7 +354,47 @@ def model_runs(db: Session = Depends(get_db_session)) -> list[ModelRunResponse]:
     records = db.scalars(
         select(ModelRun).order_by(ModelRun.created_at.desc())
     ).all()
-    return [ModelRunResponse.model_validate(record) for record in records]
+    if not records:
+        return []
+    promotions = db.scalars(
+        select(ModelRunPromotion).where(
+            ModelRunPromotion.model_run_id.in_([record.id for record in records])
+        )
+    ).all()
+    promotion_by_model_run_id: dict[str, ModelRunPromotion] = {}
+    for promotion in promotions:
+        existing = promotion_by_model_run_id.get(promotion.model_run_id)
+        if existing is None or promotion.promoted_at >= existing.promoted_at:
+            promotion_by_model_run_id[promotion.model_run_id] = promotion
+
+    return [
+        ModelRunResponse.model_validate(
+            {
+                "id": record.id,
+                "stage": record.stage,
+                "model_family": record.model_family,
+                "model_name": record.model_name,
+                "dataset_version": record.dataset_version,
+                "feature_snapshot_id": record.feature_snapshot_id,
+                "config_json": record.config_json,
+                "metrics_json": record.metrics_json,
+                "artifact_uri": record.artifact_uri,
+                "registry_run_id": record.registry_run_id,
+                "promotion_status": (
+                    promotion_by_model_run_id[record.id].status
+                    if record.id in promotion_by_model_run_id
+                    else "inactive"
+                ),
+                "promoted_at": (
+                    promotion_by_model_run_id[record.id].promoted_at
+                    if record.id in promotion_by_model_run_id
+                    else None
+                ),
+                "created_at": record.created_at,
+            }
+        )
+        for record in records
+    ]
 
 
 @router.get("/predictions", response_model=list[ModelPredictionResponse])

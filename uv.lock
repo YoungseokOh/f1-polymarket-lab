@@ -801,6 +801,7 @@ dependencies = [
     { name = "f1-polymarket-connectors" },
     { name = "f1-polymarket-features" },
     { name = "f1-polymarket-storage" },
+    { name = "mlflow" },
     { name = "typer" },
 ]
 
@@ -810,6 +811,7 @@ requires-dist = [
     { name = "f1-polymarket-connectors", editable = "py/connectors" },
     { name = "f1-polymarket-features", editable = "py/features" },
     { name = "f1-polymarket-storage", editable = "py/storage" },
+    { name = "mlflow", specifier = ">=2.20.3" },
     { name = "typer", specifier = ">=0.15.2" },
 ]
 

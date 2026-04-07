@@ -87,6 +87,27 @@ make db-upgrade
 uv run python -m f1_polymarket_worker.cli run-<gp-code>-fp1-paper-trade --execute
 ```
 
+Qualifying and race weekend ops now require an active promoted `multitask_qr` champion. Train the
+walk-forward model, promote the selected run, then score a live snapshot:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-multitask-walk-forward \
+  --manifest data/feature_snapshots/multitask/2026/manifest.json \
+  --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli promote-model-run \
+  --model-run-id <MODEL_RUN_ID> \
+  --stage multitask_qr \
+  --execute
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli score-multitask-snapshot \
+  --snapshot-id <SNAPSHOT_ID> \
+  --stage multitask_qr \
+  --execute
+```
+
+`train-multitask-walk-forward` logs runs to MLflow experiment `weekend_ops.multitask_qr`,
+persists the MLflow run id on `model_runs.registry_run_id`, and weekend paper trading will hard-fail
+when no active promotion exists for the required stage.
+
 ## Multitask Q/R research workflow
 
 Build checkpoint-aware snapshots:

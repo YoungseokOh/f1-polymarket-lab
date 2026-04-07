@@ -143,6 +143,9 @@ class ModelRunResponse(BaseModel):
     config_json: dict[str, object] | None
     metrics_json: dict[str, object] | None
     artifact_uri: str | None
+    registry_run_id: str | None = None
+    promotion_status: str = "inactive"
+    promoted_at: datetime | None = None
     created_at: datetime
 
 
@@ -439,6 +442,10 @@ class WeekendCockpitStatusResponse(BaseModel):
     steps: list[WeekendCockpitStepResponse]
     blockers: list[str]
     ready_to_run: bool
+    model_ready: bool
+    required_stage: str | None
+    active_model_run_id: str | None
+    model_blockers: list[str]
     primary_action_title: str
     primary_action_description: str
     primary_action_cta: str

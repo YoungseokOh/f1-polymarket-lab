@@ -218,6 +218,10 @@ const baseStatus: WeekendCockpitStatus = {
   ],
   blockers: [],
   readyToRun: true,
+  modelReady: true,
+  requiredStage: null,
+  activeModelRunId: null,
+  modelBlockers: [],
   primaryActionTitle: "Update to latest",
   primaryActionDescription:
     "This latest update will discover FP2 markets first, then continue into paper trading.",
@@ -380,6 +384,42 @@ describe("WeekendCockpitPanel", () => {
     expect(screen.getByText("fp1_to_fp2")).toBeInTheDocument();
     expect(screen.getByText("driver_fastest_lap_practice")).toBeInTheDocument();
     expect(screen.getByText(/11246/)).toBeInTheDocument();
+  });
+
+  it("shows model blockers separately from data blockers", () => {
+    const blockedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      readyToRun: false,
+      modelReady: false,
+      requiredStage: "multitask_qr",
+      activeModelRunId: null,
+      modelBlockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+      steps: baseStatus.steps.map((step) =>
+        step.key === "run_paper_trade"
+          ? {
+              ...step,
+              status: "blocked",
+              detail:
+                "A promoted multitask_qr champion is required before paper trading can run.",
+            }
+          : step,
+      ),
+      blockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+    };
+
+    render(<WeekendCockpitPanel initialStatus={blockedStatus} />);
+
+    expect(screen.getByText("Model blockers")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("Current blockers")).not.toBeInTheDocument();
   });
 
   it("shows pending state immediately and completes the CTA run flow", async () => {

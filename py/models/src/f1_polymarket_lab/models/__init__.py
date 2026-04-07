@@ -15,7 +15,13 @@ from .xgb_trainer import (
 if TYPE_CHECKING:
     from .lgbm_trainer import LGBMTrainerConfig
     from .multitask_model import MultitaskModelConfig, MultitaskTabularModel
-    from .multitask_trainer import MultitaskTrainerConfig, train_multitask_split
+    from .multitask_trainer import (
+        MultitaskTrainerConfig,
+        load_multitask_artifacts,
+        save_multitask_artifacts,
+        score_multitask_frame,
+        train_multitask_split,
+    )
     from .tuner import tune_xgb
 else:
     try:
@@ -79,7 +85,13 @@ else:
                 raise ImportError(msg) from _MULTITASK_IMPORT_ERROR
 
     try:
-        from .multitask_trainer import MultitaskTrainerConfig, train_multitask_split
+        from .multitask_trainer import (
+            MultitaskTrainerConfig,
+            load_multitask_artifacts,
+            save_multitask_artifacts,
+            score_multitask_frame,
+            train_multitask_split,
+        )
     except (ImportError, OSError) as exc:
         _MULTITASK_TRAINER_IMPORT_ERROR = exc
 
@@ -100,6 +112,30 @@ else:
             )
             raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
 
+        def save_multitask_artifacts(*args: Any, **kwargs: Any) -> Any:
+            msg = (
+                "Multitask training requires the optional 'torch' dependency. "
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`."
+            )
+            raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
+
+        def load_multitask_artifacts(*args: Any, **kwargs: Any) -> Any:
+            msg = (
+                "Multitask training requires the optional 'torch' dependency. "
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`."
+            )
+            raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
+
+        def score_multitask_frame(*args: Any, **kwargs: Any) -> Any:
+            msg = (
+                "Multitask training requires the optional 'torch' dependency. "
+                "Install it with `make bootstrap` or "
+                "`uv sync --all-packages --group modeling`."
+            )
+            raise ImportError(msg) from _MULTITASK_TRAINER_IMPORT_ERROR
+
 __all__ = [
     "ALL_FEATURES",
     "LGBMTrainerConfig",
@@ -107,6 +143,9 @@ __all__ = [
     "MultitaskModelConfig",
     "MultitaskTabularModel",
     "MultitaskTrainerConfig",
+    "load_multitask_artifacts",
+    "save_multitask_artifacts",
+    "score_multitask_frame",
     "TrainResult",
     "WalkForwardSplit",
     "XGBTrainerConfig",

@@ -831,7 +831,11 @@ export function WeekendCockpitPanel({
     isCapturingLive ||
     isLiveWatchActive ||
     manualTradeMarketId !== null;
-  const blockedSteps = status.steps.filter((step) => step.status === "blocked");
+  const blockedSteps = status.steps.filter(
+    (step) =>
+      step.status === "blocked" &&
+      (step.key !== "run_paper_trade" || status.modelBlockers.length === 0),
+  );
 
   return (
     <Panel title="Weekend cockpit" eyebrow="Latest update">
@@ -851,6 +855,14 @@ export function WeekendCockpitPanel({
               Recommended stage:{" "}
               {autoConfig?.display_label ?? status.autoSelectedGpShortCode}
             </p>
+            {status.requiredStage && (
+              <p className="text-xs text-[#6b7280]">
+                Model stage {status.requiredStage} ·{" "}
+                {status.modelReady
+                  ? `champion ${status.activeModelRunId?.slice(0, 8) ?? "unknown"} active`
+                  : "promotion required"}
+              </p>
+            )}
           </div>
 
           <div className="w-full max-w-sm space-y-2">
@@ -1392,6 +1404,17 @@ export function WeekendCockpitPanel({
             className={`rounded-xl border px-4 py-3 text-sm ${feedbackTone(feedback.status)}`}
           >
             {feedback.message}
+          </div>
+        )}
+
+        {status.modelBlockers.length > 0 && (
+          <div className="rounded-xl border border-[#e10600]/20 bg-[#e10600]/10 px-4 py-3 text-sm text-[#ffd9d6]">
+            <p className="font-medium">Model blockers</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {status.modelBlockers.map((blocker) => (
+                <li key={blocker}>{blocker}</li>
+              ))}
+            </ul>
           </div>
         )}
 

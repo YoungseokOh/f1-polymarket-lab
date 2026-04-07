@@ -22,6 +22,9 @@ describe("calibration", () => {
           },
         },
         artifactUri: null,
+        registryRunId: null,
+        promotionStatus: "inactive",
+        promotedAt: null,
         createdAt: "2026-03-28T00:00:00Z",
       },
       {
@@ -39,6 +42,9 @@ describe("calibration", () => {
           },
         },
         artifactUri: null,
+        registryRunId: null,
+        promotionStatus: "inactive",
+        promotedAt: null,
         createdAt: "2026-03-28T01:00:00Z",
       },
     ] satisfies ModelRun[];

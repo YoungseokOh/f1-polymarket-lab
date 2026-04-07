@@ -79,6 +79,13 @@ from f1_polymarket_worker.market_discovery import (
     _market_session_delta_days,
     discover_session_polymarket,  # noqa: F401
 )
+from f1_polymarket_worker.model_registry import (
+    get_active_promoted_model_run,
+    gp_supports_promoted_multitask,
+    required_model_stage_for_gp,
+    score_promoted_multitask_snapshot,
+)
+from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snapshots
 from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
 from f1_polymarket_worker.pipeline import (
     PipelineContext,
@@ -2048,6 +2055,18 @@ def get_weekend_cockpit_status(
         for step in (hydrate_step, settle_step, discover_step)
         if step["status"] == "blocked"
     ]
+    required_stage = required_model_stage_for_gp(selected_config)
+    active_promoted_model_run = (
+        None
+        if required_stage is None
+        else get_active_promoted_model_run(ctx.db, stage=required_stage)
+    )
+    model_blockers: list[str] = []
+    if required_stage is not None and active_promoted_model_run is None:
+        model_blockers.append(
+            f"A promoted {required_stage} champion is required before paper trading can run."
+        )
+    blockers.extend(model_blockers)
     if blockers:
         run_step = _step_payload(
             key="run_paper_trade",
@@ -2113,6 +2132,12 @@ def get_weekend_cockpit_status(
         "steps": [sync_step, hydrate_step, settle_step, discover_step, run_step],
         "blockers": blockers,
         "ready_to_run": not blockers,
+        "model_ready": not model_blockers,
+        "required_stage": required_stage,
+        "active_model_run_id": (
+            None if active_promoted_model_run is None else active_promoted_model_run.id
+        ),
+        "model_blockers": model_blockers,
         "primary_action_title": primary_action["primary_action_title"],
         "primary_action_description": primary_action["primary_action_description"],
         "primary_action_cta": primary_action["primary_action_cta"],
@@ -2134,38 +2159,79 @@ def run_gp_paper_trade_pipeline(
 
     ensure_default_feature_registry(ctx)
 
-    if snapshot_id is None:
-        snap_result = build_snapshot(
+    if gp_supports_promoted_multitask(config):
+        required_stage = required_model_stage_for_gp(config)
+        if required_stage is None:
+            raise ValueError(f"Unable to resolve promoted multitask stage for {config.short_code}")
+
+        if snapshot_id is None:
+            checkpoint = config.source_session_code
+            if checkpoint is None:
+                raise ValueError(
+                    f"config={config.short_code} is missing source_session_code "
+                    "for multitask scoring"
+                )
+            snap_result = build_multitask_feature_snapshots(
+                ctx,
+                meeting_key=config.meeting_key,
+                season=config.season,
+                checkpoints=(checkpoint,),
+                stage=required_stage,
+            )
+            snapshot_ids = snap_result.get("snapshot_ids", [])
+            if not snapshot_ids:
+                raise ValueError(f"Multitask snapshot build failed: {snap_result}")
+            used_snapshot_id = snapshot_ids[0]
+        else:
+            used_snapshot_id = snapshot_id
+
+        snapshot = ctx.db.get(FeatureSnapshot, used_snapshot_id)
+        if snapshot is None:
+            raise KeyError(f"snapshot_id={used_snapshot_id} not found")
+
+        score_result = score_promoted_multitask_snapshot(
+            ctx.db,
+            data_root=Path(ctx.settings.data_root),
+            snapshot=snapshot,
+            stage=required_stage,
+        )
+        used_model_run_id = str(score_result["model_run_id"])
+        resolved_baseline = "promoted_multitask"
+    else:
+        if snapshot_id is None:
+            snap_result = build_snapshot(
+                ctx,
+                config,
+                meeting_key=config.meeting_key,
+                season=config.season,
+                entry_offset_min=config.entry_offset_min,
+                fidelity=config.fidelity,
+            )
+            used_snapshot_id = snap_result.get("snapshot_id")
+            if not used_snapshot_id:
+                raise ValueError(f"Snapshot build failed: {snap_result}")
+        else:
+            used_snapshot_id = snapshot_id
+
+        baseline_result = run_baseline(
             ctx,
             config,
-            meeting_key=config.meeting_key,
-            season=config.season,
-            entry_offset_min=config.entry_offset_min,
-            fidelity=config.fidelity,
+            snapshot_id=used_snapshot_id,
+            min_edge=min_edge,
         )
-        used_snapshot_id = snap_result.get("snapshot_id")
-        if not used_snapshot_id:
-            raise ValueError(f"Snapshot build failed: {snap_result}")
-    else:
-        used_snapshot_id = snapshot_id
-
-    baseline_result = run_baseline(
-        ctx,
-        config,
-        snapshot_id=used_snapshot_id,
-        min_edge=min_edge,
-    )
-    model_run_ids: list[str] = baseline_result.get("model_runs", [])
-    used_model_run_id, resolved_baseline = select_model_run_id(
-        config,
-        model_run_ids,
-        baseline=baseline,
-    )
+        model_run_ids: list[str] = baseline_result.get("model_runs", [])
+        used_model_run_id, resolved_baseline = select_model_run_id(
+            config,
+            model_run_ids,
+            baseline=baseline,
+        )
+        snapshot = (
+            None if used_snapshot_id is None else ctx.db.get(FeatureSnapshot, used_snapshot_id)
+        )
 
     predictions = ctx.db.scalars(
         select(ModelPrediction).where(ModelPrediction.model_run_id == used_model_run_id)
     ).all()
-    snapshot = None if used_snapshot_id is None else ctx.db.get(FeatureSnapshot, used_snapshot_id)
     if not predictions:
         raise ValueError("No predictions found for model run")
 

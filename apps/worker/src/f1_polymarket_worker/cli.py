@@ -880,6 +880,12 @@ def train_multitask_walk_forward_command(
     from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
     from f1_polymarket_lab.storage.repository import upsert_records
 
+    from f1_polymarket_worker.model_registry import (
+        log_run_to_mlflow,
+        mlflow_experiment_name_for_stage,
+        model_artifact_dir,
+    )
+
     def load_snapshot_frames(paths: list[str]) -> list[pl_module.DataFrame]:
         frames: list[pl_module.DataFrame] = []
         for path in paths:
@@ -956,12 +962,17 @@ def train_multitask_walk_forward_command(
             test_df = pl_module.concat(test_frames)
 
             model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
+            artifact_dir = model_artifact_dir(
+                data_root=Path(settings.data_root),
+                model_run_id=model_run_id,
+            )
             result = train_multitask_split(
                 train_df,
                 test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 config=MultitaskTrainerConfig(),
+                artifact_dir=artifact_dir,
             )
 
             test_timestamps = [
@@ -969,18 +980,60 @@ def train_multitask_walk_forward_command(
                 for value in test_df["as_of_ts"].to_list()
                 if isinstance(value, datetime)
             ] if "as_of_ts" in test_df.columns else []
+            train_snapshot_ids = [
+                str(row["snapshot_id"])
+                for meeting_key in split.train_meeting_keys
+                for row in grouped[meeting_key]
+            ]
+            test_snapshot_ids = [str(row["snapshot_id"]) for row in test_snapshots]
+
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "predictions.json").write_text(
+                json.dumps(result.predictions, indent=2, default=str),
+                encoding="utf-8",
+            )
+            (artifact_dir / "metrics.json").write_text(
+                json.dumps(result.metrics, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            registry_run_id = log_run_to_mlflow(
+                tracking_uri=settings.mlflow_tracking_uri,
+                experiment_name=mlflow_experiment_name_for_stage(stage),
+                run_name=f"{stage}:{split.test_meeting_key}",
+                params={
+                    **result.config,
+                    "manifest_path": manifest,
+                    "train_snapshot_ids": train_snapshot_ids,
+                    "test_snapshot_ids": test_snapshot_ids,
+                },
+                metrics=result.metrics,
+                tags={
+                    "stage": stage,
+                    "model_family": "torch_multitask",
+                    "test_meeting_key": str(split.test_meeting_key),
+                },
+                artifact_dir=artifact_dir,
+            )
 
             run_record = {
                 "id": result.model_run_id,
                 "stage": stage,
                 "model_family": "torch_multitask",
-                "model_name": "shared_encoder_multitask_v1",
+                "model_name": "shared_encoder_multitask_v2",
                 "dataset_version": "multitask_v1",
                 "feature_snapshot_id": None,
                 "test_start": min(test_timestamps) if test_timestamps else None,
                 "test_end": max(test_timestamps) if test_timestamps else None,
-                "config_json": result.config,
+                "config_json": {
+                    **result.config,
+                    "manifest_path": manifest,
+                    "train_snapshot_ids": train_snapshot_ids,
+                    "test_snapshot_ids": test_snapshot_ids,
+                },
                 "metrics_json": result.metrics,
+                "artifact_uri": str(artifact_dir),
+                "registry_run_id": registry_run_id,
             }
             upsert_records(session, ModelRun, [run_record], conflict_columns=["id"])
 
@@ -1015,6 +1068,81 @@ def train_multitask_walk_forward_command(
             )
 
         typer.echo(f"Multitask walk-forward training complete: {len(all_results)} folds evaluated.")
+
+
+@app.command("promote-model-run")
+def promote_model_run_command(
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import ModelRun
+
+    from f1_polymarket_worker.model_registry import evaluate_promotion_gate, promote_model_run
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        model_run = session.get(ModelRun, model_run_id)
+        if model_run is None:
+            typer.echo(f"model_run_id={model_run_id} not found")
+            raise typer.Exit(1)
+
+        decision = evaluate_promotion_gate(model_run.metrics_json)
+        if not execute:
+            if decision.eligible:
+                typer.echo(f"[plan] Would promote model_run_id={model_run_id} for stage={stage}")
+            else:
+                typer.echo(
+                    "[plan] Promotion would fail: " + "; ".join(decision.failed_rules)
+                )
+            return
+
+        promotion = promote_model_run(session, model_run_id=model_run_id, stage=stage)
+        typer.echo(
+            f"Promoted model_run_id={promotion.model_run_id} for stage={promotion.stage}"
+        )
+
+
+@app.command("score-multitask-snapshot")
+def score_multitask_snapshot_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import FeatureSnapshot
+
+    from f1_polymarket_worker.model_registry import (
+        get_active_promoted_model_run,
+        score_promoted_multitask_snapshot,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        snapshot = session.get(FeatureSnapshot, snapshot_id)
+        if snapshot is None:
+            typer.echo(f"snapshot_id={snapshot_id} not found")
+            raise typer.Exit(1)
+
+        champion = get_active_promoted_model_run(session, stage=stage)
+        if champion is None:
+            typer.echo(f"No active promoted champion exists for stage={stage}")
+            raise typer.Exit(1)
+
+        if not execute:
+            typer.echo(
+                f"[plan] Would score snapshot_id={snapshot_id} with champion={champion.id}"
+            )
+            return
+
+        result = score_promoted_multitask_snapshot(
+            session,
+            data_root=Path(settings.data_root),
+            snapshot=snapshot,
+            stage=stage,
+        )
+        typer.echo(
+            f"Scored snapshot_id={snapshot_id} with model_run_id={result['model_run_id']}"
+        )
 
 
 @app.command("run-multitask-autoresearch")
@@ -1316,12 +1444,14 @@ def paper_trade_command(
     """Run paper trading simulation using model predictions."""
     from f1_polymarket_lab.storage.models import FeatureSnapshot, ModelPrediction
 
+    from f1_polymarket_worker.model_registry import ensure_model_run_allowed_for_paper_trade
     from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
 
     settings = get_settings()
     with db_session(settings.database_url) as session:
         from sqlalchemy import select
 
+        ensure_model_run_allowed_for_paper_trade(session, model_run_id=model_run_id)
         preds = session.scalars(
             select(ModelPrediction).where(
                 ModelPrediction.model_run_id == model_run_id

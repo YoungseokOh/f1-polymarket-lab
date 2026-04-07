@@ -628,6 +628,9 @@ type ModelRunApi = {
   config_json: Record<string, unknown> | null;
   metrics_json: Record<string, unknown> | null;
   artifact_uri: string | null;
+  registry_run_id: string | null;
+  promotion_status: string;
+  promoted_at: string | null;
   created_at: string;
 };
 
@@ -676,6 +679,9 @@ function mapModelRun(record: ModelRunApi): ModelRun {
     configJson: record.config_json,
     metricsJson: record.metrics_json,
     artifactUri: record.artifact_uri,
+    registryRunId: record.registry_run_id,
+    promotionStatus: record.promotion_status,
+    promotedAt: record.promoted_at,
     createdAt: record.created_at,
   };
 }
@@ -847,6 +853,10 @@ type WeekendCockpitStatusApi = {
   steps: WeekendCockpitStepApi[];
   blockers: string[];
   ready_to_run: boolean;
+  model_ready: boolean;
+  required_stage: string | null;
+  active_model_run_id: string | null;
+  model_blockers: string[];
   primary_action_title: string;
   primary_action_description: string;
   primary_action_cta: string;
@@ -1133,6 +1143,10 @@ function mapWeekendCockpitStatus(
     steps: record.steps.map(mapWeekendCockpitStep),
     blockers: record.blockers,
     readyToRun: record.ready_to_run,
+    modelReady: record.model_ready,
+    requiredStage: record.required_stage,
+    activeModelRunId: record.active_model_run_id,
+    modelBlockers: record.model_blockers,
     primaryActionTitle: record.primary_action_title,
     primaryActionDescription: record.primary_action_description,
     primaryActionCta: record.primary_action_cta,

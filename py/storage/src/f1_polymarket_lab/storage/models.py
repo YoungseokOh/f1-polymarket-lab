@@ -936,7 +936,22 @@ class ModelRun(Base):
     config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     artifact_uri: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    registry_run_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelRunPromotion(Base):
+    __tablename__ = "model_run_promotions"
+    __table_args__ = (
+        UniqueConstraint("model_run_id", "stage", name="uq_model_run_promotions_run_stage"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    model_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    stage: Mapped[str] = mapped_column(String(64), index=True)
+    status: Mapped[str] = mapped_column(String(32), index=True)
+    gate_metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    promoted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class ModelPrediction(Base):

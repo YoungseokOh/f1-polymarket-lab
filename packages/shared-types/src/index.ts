@@ -137,6 +137,9 @@ export interface ModelRun {
   configJson: Record<string, unknown> | null;
   metricsJson: Record<string, unknown> | null;
   artifactUri: string | null;
+  registryRunId: string | null;
+  promotionStatus: string;
+  promotedAt: string | null;
   createdAt: string;
 }
 
@@ -420,6 +423,10 @@ export interface WeekendCockpitStatus {
   steps: WeekendCockpitStep[];
   blockers: string[];
   readyToRun: boolean;
+  modelReady: boolean;
+  requiredStage: string | null;
+  activeModelRunId: string | null;
+  modelBlockers: string[];
   primaryActionTitle: string;
   primaryActionDescription: string;
   primaryActionCta: string;

@@ -40,5 +40,5 @@ Current schema baseline includes the required canonical table families:
 - Gold:
   - `dataset_version_manifest`
   - `feature_registry`, `feature_snapshots`, `snapshot_run_manifest`
-  - `model_runs`, `model_predictions`
+  - `model_runs`, `model_run_promotions`, `model_predictions`
   - `backtest_orders`, `backtest_positions`, `backtest_results`

@@ -23,6 +23,8 @@ from f1_polymarket_lab.storage.models import (
     FeatureSnapshot,
     MappingCandidate,
     MarketTaxonomyLabel,
+    ModelRun,
+    ModelRunPromotion,
     PaperTradePosition,
     PaperTradeSession,
     PolymarketEvent,
@@ -69,12 +71,53 @@ def build_context(tmp_path: Path, *, execute: bool = True) -> tuple[Session, Pip
     return session, context
 
 
+def seed_active_promoted_multitask_champion(session: Session, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts" / "model-runs" / "champion-run"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    session.add_all(
+        [
+            ModelRun(
+                id="champion-run",
+                stage="multitask_qr",
+                model_family="torch_multitask",
+                model_name="shared_encoder_multitask_v2",
+                dataset_version="multitask_v1",
+                config_json={"seed": 7},
+                metrics_json={
+                    "total_pnl": 12.5,
+                    "roi_pct": 16.0,
+                    "bet_count": 28,
+                    "ece": 0.05,
+                    "family_pnl_share_max": 0.54,
+                },
+                artifact_uri=str(artifact_dir),
+                registry_run_id="mlflow-champion-run",
+            ),
+            ModelRunPromotion(
+                id="promotion-champion-run",
+                model_run_id="champion-run",
+                stage="multitask_qr",
+                status="active",
+                gate_metrics_json={
+                    "total_pnl": 12.5,
+                    "roi_pct": 16.0,
+                    "bet_count": 28,
+                    "ece": 0.05,
+                    "family_pnl_share_max": 0.54,
+                },
+                promoted_at=datetime(2026, 3, 28, 7, 50, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+
+
 def seed_japan_q_race_cockpit_fixture(
     session: Session,
     tmp_path: Path,
     *,
     include_q_results: bool,
     include_resolvable_manual_trade: bool = True,
+    include_promoted_model: bool = True,
 ) -> None:
     meeting = F1Meeting(
         id="meeting:1281",
@@ -313,6 +356,8 @@ def seed_japan_q_race_cockpit_fixture(
                 ),
             ]
         )
+    if include_promoted_model:
+        seed_active_promoted_multitask_champion(session, tmp_path)
     session.commit()
 
 
@@ -2884,7 +2929,42 @@ def test_get_weekend_cockpit_status_marks_finished_stage_settlement_ready(
         assert settle_step["status"] == "ready"
         assert settle_step["count"] == 2
         assert "2 prior runs" in settle_step["detail"]
+        assert status["model_ready"] is True
+        assert status["required_stage"] == "multitask_qr"
+        assert status["active_model_run_id"] == "champion-run"
+        assert status["model_blockers"] == []
         assert status["primary_action_cta"] == "Update to latest"
+    finally:
+        session.close()
+
+
+def test_get_weekend_cockpit_status_reports_model_blockers_without_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        seed_japan_q_race_cockpit_fixture(
+            session,
+            tmp_path,
+            include_q_results=True,
+            include_promoted_model=False,
+        )
+
+        status = get_weekend_cockpit_status(context, gp_short_code="japan_q_race")
+
+        assert status["ready_to_run"] is False
+        assert status["model_ready"] is False
+        assert status["required_stage"] == "multitask_qr"
+        assert status["active_model_run_id"] is None
+        assert status["model_blockers"] == [
+            "A promoted multitask_qr champion is required before paper trading can run."
+        ]
+        assert status["blockers"][-1] == status["model_blockers"][0]
     finally:
         session.close()
 
