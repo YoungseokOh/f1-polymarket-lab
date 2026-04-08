@@ -18,6 +18,14 @@ export type MarketTaxonomy =
   | "sprint_winner"
   | "other";
 
+export type MarketGroup =
+  | "driver_outright"
+  | "constructor_outright"
+  | "head_to_head"
+  | "incident_binary"
+  | "championship"
+  | "other";
+
 export interface ApiHealth {
   service: string;
   status: string;
@@ -207,6 +215,112 @@ export interface PricePoint {
   midpoint: number | null;
   bestBid: number | null;
   bestAsk: number | null;
+}
+
+export interface SignalRegistryEntry {
+  id: string;
+  signalCode: string;
+  signalFamily: string;
+  marketTaxonomy: MarketTaxonomy | null;
+  marketGroup: MarketGroup | null;
+  description: string | null;
+  version: string;
+  configJson: Record<string, unknown> | null;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface SignalSnapshot {
+  id: string;
+  modelRunId: string;
+  featureSnapshotId: string | null;
+  marketId: string | null;
+  tokenId: string | null;
+  eventId: string | null;
+  marketTaxonomy: MarketTaxonomy;
+  marketGroup: MarketGroup;
+  meetingKey: number | null;
+  asOfTs: string;
+  signalCode: string;
+  signalVersion: string;
+  pYesRaw: number | null;
+  pYesCalibrated: number | null;
+  pMarketRef: number | null;
+  deltaLogit: number | null;
+  freshnessSec: number | null;
+  coverageFlag: boolean;
+  metadataJson: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface SignalDiagnostic {
+  id: string;
+  modelRunId: string;
+  signalCode: string;
+  marketTaxonomy: MarketTaxonomy | null;
+  marketGroup: MarketGroup | null;
+  phaseBucket: string | null;
+  brier: number | null;
+  logLoss: number | null;
+  ece: number | null;
+  skillVsMarket: number | null;
+  coverageRate: number | null;
+  residualCorrelationJson: Record<string, unknown> | null;
+  stabilityJson: Record<string, unknown> | null;
+  metricsJson: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface EnsemblePrediction {
+  id: string;
+  modelRunId: string;
+  featureSnapshotId: string | null;
+  marketId: string | null;
+  tokenId: string | null;
+  eventId: string | null;
+  marketTaxonomy: MarketTaxonomy;
+  marketGroup: MarketGroup;
+  meetingKey: number | null;
+  asOfTs: string;
+  pMarketRef: number | null;
+  pYesEnsemble: number | null;
+  zMarket: number | null;
+  zEnsemble: number | null;
+  intercept: number | null;
+  disagreementScore: number | null;
+  effectiveN: number | null;
+  uncertaintyScore: number | null;
+  contributionsJson: Record<string, unknown> | null;
+  coverageJson: Record<string, unknown> | null;
+  metadataJson: Record<string, unknown> | null;
+  createdAt: string;
+}
+
+export interface TradeDecision {
+  id: string;
+  modelRunId: string;
+  ensemblePredictionId: string | null;
+  featureSnapshotId: string | null;
+  marketId: string | null;
+  tokenId: string | null;
+  eventId: string | null;
+  marketTaxonomy: MarketTaxonomy;
+  marketGroup: MarketGroup;
+  meetingKey: number | null;
+  asOfTs: string;
+  side: string;
+  edge: number | null;
+  threshold: number | null;
+  spread: number | null;
+  depth: number | null;
+  kellyFractionRaw: number | null;
+  disagreementPenalty: number | null;
+  liquidityFactor: number | null;
+  sizeFraction: number | null;
+  decisionStatus: string;
+  decisionReason: string | null;
+  metadataJson: Record<string, unknown> | null;
+  createdAt: string;
 }
 
 // ---------------------------------------------------------------------------

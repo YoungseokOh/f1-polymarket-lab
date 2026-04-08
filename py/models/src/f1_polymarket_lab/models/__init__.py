@@ -2,6 +2,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from .signal_ensemble import (
+    SIGNAL_ENSEMBLE_STAGE,
+    EnsembleTrainResult,
+    SignalEnsembleConfig,
+    default_signal_registry_entries,
+    load_signal_ensemble_artifacts,
+    score_signal_ensemble_frame,
+    train_signal_ensemble_split,
+)
 from .stages import MODELING_ORDER
 from .xgb_trainer import (
     ALL_FEATURES,
@@ -138,13 +147,19 @@ else:
 
 __all__ = [
     "ALL_FEATURES",
+    "default_signal_registry_entries",
+    "EnsembleTrainResult",
     "LGBMTrainerConfig",
+    "load_signal_ensemble_artifacts",
     "MODELING_ORDER",
     "MultitaskModelConfig",
     "MultitaskTabularModel",
     "MultitaskTrainerConfig",
+    "score_signal_ensemble_frame",
     "load_multitask_artifacts",
     "save_multitask_artifacts",
+    "SIGNAL_ENSEMBLE_STAGE",
+    "SignalEnsembleConfig",
     "score_multitask_frame",
     "TrainResult",
     "WalkForwardSplit",
@@ -153,5 +168,6 @@ __all__ = [
     "train_one_split",
     "train_one_split_lgbm",
     "train_multitask_split",
+    "train_signal_ensemble_split",
     "tune_xgb",
 ]

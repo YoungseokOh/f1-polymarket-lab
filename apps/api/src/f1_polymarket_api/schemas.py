@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from f1_polymarket_lab.common import MarketTaxonomy
+from f1_polymarket_lab.common import MarketGroup, MarketTaxonomy
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -225,6 +225,122 @@ class PriceHistoryResponse(BaseModel):
     midpoint: float | None
     best_bid: float | None
     best_ask: float | None
+
+
+class SignalRegistryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    signal_code: str
+    signal_family: str
+    market_taxonomy: str | None = None
+    market_group: str | None = None
+    description: str | None = None
+    version: str
+    config_json: dict[str, object] | None = None
+    is_active: bool
+    created_at: datetime
+
+
+class SignalSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    signal_code: str
+    signal_version: str
+    p_yes_raw: float | None = None
+    p_yes_calibrated: float | None = None
+    p_market_ref: float | None = None
+    delta_logit: float | None = None
+    freshness_sec: float | None = None
+    coverage_flag: bool
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class SignalDiagnosticResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    signal_code: str
+    market_taxonomy: MarketTaxonomy | None = None
+    market_group: MarketGroup | None = None
+    phase_bucket: str | None = None
+    brier: float | None = None
+    log_loss: float | None = None
+    ece: float | None = None
+    skill_vs_market: float | None = None
+    coverage_rate: float | None = None
+    residual_correlation_json: dict[str, object] | None = None
+    stability_json: dict[str, object] | None = None
+    metrics_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class EnsemblePredictionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    p_market_ref: float | None = None
+    p_yes_ensemble: float | None = None
+    z_market: float | None = None
+    z_ensemble: float | None = None
+    intercept: float | None = None
+    disagreement_score: float | None = None
+    effective_n: float | None = None
+    uncertainty_score: float | None = None
+    contributions_json: dict[str, object] | None = None
+    coverage_json: dict[str, object] | None = None
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class TradeDecisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    ensemble_prediction_id: str | None = None
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    side: str
+    edge: float | None = None
+    threshold: float | None = None
+    spread: float | None = None
+    depth: float | None = None
+    kelly_fraction_raw: float | None = None
+    disagreement_penalty: float | None = None
+    liquidity_factor: float | None = None
+    size_fraction: float | None = None
+    decision_status: str
+    decision_reason: str | None = None
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
 
 
 # ---------------------------------------------------------------------------

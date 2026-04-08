@@ -1,5 +1,7 @@
 "use client";
 
+import * as React from "react";
+
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import { LineChart, ScatterChart } from "echarts/charts";
 import { GridComponent, TooltipComponent } from "echarts/components";

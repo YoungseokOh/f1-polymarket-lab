@@ -3,6 +3,7 @@ import Link from "next/link";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
 import { PriceLineChart } from "../../_components/charts/price-line-chart";
+import { MarketEnsemblePanel } from "../../_components/market-ensemble-panel";
 
 export const revalidate = 300;
 
@@ -11,10 +12,20 @@ type Props = { params: Promise<{ marketId: string }> };
 export default async function MarketDetailPage({ params }: Props) {
   const { marketId } = await params;
 
-  const [market, prices, predictions] = await Promise.all([
+  const [
+    market,
+    prices,
+    predictions,
+    ensemblePredictions,
+    signalSnapshots,
+    tradeDecisions,
+  ] = await Promise.all([
     sdk.market(marketId).catch(() => null),
     sdk.marketPrices(marketId).catch(() => []),
-    sdk.predictions().catch(() => []),
+    sdk.predictions({ marketId, limit: 100 }).catch(() => []),
+    sdk.ensemblePredictions({ marketId, limit: 50 }).catch(() => []),
+    sdk.signalSnapshots({ marketId, limit: 100 }).catch(() => []),
+    sdk.tradeDecisions({ marketId, limit: 50 }).catch(() => []),
   ]);
 
   if (!market) {
@@ -204,6 +215,13 @@ export default async function MarketDetailPage({ params }: Props) {
           </div>
         </Panel>
       )}
+
+      <MarketEnsemblePanel
+        market={market}
+        ensemblePredictions={ensemblePredictions}
+        signalSnapshots={signalSnapshots}
+        tradeDecisions={tradeDecisions}
+      />
 
       {/* Market Metadata */}
       <Panel title="Details" eyebrow="Metadata">

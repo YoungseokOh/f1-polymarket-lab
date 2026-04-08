@@ -11,6 +11,7 @@ import { formatUsd } from "../../lib/display";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
 import { BacktestActions } from "../_components/backtest-actions";
 import { BacktestTableSection } from "../_components/backtest-table-section";
+import { EnsembleBacktestSection } from "../_components/ensemble-backtest-section";
 
 export const revalidate = 300;
 
@@ -152,6 +153,8 @@ export default async function BacktestPage() {
       </Panel>
 
       <BacktestActions />
+
+      <EnsembleBacktestSection backtestResults={backtestResults} />
 
       <BacktestTableSection
         backtestResults={backtestResults}

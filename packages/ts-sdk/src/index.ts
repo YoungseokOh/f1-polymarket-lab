@@ -9,6 +9,7 @@ import type {
   CancelLiveTradeTicketResponse,
   CaptureLiveWeekendRequest,
   CaptureLiveWeekendResponse,
+  ClearCalendarOverrideRequest,
   CreateLiveTradeTicketRequest,
   CreateLiveTradeTicketResponse,
   CursorState,
@@ -16,6 +17,7 @@ import type {
   DriverAffinityEntry,
   DriverAffinityReport,
   DriverAffinitySegment,
+  EnsemblePrediction,
   EntityMapping,
   ExecuteManualLivePaperTradeRequest,
   ExecuteManualLivePaperTradeResponse,
@@ -28,13 +30,13 @@ import type {
   GPRegistryItem,
   IngestDemoRequest,
   IngestionJobRun,
-  OpsCalendarMeeting,
   LiveTradeExecution,
   LiveTradeSignalBoard,
   LiveTradeTicket,
   MarketTaxonomy,
   ModelPrediction,
   ModelRun,
+  OpsCalendarMeeting,
   PaperTradePosition,
   PaperTradeSession,
   PolymarketEvent,
@@ -52,10 +54,13 @@ import type {
   RunWeekendCockpitDetails,
   RunWeekendCockpitRequest,
   RunWeekendCockpitResponse,
-  ClearCalendarOverrideRequest,
   SetCalendarOverrideRequest,
+  SignalDiagnostic,
+  SignalRegistryEntry,
+  SignalSnapshot,
   SyncCalendarRequest,
   SyncF1MarketsRequest,
+  TradeDecision,
   WeekendCockpitSettlementSummary,
   WeekendCockpitStatus,
   WeekendCockpitStep,
@@ -533,12 +538,85 @@ export const sdk = {
     const records = await apiGet<ModelRunApi[]>("/api/v1/model-runs");
     return records.map(mapModelRun);
   },
-  predictions: async (modelRunId?: string): Promise<ModelPrediction[]> => {
-    const path = modelRunId
-      ? `/api/v1/predictions?model_run_id=${encodeURIComponent(modelRunId)}`
-      : "/api/v1/predictions";
-    const records = await apiGet<ModelPredictionApi[]>(path);
+  predictions: async (options?: {
+    modelRunId?: string;
+    marketId?: string;
+    limit?: number;
+  }): Promise<ModelPrediction[]> => {
+    const records = await apiGet<ModelPredictionApi[]>("/api/v1/predictions", {
+      model_run_id: options?.modelRunId,
+      market_id: options?.marketId,
+      limit: options?.limit,
+    });
     return records.map(mapModelPrediction);
+  },
+  signalRegistry: async (): Promise<SignalRegistryEntry[]> => {
+    const records = await apiGet<SignalRegistryApi[]>(
+      "/api/v1/signals/registry",
+    );
+    return records.map(mapSignalRegistryEntry);
+  },
+  signalSnapshots: async (options?: {
+    modelRunId?: string;
+    marketId?: string;
+    signalCode?: string;
+    limit?: number;
+  }): Promise<SignalSnapshot[]> => {
+    const records = await apiGet<SignalSnapshotApi[]>(
+      "/api/v1/signals/snapshots",
+      {
+        model_run_id: options?.modelRunId,
+        market_id: options?.marketId,
+        signal_code: options?.signalCode,
+        limit: options?.limit,
+      },
+    );
+    return records.map(mapSignalSnapshot);
+  },
+  signalDiagnostics: async (options?: {
+    modelRunId?: string;
+    marketGroup?: string;
+  }): Promise<SignalDiagnostic[]> => {
+    const records = await apiGet<SignalDiagnosticApi[]>(
+      "/api/v1/signals/diagnostics",
+      {
+        model_run_id: options?.modelRunId,
+        market_group: options?.marketGroup,
+      },
+    );
+    return records.map(mapSignalDiagnostic);
+  },
+  ensemblePredictions: async (options?: {
+    modelRunId?: string;
+    marketId?: string;
+    limit?: number;
+  }): Promise<EnsemblePrediction[]> => {
+    const records = await apiGet<EnsemblePredictionApi[]>(
+      "/api/v1/ensemble/predictions",
+      {
+        model_run_id: options?.modelRunId,
+        market_id: options?.marketId,
+        limit: options?.limit,
+      },
+    );
+    return records.map(mapEnsemblePrediction);
+  },
+  tradeDecisions: async (options?: {
+    modelRunId?: string;
+    marketId?: string;
+    decisionStatus?: string;
+    limit?: number;
+  }): Promise<TradeDecision[]> => {
+    const records = await apiGet<TradeDecisionApi[]>(
+      "/api/v1/trade-decisions",
+      {
+        model_run_id: options?.modelRunId,
+        market_id: options?.marketId,
+        decision_status: options?.decisionStatus,
+        limit: options?.limit,
+      },
+    );
+    return records.map(mapTradeDecision);
   },
   backtestResults: async (): Promise<BacktestResult[]> => {
     const records = await apiGet<BacktestResultApi[]>(
@@ -784,6 +862,112 @@ type FeatureSnapshotApi = {
   row_count: number | null;
 };
 
+type SignalRegistryApi = {
+  id: string;
+  signal_code: string;
+  signal_family: string;
+  market_taxonomy: SignalRegistryEntry["marketTaxonomy"];
+  market_group: SignalRegistryEntry["marketGroup"];
+  description: string | null;
+  version: string;
+  config_json: Record<string, unknown> | null;
+  is_active: boolean;
+  created_at: string;
+};
+
+type SignalSnapshotApi = {
+  id: string;
+  model_run_id: string;
+  feature_snapshot_id: string | null;
+  market_id: string | null;
+  token_id: string | null;
+  event_id: string | null;
+  market_taxonomy: SignalSnapshot["marketTaxonomy"];
+  market_group: SignalSnapshot["marketGroup"];
+  meeting_key: number | null;
+  as_of_ts: string;
+  signal_code: string;
+  signal_version: string;
+  p_yes_raw: number | null;
+  p_yes_calibrated: number | null;
+  p_market_ref: number | null;
+  delta_logit: number | null;
+  freshness_sec: number | null;
+  coverage_flag: boolean;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type SignalDiagnosticApi = {
+  id: string;
+  model_run_id: string;
+  signal_code: string;
+  market_taxonomy: SignalDiagnostic["marketTaxonomy"];
+  market_group: SignalDiagnostic["marketGroup"];
+  phase_bucket: string | null;
+  brier: number | null;
+  log_loss: number | null;
+  ece: number | null;
+  skill_vs_market: number | null;
+  coverage_rate: number | null;
+  residual_correlation_json: Record<string, unknown> | null;
+  stability_json: Record<string, unknown> | null;
+  metrics_json: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type EnsemblePredictionApi = {
+  id: string;
+  model_run_id: string;
+  feature_snapshot_id: string | null;
+  market_id: string | null;
+  token_id: string | null;
+  event_id: string | null;
+  market_taxonomy: EnsemblePrediction["marketTaxonomy"];
+  market_group: EnsemblePrediction["marketGroup"];
+  meeting_key: number | null;
+  as_of_ts: string;
+  p_market_ref: number | null;
+  p_yes_ensemble: number | null;
+  z_market: number | null;
+  z_ensemble: number | null;
+  intercept: number | null;
+  disagreement_score: number | null;
+  effective_n: number | null;
+  uncertainty_score: number | null;
+  contributions_json: Record<string, unknown> | null;
+  coverage_json: Record<string, unknown> | null;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+};
+
+type TradeDecisionApi = {
+  id: string;
+  model_run_id: string;
+  ensemble_prediction_id: string | null;
+  feature_snapshot_id: string | null;
+  market_id: string | null;
+  token_id: string | null;
+  event_id: string | null;
+  market_taxonomy: TradeDecision["marketTaxonomy"];
+  market_group: TradeDecision["marketGroup"];
+  meeting_key: number | null;
+  as_of_ts: string;
+  side: string;
+  edge: number | null;
+  threshold: number | null;
+  spread: number | null;
+  depth: number | null;
+  kelly_fraction_raw: number | null;
+  disagreement_penalty: number | null;
+  liquidity_factor: number | null;
+  size_fraction: number | null;
+  decision_status: string;
+  decision_reason: string | null;
+  metadata_json: Record<string, unknown> | null;
+  created_at: string;
+};
+
 function mapModelRun(record: ModelRunApi): ModelRun {
   return {
     id: record.id,
@@ -839,6 +1023,126 @@ function mapFeatureSnapshot(record: FeatureSnapshotApi): FeatureSnapshot {
     featureVersion: record.feature_version,
     storagePath: record.storage_path,
     rowCount: record.row_count,
+  };
+}
+
+function mapSignalRegistryEntry(
+  record: SignalRegistryApi,
+): SignalRegistryEntry {
+  return {
+    id: record.id,
+    signalCode: record.signal_code,
+    signalFamily: record.signal_family,
+    marketTaxonomy: record.market_taxonomy,
+    marketGroup: record.market_group,
+    description: record.description,
+    version: record.version,
+    configJson: record.config_json,
+    isActive: record.is_active,
+    createdAt: record.created_at,
+  };
+}
+
+function mapSignalSnapshot(record: SignalSnapshotApi): SignalSnapshot {
+  return {
+    id: record.id,
+    modelRunId: record.model_run_id,
+    featureSnapshotId: record.feature_snapshot_id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    eventId: record.event_id,
+    marketTaxonomy: record.market_taxonomy,
+    marketGroup: record.market_group,
+    meetingKey: record.meeting_key,
+    asOfTs: record.as_of_ts,
+    signalCode: record.signal_code,
+    signalVersion: record.signal_version,
+    pYesRaw: record.p_yes_raw,
+    pYesCalibrated: record.p_yes_calibrated,
+    pMarketRef: record.p_market_ref,
+    deltaLogit: record.delta_logit,
+    freshnessSec: record.freshness_sec,
+    coverageFlag: record.coverage_flag,
+    metadataJson: record.metadata_json,
+    createdAt: record.created_at,
+  };
+}
+
+function mapSignalDiagnostic(record: SignalDiagnosticApi): SignalDiagnostic {
+  return {
+    id: record.id,
+    modelRunId: record.model_run_id,
+    signalCode: record.signal_code,
+    marketTaxonomy: record.market_taxonomy,
+    marketGroup: record.market_group,
+    phaseBucket: record.phase_bucket,
+    brier: record.brier,
+    logLoss: record.log_loss,
+    ece: record.ece,
+    skillVsMarket: record.skill_vs_market,
+    coverageRate: record.coverage_rate,
+    residualCorrelationJson: record.residual_correlation_json,
+    stabilityJson: record.stability_json,
+    metricsJson: record.metrics_json,
+    createdAt: record.created_at,
+  };
+}
+
+function mapEnsemblePrediction(
+  record: EnsemblePredictionApi,
+): EnsemblePrediction {
+  return {
+    id: record.id,
+    modelRunId: record.model_run_id,
+    featureSnapshotId: record.feature_snapshot_id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    eventId: record.event_id,
+    marketTaxonomy: record.market_taxonomy,
+    marketGroup: record.market_group,
+    meetingKey: record.meeting_key,
+    asOfTs: record.as_of_ts,
+    pMarketRef: record.p_market_ref,
+    pYesEnsemble: record.p_yes_ensemble,
+    zMarket: record.z_market,
+    zEnsemble: record.z_ensemble,
+    intercept: record.intercept,
+    disagreementScore: record.disagreement_score,
+    effectiveN: record.effective_n,
+    uncertaintyScore: record.uncertainty_score,
+    contributionsJson: record.contributions_json,
+    coverageJson: record.coverage_json,
+    metadataJson: record.metadata_json,
+    createdAt: record.created_at,
+  };
+}
+
+function mapTradeDecision(record: TradeDecisionApi): TradeDecision {
+  return {
+    id: record.id,
+    modelRunId: record.model_run_id,
+    ensemblePredictionId: record.ensemble_prediction_id,
+    featureSnapshotId: record.feature_snapshot_id,
+    marketId: record.market_id,
+    tokenId: record.token_id,
+    eventId: record.event_id,
+    marketTaxonomy: record.market_taxonomy,
+    marketGroup: record.market_group,
+    meetingKey: record.meeting_key,
+    asOfTs: record.as_of_ts,
+    side: record.side,
+    edge: record.edge,
+    threshold: record.threshold,
+    spread: record.spread,
+    depth: record.depth,
+    kellyFractionRaw: record.kelly_fraction_raw,
+    disagreementPenalty: record.disagreement_penalty,
+    liquidityFactor: record.liquidity_factor,
+    sizeFraction: record.size_fraction,
+    decisionStatus: record.decision_status,
+    decisionReason: record.decision_reason,
+    metadataJson: record.metadata_json,
+    createdAt: record.created_at,
   };
 }
 

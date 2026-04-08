@@ -8,6 +8,7 @@ from f1_polymarket_api.schemas import (
     CursorStateResponse,
     DataQualityResultResponse,
     DriverAffinityReportResponse,
+    EnsemblePredictionResponse,
     EntityMappingResponse,
     F1DriverResponse,
     F1MeetingResponse,
@@ -28,12 +29,21 @@ from f1_polymarket_api.schemas import (
     PolymarketEventResponse,
     PolymarketMarketResponse,
     PriceHistoryResponse,
+    SignalDiagnosticResponse,
+    SignalRegistryResponse,
+    SignalSnapshotResponse,
+    TradeDecisionResponse,
     WeekendCockpitStatusResponse,
 )
-from f1_polymarket_lab.common import MarketTaxonomy, coerce_market_taxonomy
+from f1_polymarket_lab.common import (
+    MarketTaxonomy,
+    coerce_market_taxonomy,
+    market_group_for_taxonomy,
+)
 from f1_polymarket_lab.storage.models import (
     BacktestResult,
     DataQualityResult,
+    EnsemblePrediction,
     EntityMappingF1ToPolymarket,
     F1Driver,
     F1Meeting,
@@ -52,8 +62,12 @@ from f1_polymarket_lab.storage.models import (
     PolymarketEvent,
     PolymarketMarket,
     PolymarketPriceHistory,
+    SignalDiagnostic,
+    SignalRegistryEntry,
+    SignalSnapshot,
     SourceCursorState,
     SourceFetchLog,
+    TradeDecision,
 )
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
@@ -420,14 +434,143 @@ def model_runs(db: Session = Depends(get_db_session)) -> list[ModelRunResponse]:
 
 @router.get("/predictions", response_model=list[ModelPredictionResponse])
 def predictions(
-    model_run_id: str | None = None,
+    model_run_id: str | None = Query(None),
+    market_id: str | None = Query(None),
+    limit: int = Query(500, ge=1, le=MAX_LIMIT),
     db: Session = Depends(get_db_session),
 ) -> list[ModelPredictionResponse]:
     stmt = select(ModelPrediction).order_by(ModelPrediction.as_of_ts.desc())
-    if model_run_id:
+    if model_run_id is not None:
         stmt = stmt.where(ModelPrediction.model_run_id == model_run_id)
-    records = db.scalars(stmt.limit(500)).all()
+    if market_id is not None:
+        stmt = stmt.where(ModelPrediction.market_id == market_id)
+    records = db.scalars(stmt.limit(limit)).all()
     return [ModelPredictionResponse.model_validate(record) for record in records]
+
+
+@router.get("/signals/registry", response_model=list[SignalRegistryResponse])
+def signal_registry(db: Session = Depends(get_db_session)) -> list[SignalRegistryResponse]:
+    records = db.scalars(
+        select(SignalRegistryEntry)
+        .where(SignalRegistryEntry.is_active.is_(True))
+        .order_by(
+            SignalRegistryEntry.signal_code.asc(),
+            SignalRegistryEntry.market_group.asc(),
+            SignalRegistryEntry.market_taxonomy.asc(),
+        )
+    ).all()
+    return [SignalRegistryResponse.model_validate(record) for record in records]
+
+
+@router.get("/signals/snapshots", response_model=list[SignalSnapshotResponse])
+def signal_snapshots(
+    model_run_id: str | None = Query(None),
+    market_id: str | None = Query(None),
+    signal_code: str | None = Query(None),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[SignalSnapshotResponse]:
+    stmt = select(SignalSnapshot).order_by(SignalSnapshot.as_of_ts.desc())
+    if model_run_id is not None:
+        stmt = stmt.where(SignalSnapshot.model_run_id == model_run_id)
+    if market_id is not None:
+        stmt = stmt.where(SignalSnapshot.market_id == market_id)
+    if signal_code is not None:
+        stmt = stmt.where(SignalSnapshot.signal_code == signal_code)
+    records = db.scalars(stmt.limit(limit)).all()
+    return [
+        SignalSnapshotResponse.model_validate(
+            {
+                **record.__dict__,
+                "market_taxonomy": coerce_market_taxonomy(record.market_taxonomy),
+                "market_group": record.market_group
+                or market_group_for_taxonomy(record.market_taxonomy),
+            }
+        )
+        for record in records
+    ]
+
+
+@router.get("/signals/diagnostics", response_model=list[SignalDiagnosticResponse])
+def signal_diagnostics(
+    model_run_id: str | None = Query(None),
+    market_group: str | None = Query(None),
+    db: Session = Depends(get_db_session),
+) -> list[SignalDiagnosticResponse]:
+    stmt = select(SignalDiagnostic).order_by(SignalDiagnostic.created_at.desc())
+    if model_run_id is not None:
+        stmt = stmt.where(SignalDiagnostic.model_run_id == model_run_id)
+    if market_group is not None:
+        stmt = stmt.where(SignalDiagnostic.market_group == market_group)
+    records = db.scalars(stmt.limit(500)).all()
+    return [
+        SignalDiagnosticResponse.model_validate(
+            {
+                **record.__dict__,
+                "market_taxonomy": (
+                    None
+                    if record.market_taxonomy is None
+                    else coerce_market_taxonomy(record.market_taxonomy)
+                ),
+            }
+        )
+        for record in records
+    ]
+
+
+@router.get("/ensemble/predictions", response_model=list[EnsemblePredictionResponse])
+def ensemble_predictions(
+    model_run_id: str | None = Query(None),
+    market_id: str | None = Query(None),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[EnsemblePredictionResponse]:
+    stmt = select(EnsemblePrediction).order_by(EnsemblePrediction.as_of_ts.desc())
+    if model_run_id is not None:
+        stmt = stmt.where(EnsemblePrediction.model_run_id == model_run_id)
+    if market_id is not None:
+        stmt = stmt.where(EnsemblePrediction.market_id == market_id)
+    records = db.scalars(stmt.limit(limit)).all()
+    return [
+        EnsemblePredictionResponse.model_validate(
+            {
+                **record.__dict__,
+                "market_taxonomy": coerce_market_taxonomy(record.market_taxonomy),
+                "market_group": record.market_group
+                or market_group_for_taxonomy(record.market_taxonomy),
+            }
+        )
+        for record in records
+    ]
+
+
+@router.get("/trade-decisions", response_model=list[TradeDecisionResponse])
+def trade_decisions(
+    model_run_id: str | None = Query(None),
+    market_id: str | None = Query(None),
+    decision_status: str | None = Query(None),
+    limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    db: Session = Depends(get_db_session),
+) -> list[TradeDecisionResponse]:
+    stmt = select(TradeDecision).order_by(TradeDecision.as_of_ts.desc())
+    if model_run_id is not None:
+        stmt = stmt.where(TradeDecision.model_run_id == model_run_id)
+    if market_id is not None:
+        stmt = stmt.where(TradeDecision.market_id == market_id)
+    if decision_status is not None:
+        stmt = stmt.where(TradeDecision.decision_status == decision_status)
+    records = db.scalars(stmt.limit(limit)).all()
+    return [
+        TradeDecisionResponse.model_validate(
+            {
+                **record.__dict__,
+                "market_taxonomy": coerce_market_taxonomy(record.market_taxonomy),
+                "market_group": record.market_group
+                or market_group_for_taxonomy(record.market_taxonomy),
+            }
+        )
+        for record in records
+    ]
 
 
 @router.get("/backtest/results", response_model=list[BacktestResultResponse])

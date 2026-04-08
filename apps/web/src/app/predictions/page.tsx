@@ -5,24 +5,53 @@ import { PageStatusBanner } from "../../components/page-status-banner";
 import { calibrationSummaryFromModelRuns } from "../../lib/calibration";
 import { formatProbability, formatTaxonomyLabel } from "../../lib/display";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { EnsembleSummaryPanel } from "../_components/ensemble-summary-panel";
 import { PredictionsTableSection } from "../_components/predictions-table-section";
 
 export const revalidate = 300;
 
 export default async function PredictionsPage() {
-  const [modelRunsState, predictionsState, marketsState] = await Promise.all([
+  const [
+    modelRunsState,
+    predictionsState,
+    marketsState,
+    ensemblePredictionsState,
+    signalDiagnosticsState,
+    signalRegistryState,
+    tradeDecisionsState,
+  ] = await Promise.all([
     loadResource(sdk.modelRuns, [], "Model runs"),
     loadResource(sdk.predictions, [], "Predictions"),
     loadResource(() => sdk.markets({ limit: 250 }), [], "Market feed"),
+    loadResource(
+      () => sdk.ensemblePredictions({ limit: 250 }),
+      [],
+      "Ensemble predictions",
+    ),
+    loadResource(sdk.signalDiagnostics, [], "Signal diagnostics"),
+    loadResource(sdk.signalRegistry, [], "Signal registry"),
+    loadResource(
+      () => sdk.tradeDecisions({ limit: 250 }),
+      [],
+      "Trade decisions",
+    ),
   ]);
 
   const modelRuns = modelRunsState.data;
   const predictions = predictionsState.data;
   const markets = marketsState.data;
+  const ensemblePredictions = ensemblePredictionsState.data;
+  const signalDiagnostics = signalDiagnosticsState.data;
+  const signalRegistry = signalRegistryState.data;
+  const tradeDecisions = tradeDecisionsState.data;
   const degradedMessages = collectResourceErrors([
     modelRunsState,
     predictionsState,
     marketsState,
+    ensemblePredictionsState,
+    signalDiagnosticsState,
+    signalRegistryState,
+    tradeDecisionsState,
   ]);
 
   const calibration = calibrationSummaryFromModelRuns(modelRuns);
@@ -128,6 +157,14 @@ export default async function PredictionsPage() {
           </div>
         </div>
       </Panel>
+
+      <EnsembleSummaryPanel
+        modelRuns={modelRuns}
+        ensemblePredictions={ensemblePredictions}
+        signalDiagnostics={signalDiagnostics}
+        signalRegistry={signalRegistry}
+        tradeDecisions={tradeDecisions}
+      />
 
       <PredictionsTableSection
         modelRuns={modelRuns}

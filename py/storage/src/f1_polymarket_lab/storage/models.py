@@ -1004,6 +1004,174 @@ class ModelPrediction(Base):
     explanation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
 
 
+class SignalRegistryEntry(Base):
+    __tablename__ = "signal_registry"
+    __table_args__ = (
+        UniqueConstraint(
+            "signal_code",
+            "version",
+            "market_taxonomy",
+            "market_group",
+            name="uq_signal_registry_code_version_scope",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    signal_code: Mapped[str] = mapped_column(String(128), index=True)
+    signal_family: Mapped[str] = mapped_column(String(128), index=True)
+    market_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    version: Mapped[str] = mapped_column(String(32), default="v1")
+    config_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SignalSnapshot(Base):
+    __tablename__ = "signal_snapshots"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_run_id",
+            "market_id",
+            "token_id",
+            "as_of_ts",
+            "signal_code",
+            name="uq_signal_snapshots_run_market_asof_signal",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    model_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    event_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    market_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_key: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    as_of_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    signal_code: Mapped[str] = mapped_column(String(128), index=True)
+    signal_version: Mapped[str] = mapped_column(String(32), default="v1")
+    p_yes_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_yes_calibrated: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_market_ref: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta_logit: Mapped[float | None] = mapped_column(Float, nullable=True)
+    freshness_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coverage_flag: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SignalDiagnostic(Base):
+    __tablename__ = "signal_diagnostics"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_run_id",
+            "signal_code",
+            "market_group",
+            "market_taxonomy",
+            "phase_bucket",
+            name="uq_signal_diagnostics_run_signal_scope",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    model_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    signal_code: Mapped[str] = mapped_column(String(128), index=True)
+    market_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    phase_bucket: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    brier: Mapped[float | None] = mapped_column(Float, nullable=True)
+    log_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ece: Mapped[float | None] = mapped_column(Float, nullable=True)
+    skill_vs_market: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coverage_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    residual_correlation_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    stability_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    metrics_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class EnsemblePrediction(Base):
+    __tablename__ = "ensemble_predictions"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_run_id",
+            "market_id",
+            "token_id",
+            "as_of_ts",
+            name="uq_ensemble_predictions_run_market_asof",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    model_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    event_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    market_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_key: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    as_of_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    p_market_ref: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_yes_ensemble: Mapped[float | None] = mapped_column(Float, nullable=True)
+    z_market: Mapped[float | None] = mapped_column(Float, nullable=True)
+    z_ensemble: Mapped[float | None] = mapped_column(Float, nullable=True)
+    intercept: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disagreement_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    effective_n: Mapped[float | None] = mapped_column(Float, nullable=True)
+    uncertainty_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    contributions_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    coverage_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class TradeDecision(Base):
+    __tablename__ = "trade_decisions"
+    __table_args__ = (
+        UniqueConstraint(
+            "model_run_id",
+            "market_id",
+            "token_id",
+            "as_of_ts",
+            name="uq_trade_decisions_run_market_asof",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    model_run_id: Mapped[str] = mapped_column(String(36), index=True)
+    ensemble_prediction_id: Mapped[str | None] = mapped_column(
+        String(36),
+        nullable=True,
+        index=True,
+    )
+    feature_snapshot_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    market_id: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    token_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    event_id: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    market_taxonomy: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    market_group: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+    meeting_key: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    as_of_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    side: Mapped[str] = mapped_column(String(16), default="skip")
+    edge: Mapped[float | None] = mapped_column(Float, nullable=True)
+    threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread: Mapped[float | None] = mapped_column(Float, nullable=True)
+    depth: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kelly_fraction_raw: Mapped[float | None] = mapped_column(Float, nullable=True)
+    disagreement_penalty: Mapped[float | None] = mapped_column(Float, nullable=True)
+    liquidity_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    size_fraction: Mapped[float | None] = mapped_column(Float, nullable=True)
+    decision_status: Mapped[str] = mapped_column(String(32), default="skip", index=True)
+    decision_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
 class BacktestOrder(Base):
     __tablename__ = "backtest_orders"
 

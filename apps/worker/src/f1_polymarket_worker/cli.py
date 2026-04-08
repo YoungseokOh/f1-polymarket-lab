@@ -5,6 +5,7 @@ from pathlib import Path
 
 import typer
 from f1_polymarket_lab.common import get_settings
+from f1_polymarket_lab.models import SIGNAL_ENSEMBLE_STAGE
 from f1_polymarket_lab.storage.db import Base, build_engine, db_session
 
 from f1_polymarket_worker.backtest import (
@@ -48,6 +49,12 @@ from f1_polymarket_worker.pipeline import (
     run_data_quality_checks,
     sync_f1_calendar,
     sync_polymarket_catalog,
+)
+from f1_polymarket_worker.signal_ensemble import (
+    register_default_signals,
+    score_signal_ensemble_snapshot,
+    settle_signal_ensemble_backtest,
+    train_signal_ensemble_from_snapshot_ids,
 )
 
 app = typer.Typer(no_args_is_help=True)
@@ -1233,6 +1240,78 @@ def score_multitask_snapshot_command(
         typer.echo(
             f"Scored snapshot_id={snapshot_id} with model_run_id={result['model_run_id']}"
         )
+
+
+@app.command("register-default-signals")
+def register_default_signals_command(
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = register_default_signals(context)
+    typer.echo(result)
+
+
+@app.command("train-signal-ensemble")
+def train_signal_ensemble_command(
+    snapshot_ids: str = typer.Option(
+        ..., "--snapshot-ids", help="Comma-separated snapshot IDs in time order"
+    ),
+    stage: str = typer.Option(SIGNAL_ENSEMBLE_STAGE, "--stage"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    max_spread: float | None = typer.Option(None, "--max-spread"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.models import SignalEnsembleConfig
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = train_signal_ensemble_from_snapshot_ids(
+            context,
+            snapshot_ids=[value.strip() for value in snapshot_ids.split(",") if value.strip()],
+            stage=stage,
+            config=SignalEnsembleConfig(
+                min_edge=min_edge,
+                max_spread=max_spread,
+            ),
+        )
+    typer.echo(result)
+
+
+@app.command("score-signal-ensemble-snapshot")
+def score_signal_ensemble_snapshot_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = score_signal_ensemble_snapshot(
+            context,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+        )
+    typer.echo(result)
+
+
+@app.command("run-signal-ensemble-backtest")
+def run_signal_ensemble_backtest_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = settle_signal_ensemble_backtest(
+            context,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+        )
+    typer.echo(result)
 
 
 @app.command("run-multitask-autoresearch")

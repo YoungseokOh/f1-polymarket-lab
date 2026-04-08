@@ -1,4 +1,8 @@
-import type { DataQualityResult, MarketTaxonomy } from "@f1/shared-types";
+import type {
+  DataQualityResult,
+  MarketGroup,
+  MarketTaxonomy,
+} from "@f1/shared-types";
 
 const SESSION_CODE_LABELS: Record<string, string> = {
   FP1: "Practice 1",
@@ -60,6 +64,15 @@ const TAXONOMY_SUMMARIES: Record<string, string> = {
   constructors_champion: "Season-long championship outrights for teams.",
   red_flag: "Special markets around red-flag incidents.",
   safety_car: "Special markets around safety-car incidents.",
+};
+
+const MARKET_GROUP_LABELS: Record<MarketGroup, string> = {
+  driver_outright: "Driver outright",
+  constructor_outright: "Constructor outright",
+  head_to_head: "Head-to-head",
+  incident_binary: "Incident binary",
+  championship: "Championship",
+  other: "Other",
 };
 
 type QualityDatasetInfo = {
@@ -158,6 +171,18 @@ export function formatTaxonomySummary(
   return (
     TAXONOMY_SUMMARIES[taxonomy] ??
     `${formatTaxonomyLabel(taxonomy)} markets linked to the current F1 workflow.`
+  );
+}
+
+export function formatMarketGroupLabel(
+  marketGroup: MarketGroup | string | null | undefined,
+): string {
+  if (!marketGroup) {
+    return "Other";
+  }
+  return (
+    MARKET_GROUP_LABELS[marketGroup as MarketGroup] ??
+    humanizeIdentifier(marketGroup)
   );
 }
 
