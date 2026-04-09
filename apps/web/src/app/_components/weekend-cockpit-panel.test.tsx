@@ -4,10 +4,7 @@ import "@testing-library/jest-dom/vitest";
 import type {
   CaptureLiveWeekendResponse,
   CurrentWeekendOperationsReadiness,
-  EntityMapping,
-  ModelPrediction,
-  PolymarketMarket,
-  PricePoint,
+  LiveTradeSignalBoard,
   RefreshedSessionSummary,
   RunWeekendCockpitResponse,
   WeekendCockpitStatus,
@@ -20,6 +17,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import React from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -35,12 +33,13 @@ vi.mock("next/navigation", () => ({
 vi.mock("@f1/ts-sdk", () => ({
   sdk: {
     captureLiveWeekend: vi.fn(),
-    executeManualLivePaperTrade: vi.fn(),
-    mappings: vi.fn(),
-    market: vi.fn(),
-    marketPrices: vi.fn(),
     currentWeekendReadiness: vi.fn(),
-    predictions: vi.fn(),
+    cancelLiveTradeTicket: vi.fn(),
+    createLiveTradeTicket: vi.fn(),
+    liveTradeSignalBoard: vi.fn(),
+    liveTradeExecutions: vi.fn(),
+    liveTradeTickets: vi.fn(),
+    recordLiveTradeFill: vi.fn(),
     refreshLatestSession: vi.fn(),
     weekendCockpitStatus: vi.fn(),
     runWeekendCockpit: vi.fn(),
@@ -73,6 +72,11 @@ const baseStatus: WeekendCockpitStatus = {
     display_label: "Use FP1 results to prepare FP2",
     display_description:
       "Use FP1 results to find FP2 markets and prepare paper trading.",
+    required_model_stage: null,
+    live_bet_size: 10,
+    live_min_edge: 0.05,
+    live_max_daily_loss: 100,
+    live_max_spread: 0.03,
   },
   availableConfigs: [
     {
@@ -89,6 +93,11 @@ const baseStatus: WeekendCockpitStatus = {
       display_label: "Use FP1 results to prepare FP2",
       display_description:
         "Use FP1 results to find FP2 markets and prepare paper trading.",
+      required_model_stage: null,
+      live_bet_size: 10,
+      live_min_edge: 0.05,
+      live_max_daily_loss: 100,
+      live_max_spread: 0.03,
     },
     {
       name: "Japanese Grand Prix",
@@ -104,6 +113,74 @@ const baseStatus: WeekendCockpitStatus = {
       display_label: "Use FP1 results to prepare Qualifying",
       display_description:
         "Use FP1 results to find Qualifying markets and prepare paper trading.",
+      required_model_stage: "multitask_qr",
+      live_bet_size: 10,
+      live_min_edge: 0.05,
+      live_max_daily_loss: 100,
+      live_max_spread: 0.03,
+    },
+  ],
+  calendarStatus: "scheduled",
+  meetingSlug: "japanese-grand-prix",
+  sourceConflict: false,
+  overrideSourceUrl: null,
+  calendarMeetings: [
+    {
+      season: 2026,
+      meetingKey: 1281,
+      meetingSlug: "japanese-grand-prix",
+      opsSlug: "japan",
+      meetingName: "Japanese Grand Prix",
+      roundNumber: 3,
+      eventFormat: "conventional",
+      startDateUtc: "2026-03-27T02:30:00Z",
+      endDateUtc: "2026-03-29T07:00:00Z",
+      countryName: "Japan",
+      location: "Suzuka",
+      status: "scheduled",
+      sourceConflict: false,
+      sourceLabel: null,
+      sourceUrl: null,
+      note: null,
+    },
+    {
+      season: 2026,
+      meetingKey: 1284,
+      meetingSlug: "miami-grand-prix",
+      opsSlug: "miami",
+      meetingName: "Miami Grand Prix",
+      roundNumber: 4,
+      eventFormat: "sprint",
+      startDateUtc: "2026-05-01T16:30:00Z",
+      endDateUtc: "2026-05-03T21:00:00Z",
+      countryName: "United States",
+      location: "Miami",
+      status: "scheduled",
+      sourceConflict: false,
+      sourceLabel: null,
+      sourceUrl: null,
+      note: null,
+    },
+  ],
+  cancelledMeetings: [
+    {
+      season: 2026,
+      meetingKey: 1282,
+      meetingSlug: "bahrain-grand-prix",
+      opsSlug: "bahrain",
+      meetingName: "Bahrain Grand Prix",
+      roundNumber: 2,
+      eventFormat: "conventional",
+      startDateUtc: "2026-04-10T10:30:00Z",
+      endDateUtc: "2026-04-12T16:00:00Z",
+      countryName: "Bahrain",
+      location: "Sakhir",
+      status: "cancelled",
+      sourceConflict: true,
+      sourceLabel: "Formula 1 official",
+      sourceUrl:
+        "https://www.formula1.com/en/latest/article/bahrain-and-saudi-arabian-grands-prix-will-not-take-place-in-april.1hnqllVG85RSt8pbFc5Ivx/",
+      note: "Cancelled after official schedule update.",
     },
   ],
   meeting: {
@@ -112,6 +189,8 @@ const baseStatus: WeekendCockpitStatus = {
     season: 2026,
     roundNumber: 3,
     meetingName: "Japanese Grand Prix",
+    meetingSlug: "japanese-grand-prix",
+    eventFormat: "conventional",
     circuitShortName: "Suzuka",
     countryName: "Japan",
     location: "Suzuka",
@@ -220,6 +299,21 @@ const baseStatus: WeekendCockpitStatus = {
   ],
   blockers: [],
   readyToRun: true,
+  modelReady: true,
+  requiredStage: null,
+  activeModelRunId: null,
+  modelBlockers: [],
+  sessionStageStatuses: [],
+  liveTicketSummary: {
+    ticketCount: 0,
+    openTicketCount: 0,
+    filledTicketCount: 0,
+    cancelledTicketCount: 0,
+  },
+  liveExecutionSummary: {
+    executionCount: 0,
+    filledExecutionCount: 0,
+  },
   primaryActionTitle: "Update to latest",
   primaryActionDescription:
     "This latest update will discover FP2 markets first, then continue into paper trading.",
@@ -339,70 +433,82 @@ function buildLiveCaptureResponse(
   };
 }
 
-function buildMarket(id: string, question: string): PolymarketMarket {
+function buildLiveSignalBoard(): LiveTradeSignalBoard {
   return {
-    id,
-    eventId: "event-1",
-    question,
-    slug: "market-slug",
-    taxonomy: "driver_fastest_lap_practice",
-    taxonomyConfidence: 0.9,
-    targetSessionCode: "FP2",
-    conditionId: `condition-${id}`,
-    questionId: null,
-    bestBid: 0.32,
-    bestAsk: 0.34,
-    lastTradePrice: 0.33,
-    volume: 12000,
-    liquidity: 8000,
-    active: true,
-    closed: false,
-  };
-}
-
-function buildPricePoint(
-  id: string,
-  marketId: string,
-  observedAtUtc: string,
-  price: number,
-): PricePoint {
-  return {
-    id,
-    marketId,
-    tokenId: "token-1",
-    observedAtUtc,
-    price,
-    midpoint: price,
-    bestBid: price - 0.01,
-    bestAsk: price + 0.01,
+    gpShortCode: "japan_fp1_fp2",
+    requiredStage: null,
+    activeModelRunId: "model-run-1",
+    modelRunId: "model-run-1",
+    snapshotId: "snapshot-1",
+    blockers: [],
+    rows: [
+      {
+        marketId: "market-1",
+        tokenId: "token-1",
+        question: "Will George Russell top Practice 2?",
+        sessionCode: "FP2",
+        promotionStage: null,
+        modelRunId: "model-run-1",
+        snapshotId: "snapshot-1",
+        modelProb: 0.6,
+        marketPrice: 0.33,
+        edge: 0.27,
+        spread: 0.02,
+        signalAction: "buy_yes",
+        sideLabel: "YES",
+        recommendedSize: 10,
+        maxSpread: 0.03,
+        observedAtUtc: "2026-03-27T06:18:00Z",
+        eventType: null,
+      },
+    ],
   };
 }
 
 describe("WeekendCockpitPanel", () => {
   beforeEach(() => {
-    vi.mocked(sdk.mappings).mockResolvedValue([]);
-    vi.mocked(sdk.market).mockImplementation(async (marketId: string) =>
-      buildMarket(marketId, `Market ${marketId}`),
+    vi.mocked(sdk.liveTradeSignalBoard).mockResolvedValue(
+      buildLiveSignalBoard(),
     );
-    vi.mocked(sdk.marketPrices).mockResolvedValue([]);
-    vi.mocked(sdk.predictions).mockResolvedValue([]);
     vi.mocked(sdk.currentWeekendReadiness).mockResolvedValue(baseReadiness);
-    vi.mocked(sdk.executeManualLivePaperTrade).mockResolvedValue({
-      action: "execute-manual-live-paper-trade",
+    vi.mocked(sdk.liveTradeTickets).mockResolvedValue([]);
+    vi.mocked(sdk.liveTradeExecutions).mockResolvedValue([]);
+    vi.mocked(sdk.createLiveTradeTicket).mockResolvedValue({
+      action: "create-live-trade-ticket",
       status: "ok",
-      message: "Opened manual YES paper trade.",
+      message: "Created YES live ticket.",
+      ticketId: "live-ticket-1",
       gpShortCode: "japan_fp1_fp2",
       marketId: "market-1",
-      ptSessionId: "pt-live-1",
+      modelRunId: "model-run-1",
+      snapshotId: "snapshot-1",
+      promotionStage: null,
       signalAction: "buy_yes",
-      quantity: 10,
-      entryPrice: 0.41,
-      stakeCost: 4.1,
+      sideLabel: "YES",
+      recommendedSize: 10,
       marketPrice: 0.41,
       modelProb: 0.62,
       edge: 0.21,
-      sideLabel: "YES",
-      reason: "signal_accepted",
+      observedSpread: 0.02,
+      maxSpread: 0.04,
+      observedAtUtc: "2026-03-27T06:10:00Z",
+      expiresAt: "2026-03-27T06:30:00Z",
+    });
+    vi.mocked(sdk.recordLiveTradeFill).mockResolvedValue({
+      action: "record-live-trade-fill",
+      status: "ok",
+      message: "Recorded filled execution.",
+      ticketId: "live-ticket-1",
+      executionId: "live-execution-1",
+      executionStatus: "filled",
+      ticketStatus: "filled",
+    });
+    vi.mocked(sdk.cancelLiveTradeTicket).mockResolvedValue({
+      action: "cancel-live-trade-ticket",
+      status: "ok",
+      message: "Cancelled live ticket.",
+      ticketId: "live-ticket-1",
+      ticketStatus: "cancelled",
     });
   });
 
@@ -434,7 +540,7 @@ describe("WeekendCockpitPanel", () => {
       screen.getByRole("button", { name: "Update to latest" }),
     ).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Update latest: FP1" }),
+      screen.getByRole("button", { name: "Refresh Practice 1" }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Capture 20s live sample" }),
@@ -463,6 +569,42 @@ describe("WeekendCockpitPanel", () => {
     expect(screen.getByText("fp1_to_fp2")).toBeInTheDocument();
     expect(screen.getByText("driver_fastest_lap_practice")).toBeInTheDocument();
     expect(screen.getByText(/11246/)).toBeInTheDocument();
+  });
+
+  it("shows model blockers separately from data blockers", () => {
+    const blockedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      readyToRun: false,
+      modelReady: false,
+      requiredStage: "multitask_qr",
+      activeModelRunId: null,
+      modelBlockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+      steps: baseStatus.steps.map((step) =>
+        step.key === "run_paper_trade"
+          ? {
+              ...step,
+              status: "blocked",
+              detail:
+                "A promoted multitask_qr champion is required before paper trading can run.",
+            }
+          : step,
+      ),
+      blockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+    };
+
+    render(<WeekendCockpitPanel initialStatus={blockedStatus} />);
+
+    expect(screen.getByText("Model blockers")).toBeInTheDocument();
+    expect(
+      screen.getAllByText(
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("Current blockers")).not.toBeInTheDocument();
   });
 
   it("shows pending state immediately and completes the CTA run flow", async () => {
@@ -618,43 +760,7 @@ describe("WeekendCockpitPanel", () => {
       ),
     };
     const captureRequest = deferred<CaptureLiveWeekendResponse>();
-    const mappings: EntityMapping[] = [
-      {
-        id: "mapping-1",
-        f1MeetingId: "meeting:1281",
-        f1SessionId: "session:11247",
-        polymarketEventId: "event-1",
-        polymarketMarketId: "market-1",
-        mappingType: "session_market",
-        confidence: 0.91,
-        matchedBy: "taxonomy",
-        overrideFlag: false,
-      },
-    ];
-    const predictions: ModelPrediction[] = [
-      {
-        id: "prediction-1",
-        modelRunId: "model-run-1",
-        marketId: "market-1",
-        tokenId: "token-1",
-        asOfTs: "2026-03-27T06:10:00Z",
-        probabilityYes: 0.6,
-        probabilityNo: 0.4,
-        rawScore: 0.6,
-        calibrationVersion: "hybrid",
-      },
-    ];
-
     vi.mocked(sdk.captureLiveWeekend).mockReturnValue(captureRequest.promise);
-    vi.mocked(sdk.mappings).mockResolvedValue(mappings);
-    vi.mocked(sdk.market).mockResolvedValue(
-      buildMarket("market-1", "Will George Russell top Practice 2?"),
-    );
-    vi.mocked(sdk.marketPrices).mockResolvedValue([
-      buildPricePoint("price-1", "market-1", "2026-03-27T06:00:00Z", 0.31),
-      buildPricePoint("price-2", "market-1", "2026-03-27T06:18:00Z", 0.33),
-    ]);
-    vi.mocked(sdk.predictions).mockResolvedValue(predictions);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
 
     render(
@@ -721,7 +827,7 @@ describe("WeekendCockpitPanel", () => {
     expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith("japan_fp1_fp2");
   });
 
-  it("places a manual paper trade from a live signal row", async () => {
+  it("creates a live ticket from a live signal row", async () => {
     const liveStatus: WeekendCockpitStatus = {
       ...baseStatus,
       now: "2026-03-27T06:20:00Z",
@@ -750,43 +856,7 @@ describe("WeekendCockpitPanel", () => {
       ),
     };
     const captureRequest = deferred<CaptureLiveWeekendResponse>();
-    const mappings: EntityMapping[] = [
-      {
-        id: "mapping-1",
-        f1MeetingId: "meeting:1281",
-        f1SessionId: "session:11247",
-        polymarketEventId: "event-1",
-        polymarketMarketId: "market-1",
-        mappingType: "session_market",
-        confidence: 0.91,
-        matchedBy: "taxonomy",
-        overrideFlag: false,
-      },
-    ];
-    const predictions: ModelPrediction[] = [
-      {
-        id: "prediction-1",
-        modelRunId: "model-run-1",
-        marketId: "market-1",
-        tokenId: "token-1",
-        asOfTs: "2026-03-27T06:10:00Z",
-        probabilityYes: 0.6,
-        probabilityNo: 0.4,
-        rawScore: 0.6,
-        calibrationVersion: "hybrid",
-      },
-    ];
-
     vi.mocked(sdk.captureLiveWeekend).mockReturnValue(captureRequest.promise);
-    vi.mocked(sdk.mappings).mockResolvedValue(mappings);
-    vi.mocked(sdk.market).mockResolvedValue(
-      buildMarket("market-1", "Will George Russell top Practice 2?"),
-    );
-    vi.mocked(sdk.marketPrices).mockResolvedValue([
-      buildPricePoint("price-1", "market-1", "2026-03-27T06:00:00Z", 0.31),
-      buildPricePoint("price-2", "market-1", "2026-03-27T06:18:00Z", 0.33),
-    ]);
-    vi.mocked(sdk.predictions).mockResolvedValue(predictions);
     vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
 
     render(
@@ -825,7 +895,7 @@ describe("WeekendCockpitPanel", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByRole("button", { name: "Paper trade now" }),
+        screen.getByRole("button", { name: "Create ticket" }),
       ).toBeEnabled();
     });
 
@@ -839,17 +909,13 @@ describe("WeekendCockpitPanel", () => {
       target: { value: "3" },
     });
 
-    fireEvent.click(screen.getByRole("button", { name: "Paper trade now" }));
+    fireEvent.click(screen.getByRole("button", { name: "Create ticket" }));
 
     await waitFor(() => {
-      expect(sdk.executeManualLivePaperTrade).toHaveBeenCalledWith({
+      expect(sdk.createLiveTradeTicket).toHaveBeenCalledWith({
         gp_short_code: "japan_fp1_fp2",
         market_id: "market-1",
-        token_id: "token-1",
-        model_run_id: "model-run-1",
-        snapshot_id: "snapshot-1",
-        model_prob: 0.6,
-        market_price: 0.41,
+        observed_market_price: 0.41,
         observed_at_utc: "2026-03-27T06:20:00Z",
         observed_spread: 0.02,
         source_event_type: "best_bid_ask",
@@ -859,9 +925,7 @@ describe("WeekendCockpitPanel", () => {
       });
     });
     await waitFor(() => {
-      expect(
-        screen.getByText("Opened manual YES paper trade."),
-      ).toBeInTheDocument();
+      expect(screen.getByText("Created YES live ticket.")).toBeInTheDocument();
     });
   });
 
@@ -911,7 +975,11 @@ describe("WeekendCockpitPanel", () => {
       expect(sdk.captureLiveWeekend).toHaveBeenCalledTimes(2);
     });
     expect(screen.getByText("Running")).toBeInTheDocument();
-    expect(screen.getByText("1")).toBeInTheDocument();
+    const samplesCard = screen.getByText("Samples").closest("div");
+    expect(samplesCard).not.toBeNull();
+    expect(
+      within(samplesCard as HTMLElement).getByText("1"),
+    ).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Stop live watch" }));
 

@@ -1,150 +1,244 @@
 "use client";
 
-import type { BacktestResult, FeatureSnapshot } from "@f1/shared-types";
-import { Badge, Panel } from "@f1/ui";
+import type {
+  BacktestResult,
+  F1Meeting,
+  F1Session,
+  FeatureSnapshot,
+} from "@f1/shared-types";
+import { Panel } from "@f1/ui";
+
+import {
+  backtestBetCount,
+  backtestHitRate,
+  backtestPnl,
+} from "../../lib/backtest-metrics";
+import {
+  describeStage,
+  formatDateRangeShort,
+  formatDateTimeShort,
+  formatPercentValue,
+  formatUsd,
+} from "../../lib/display";
 import { PnlAreaChart } from "./charts/pnl-area-chart";
 import { type Column, DataTable } from "./data-table";
 
-const btColumns: Column<BacktestResult>[] = [
+type ResultRow = {
+  id: string;
+  strategyName: string;
+  stageLabel: string;
+  windowLabel: string;
+  betCount: number | null;
+  hitRate: number | null;
+  roiPct: number | null;
+  pnl: number | null;
+  createdAt: string;
+};
+
+type SnapshotRow = {
+  id: string;
+  snapshotLabel: string;
+  contextLabel: string;
+  rowCount: number | null;
+  featureVersion: string;
+  asOfTs: string;
+};
+
+const resultColumns: Column<ResultRow>[] = [
   {
-    key: "strategy",
-    header: "Strategy",
-    render: (r) => (
-      <span className="font-medium text-white">{r.strategyName}</span>
+    key: "experiment",
+    header: "Experiment",
+    render: (row) => (
+      <div>
+        <p className="font-medium text-white">{row.stageLabel}</p>
+        <p className="mt-1 text-xs text-[#9ca3af]">{row.strategyName}</p>
+      </div>
     ),
-    sortValue: (r) => r.strategyName,
+    sortValue: (row) => `${row.stageLabel}:${row.strategyName}`,
   },
   {
-    key: "stage",
-    header: "Stage",
-    render: (r) => <Badge>{r.stage}</Badge>,
-    sortValue: (r) => r.stage,
-  },
-  {
-    key: "pnl",
-    header: "PnL",
-    render: (r) => {
-      const metrics = r.metricsJson as Record<string, number> | null;
-      const pnl = metrics?.realized_pnl_total;
-      if (pnl == null) return <span className="text-xs text-[#6b7280]">—</span>;
-      return (
-        <span
-          className={`font-semibold tabular-nums ${pnl >= 0 ? "text-race-green" : "text-race-red"}`}
-        >
-          ${pnl.toFixed(2)}
-        </span>
-      );
-    },
-    sortValue: (r) =>
-      (r.metricsJson as Record<string, number> | null)?.realized_pnl_total ?? 0,
+    key: "window",
+    header: "Evaluation window",
+    render: (row) => (
+      <span className="text-sm text-[#d1d5db]">{row.windowLabel}</span>
+    ),
+    sortValue: (row) => row.windowLabel,
   },
   {
     key: "bets",
     header: "Bets",
-    render: (r) => {
-      const totalBets = (r.metricsJson as Record<string, number> | null)
-        ?.total_bets;
-      return (
-        <span className="tabular-nums text-sm text-[#d1d5db]">
-          {totalBets ?? "—"}
-        </span>
-      );
-    },
-    sortValue: (r) =>
-      (r.metricsJson as Record<string, number> | null)?.total_bets ?? 0,
-  },
-  {
-    key: "winRate",
-    header: "Win Rate",
-    render: (r) => {
-      const metrics = r.metricsJson as Record<string, number> | null;
-      const wins = metrics?.winning_bets;
-      const total = metrics?.total_bets;
-      if (wins == null || !total)
-        return <span className="text-xs text-[#6b7280]">—</span>;
-      return (
-        <span className="tabular-nums text-sm text-[#d1d5db]">
-          {((wins / total) * 100).toFixed(1)}%
-        </span>
-      );
-    },
-    sortValue: (r) => {
-      const m = r.metricsJson as Record<string, number> | null;
-      return m?.winning_bets && m?.total_bets
-        ? m.winning_bets / m.total_bets
-        : 0;
-    },
-  },
-  {
-    key: "created",
-    header: "Created",
-    render: (r) => (
-      <span className="tabular-nums text-xs text-[#6b7280]">
-        {new Date(r.createdAt).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        })}
+    render: (row) => (
+      <span className="tabular-nums text-sm text-[#d1d5db]">
+        {row.betCount ?? "—"}
       </span>
     ),
-    sortValue: (r) => r.createdAt,
+    sortValue: (row) => row.betCount ?? -1,
+  },
+  {
+    key: "hitRate",
+    header: "Hit rate",
+    render: (row) => (
+      <span className="tabular-nums text-sm text-[#d1d5db]">
+        {row.hitRate != null ? `${(row.hitRate * 100).toFixed(1)}%` : "—"}
+      </span>
+    ),
+    sortValue: (row) => row.hitRate ?? -1,
+  },
+  {
+    key: "roi",
+    header: "ROI",
+    render: (row) => (
+      <span className="tabular-nums text-sm text-[#d1d5db]">
+        {formatPercentValue(row.roiPct)}
+      </span>
+    ),
+    sortValue: (row) => row.roiPct ?? -999,
+  },
+  {
+    key: "pnl",
+    header: "PnL",
+    render: (row) => (
+      <span
+        className={`font-semibold tabular-nums ${
+          row.pnl == null
+            ? "text-[#6b7280]"
+            : row.pnl >= 0
+              ? "text-race-green"
+              : "text-race-red"
+        }`}
+      >
+        {formatUsd(row.pnl)}
+      </span>
+    ),
+    sortValue: (row) => row.pnl ?? 0,
+  },
+  {
+    key: "createdAt",
+    header: "Created",
+    render: (row) => (
+      <span className="tabular-nums text-xs text-[#6b7280]">
+        {formatDateTimeShort(row.createdAt)}
+      </span>
+    ),
+    sortValue: (row) => row.createdAt,
   },
 ];
 
-const snapColumns: Column<FeatureSnapshot>[] = [
+const snapshotColumns: Column<SnapshotRow>[] = [
   {
-    key: "type",
-    header: "Type",
-    render: (s) => (
-      <span className="font-medium text-white">{s.snapshotType}</span>
+    key: "snapshot",
+    header: "Snapshot",
+    render: (row) => (
+      <div>
+        <p className="font-medium text-white">{row.snapshotLabel}</p>
+        <p className="mt-1 text-xs text-[#9ca3af]">{row.contextLabel}</p>
+      </div>
     ),
-    sortValue: (s) => s.snapshotType,
-  },
-  {
-    key: "version",
-    header: "Version",
-    render: (s) => <Badge>{s.featureVersion}</Badge>,
-    sortValue: (s) => s.featureVersion,
+    sortValue: (row) => row.snapshotLabel,
   },
   {
     key: "rows",
     header: "Rows",
-    render: (s) => (
+    render: (row) => (
       <span className="tabular-nums text-sm text-[#d1d5db]">
-        {s.rowCount ?? "—"}
+        {row.rowCount ?? "—"}
       </span>
     ),
-    sortValue: (s) => s.rowCount ?? 0,
+    sortValue: (row) => row.rowCount ?? -1,
+  },
+  {
+    key: "version",
+    header: "Version",
+    render: (row) => (
+      <span className="text-sm text-[#d1d5db]">{row.featureVersion}</span>
+    ),
+    sortValue: (row) => row.featureVersion,
   },
   {
     key: "asOf",
-    header: "As Of",
-    render: (s) => (
+    header: "Captured",
+    render: (row) => (
       <span className="tabular-nums text-xs text-[#6b7280]">
-        {new Date(s.asOfTs).toLocaleDateString("en-US", {
-          month: "short",
-          day: "numeric",
-        })}
+        {formatDateTimeShort(row.asOfTs)}
       </span>
     ),
-    sortValue: (s) => s.asOfTs,
+    sortValue: (row) => row.asOfTs,
   },
 ];
 
 export function BacktestTableSection({
   backtestResults,
   snapshots,
+  sessions,
+  meetings,
   pnlLabels,
   pnlCumulative,
 }: {
   backtestResults: BacktestResult[];
   snapshots: FeatureSnapshot[];
+  sessions: F1Session[];
+  meetings: F1Meeting[];
   pnlLabels: string[];
   pnlCumulative: number[];
 }) {
+  const sessionsById = new Map(
+    sessions.map((session) => [session.id, session]),
+  );
+  const meetingsById = new Map(
+    meetings.map((meeting) => [meeting.id, meeting]),
+  );
+
+  const resultRows: ResultRow[] = [...backtestResults]
+    .map((result) => {
+      const stage = describeStage(result.stage);
+      const metrics = result.metricsJson;
+      const roiPct =
+        typeof metrics?.roi_pct === "number" ? metrics.roi_pct : null;
+
+      return {
+        id: result.id,
+        strategyName: result.strategyName,
+        stageLabel: stage.label,
+        windowLabel: formatDateRangeShort(result.startAt, result.endAt),
+        betCount: backtestBetCount(metrics),
+        hitRate: backtestHitRate(metrics),
+        roiPct,
+        pnl: backtestPnl(metrics),
+        createdAt: result.createdAt,
+      };
+    })
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+
+  const snapshotRows: SnapshotRow[] = [...snapshots]
+    .map((snapshot) => {
+      const stage = describeStage(snapshot.snapshotType);
+      const session = snapshot.sessionId
+        ? sessionsById.get(snapshot.sessionId)
+        : null;
+      const meeting = session?.meetingId
+        ? meetingsById.get(session.meetingId)
+        : null;
+      const contextBits = [meeting?.meetingName, session?.sessionName].filter(
+        Boolean,
+      );
+
+      return {
+        id: snapshot.id,
+        snapshotLabel: stage.label,
+        contextLabel:
+          contextBits.join(" · ") ||
+          "Linked to the stored feature dataset used by training and backtests.",
+        rowCount: snapshot.rowCount,
+        featureVersion: snapshot.featureVersion,
+        asOfTs: snapshot.asOfTs,
+      };
+    })
+    .sort((a, b) => b.asOfTs.localeCompare(a.asOfTs));
+
   return (
     <>
       {pnlCumulative.length > 1 && (
-        <Panel title="Cumulative PnL" eyebrow="Performance">
+        <Panel title="Combined PnL trend" eyebrow="All settled backtests">
           <PnlAreaChart
             labels={pnlLabels}
             values={pnlCumulative}
@@ -154,24 +248,26 @@ export function BacktestTableSection({
       )}
 
       <Panel
-        title="Backtest Results"
-        eyebrow={`${backtestResults.length} results`}
+        title="Backtest results"
+        eyebrow={`${resultRows.length} settled runs`}
       >
         <DataTable
-          columns={btColumns}
-          data={backtestResults}
-          emptyMessage="No backtest results yet."
+          columns={resultColumns}
+          data={resultRows}
+          rowKey={(row) => row.id}
+          emptyMessage="No settled backtest runs are available yet."
         />
       </Panel>
 
       <Panel
-        title="Feature Snapshots"
-        eyebrow={`${snapshots.length} snapshots`}
+        title="Feature snapshots"
+        eyebrow={`${snapshotRows.length} stored datasets`}
       >
         <DataTable
-          columns={snapColumns}
-          data={snapshots}
-          emptyMessage="No snapshots yet."
+          columns={snapshotColumns}
+          data={snapshotRows}
+          rowKey={(row) => row.id}
+          emptyMessage="No feature snapshots are available yet."
         />
       </Panel>
     </>

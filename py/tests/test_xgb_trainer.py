@@ -77,6 +77,8 @@ class TestEvaluate:
         metrics = _evaluate(y_true, y_prob, prices, min_edge=0.05)
         assert metrics["brier_score"] < 0.01
         assert metrics["row_count"] == 4
+        assert metrics["calibration_buckets"]["0-10%"]["count"] == 2
+        assert metrics["calibration_buckets"]["90-100%"]["count"] == 2
         assert metrics["bet_count"] == 2  # only label_yes=1 rows have edge > 0.05
 
     def test_no_edge_bets(self) -> None:
@@ -146,6 +148,7 @@ class TestTrainOneSplit:
         assert len(result.predictions) == 10
         assert "brier_score" in result.metrics
         assert "log_loss" in result.metrics
+        assert "calibration_buckets" in result.metrics
 
         # Probabilities should be valid
         for pred in result.predictions:

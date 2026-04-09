@@ -1,10 +1,14 @@
 "use client";
 
+import * as React from "react";
+
 import ReactEChartsCore from "echarts-for-react/lib/core";
 import { LineChart, ScatterChart } from "echarts/charts";
 import { GridComponent, TooltipComponent } from "echarts/components";
 import * as echarts from "echarts/core";
 import { CanvasRenderer } from "echarts/renderers";
+
+import type { CalibrationPoint } from "../../../lib/calibration";
 
 echarts.use([
   ScatterChart,
@@ -15,8 +19,7 @@ echarts.use([
 ]);
 
 type CalibrationChartProps = {
-  /** Each point: [predicted, actual] */
-  points: [number, number][];
+  points: CalibrationPoint[];
   height?: number;
 };
 
@@ -43,8 +46,8 @@ export function CalibrationChart({
       backgroundColor: "#1e1e2e",
       borderColor: "rgba(255,255,255,0.08)",
       textStyle: { color: "#d1d5db", fontSize: 11 },
-      formatter: (p: { data: [number, number] }) =>
-        `Predicted: ${(p.data[0] * 100).toFixed(1)}%<br/>Actual: ${(p.data[1] * 100).toFixed(1)}%`,
+      formatter: (p: { data: [number, number, number, string] }) =>
+        `Bucket: ${p.data[3]}<br/>Predicted: ${(p.data[0] * 100).toFixed(1)}%<br/>Actual: ${(p.data[1] * 100).toFixed(1)}%<br/>Samples: ${p.data[2]}`,
     },
     xAxis: {
       type: "value",
@@ -75,6 +78,30 @@ export function CalibrationChart({
     series: [
       {
         type: "line",
+        data: points.map((point) => [point.predicted, point.actual]),
+        symbol: "none",
+        lineStyle: {
+          width: 2,
+          color: "#f97316",
+        },
+        silent: true,
+      },
+      {
+        type: "scatter",
+        data: points.map((point) => [
+          point.predicted,
+          point.actual,
+          point.count,
+          point.bucketLabel,
+        ]),
+        symbolSize: (value: number[]) => {
+          const count = value[2] ?? 1;
+          return Math.max(8, Math.min(22, 8 + Math.log2(count + 1) * 4));
+        },
+        itemStyle: { color: "#e10600" },
+      },
+      {
+        type: "line",
         data: [
           [0, 0],
           [1, 1],
@@ -86,12 +113,6 @@ export function CalibrationChart({
           type: "dashed",
         },
         silent: true,
-      },
-      {
-        type: "scatter",
-        data: points,
-        symbolSize: 6,
-        itemStyle: { color: "#e10600" },
       },
     ],
   };

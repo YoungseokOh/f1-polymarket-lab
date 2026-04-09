@@ -23,6 +23,8 @@ from f1_polymarket_lab.storage.models import (
     FeatureSnapshot,
     MappingCandidate,
     MarketTaxonomyLabel,
+    ModelRun,
+    ModelRunPromotion,
     PaperTradePosition,
     PaperTradeSession,
     PolymarketEvent,
@@ -69,12 +71,53 @@ def build_context(tmp_path: Path, *, execute: bool = True) -> tuple[Session, Pip
     return session, context
 
 
+def seed_active_promoted_multitask_champion(session: Session, tmp_path: Path) -> None:
+    artifact_dir = tmp_path / "artifacts" / "model-runs" / "champion-run"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    session.add_all(
+        [
+            ModelRun(
+                id="champion-run",
+                stage="multitask_qr",
+                model_family="torch_multitask",
+                model_name="shared_encoder_multitask_v2",
+                dataset_version="multitask_v1",
+                config_json={"seed": 7},
+                metrics_json={
+                    "total_pnl": 12.5,
+                    "roi_pct": 16.0,
+                    "bet_count": 28,
+                    "ece": 0.05,
+                    "family_pnl_share_max": 0.54,
+                },
+                artifact_uri=str(artifact_dir),
+                registry_run_id="mlflow-champion-run",
+            ),
+            ModelRunPromotion(
+                id="promotion-champion-run",
+                model_run_id="champion-run",
+                stage="multitask_qr",
+                status="active",
+                gate_metrics_json={
+                    "total_pnl": 12.5,
+                    "roi_pct": 16.0,
+                    "bet_count": 28,
+                    "ece": 0.05,
+                    "family_pnl_share_max": 0.54,
+                },
+                promoted_at=datetime(2026, 3, 28, 7, 50, tzinfo=timezone.utc),
+            ),
+        ]
+    )
+
+
 def seed_japan_q_race_cockpit_fixture(
     session: Session,
     tmp_path: Path,
     *,
     include_q_results: bool,
     include_resolvable_manual_trade: bool = True,
+    include_promoted_model: bool = True,
 ) -> None:
     meeting = F1Meeting(
         id="meeting:1281",
@@ -313,6 +356,8 @@ def seed_japan_q_race_cockpit_fixture(
                 ),
             ]
         )
+    if include_promoted_model:
+        seed_active_promoted_multitask_champion(session, tmp_path)
     session.commit()
 
 
@@ -2884,7 +2929,42 @@ def test_get_weekend_cockpit_status_marks_finished_stage_settlement_ready(
         assert settle_step["status"] == "ready"
         assert settle_step["count"] == 2
         assert "2 prior runs" in settle_step["detail"]
+        assert status["model_ready"] is True
+        assert status["required_stage"] == "multitask_qr"
+        assert status["active_model_run_id"] == "champion-run"
+        assert status["model_blockers"] == []
         assert status["primary_action_cta"] == "Update to latest"
+    finally:
+        session.close()
+
+
+def test_get_weekend_cockpit_status_reports_model_blockers_without_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        seed_japan_q_race_cockpit_fixture(
+            session,
+            tmp_path,
+            include_q_results=True,
+            include_promoted_model=False,
+        )
+
+        status = get_weekend_cockpit_status(context, gp_short_code="japan_q_race")
+
+        assert status["ready_to_run"] is False
+        assert status["model_ready"] is False
+        assert status["required_stage"] == "multitask_qr"
+        assert status["active_model_run_id"] is None
+        assert status["model_blockers"] == [
+            "A promoted multitask_qr champion is required before paper trading can run."
+        ]
+        assert status["blockers"][-1] == status["model_blockers"][0]
     finally:
         session.close()
 
@@ -2966,10 +3046,14 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
             batch_size: int = 100,
             max_pages: int = 5,
             search_fallback: bool = True,
+            probe_exact_slugs: bool = True,
+            exact_slug_candidate_limit: int | None = None,
         ) -> dict[str, Any]:
             calls["discovered_session_key"] = session_key
             calls["max_pages"] = max_pages
             calls["search_fallback"] = search_fallback
+            calls["probe_exact_slugs"] = probe_exact_slugs
+            calls["exact_slug_candidate_limit"] = exact_slug_candidate_limit
             return {"markets": 2, "auto_mappings": 1}
 
         def fake_reconcile(_ctx: PipelineContext) -> dict[str, Any]:
@@ -3030,6 +3114,8 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
         assert calls["discovered_session_key"] == 9102
         assert calls["max_pages"] == 7
         assert calls["search_fallback"] is True
+        assert calls["probe_exact_slugs"] is True
+        assert calls["exact_slug_candidate_limit"] is None
         assert calls["reconcile_called"] is True
         assert calls["hydrated_market_ids"] == ["market-q"]
         assert result["refreshed_session"]["session_code"] == "Q"
@@ -3037,6 +3123,185 @@ def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_
         assert result["markets_discovered"] == 2
         assert result["mappings_written"] == 1
         assert result["markets_hydrated"] == 1
+    finally:
+        session.close()
+
+
+def test_refresh_latest_session_for_meeting_refreshes_matching_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting:1281",
+            meeting_key=1281,
+            season=2026,
+            meeting_name="Japanese Grand Prix",
+        )
+        fp1_session = F1Session(
+            id="session:11246",
+            session_key=11246,
+            meeting_id=meeting.id,
+            session_name="Practice 1",
+            session_type="Practice",
+            session_code="FP1",
+            date_start_utc=datetime(2026, 3, 27, 2, 30, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 27, 3, 30, tzinfo=timezone.utc),
+            is_practice=True,
+        )
+        q_session = F1Session(
+            id="session:11249",
+            session_key=11249,
+            meeting_id=meeting.id,
+            session_name="Qualifying",
+            session_type="Qualifying",
+            session_code="Q",
+            date_start_utc=datetime(2026, 3, 28, 6, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 28, 7, 0, tzinfo=timezone.utc),
+            is_practice=False,
+        )
+        session.add_all([meeting, fp1_session, q_session])
+        session.commit()
+
+        refreshed_configs: list[str] = []
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.sync_f1_calendar",
+            lambda *_args, **_kwargs: {"status": "completed"},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.hydrate_f1_session",
+            lambda *_args, **_kwargs: {"records_written": 4},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.discover_session_polymarket",
+            lambda *_args, **_kwargs: {"markets": 0},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.reconcile_mappings",
+            lambda *_args, **_kwargs: {"mapping_rows": 0},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.backfill_backtests",
+            lambda _ctx, *, gp_short_code, **_kwargs: refreshed_configs.append(gp_short_code)
+            or {
+                "processed": [
+                    {
+                        "gp_short_code": gp_short_code,
+                        "snapshot_id": f"snapshot:{gp_short_code}",
+                        "rebuilt_snapshot": True,
+                        "bet_count": 1,
+                        "total_pnl": 2.5,
+                    }
+                ],
+                "skipped": [],
+            },
+        )
+
+        result = refresh_latest_session_for_meeting(
+            context,
+            meeting_id=meeting.id,
+            hydrate_market_history=False,
+        )
+
+        assert set(refreshed_configs) == {
+            "japan_pre",
+            "japan_fp1",
+            "japan_fp2_q",
+            "japan_fp3",
+        }
+        assert len(result["artifacts_refreshed"]) == 4
+        assert all(item["status"] == "processed" for item in result["artifacts_refreshed"])
+    finally:
+        session.close()
+
+
+def test_refresh_latest_session_for_meeting_limits_exact_slug_probe_for_race_fast_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 8, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        meeting = F1Meeting(
+            id="meeting:race-fast",
+            meeting_key=9002,
+            season=2026,
+            meeting_name="Race Fast Path Grand Prix",
+        )
+        race_session = F1Session(
+            id="session:race",
+            session_key=9201,
+            meeting_id=meeting.id,
+            session_name="Race",
+            session_type="Race",
+            session_code="R",
+            date_start_utc=datetime(2026, 3, 8, 5, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 8, 7, 0, tzinfo=timezone.utc),
+            is_practice=False,
+        )
+        session.add_all([meeting, race_session])
+        session.commit()
+
+        calls: dict[str, Any] = {}
+
+        def fake_discover(
+            _ctx: PipelineContext,
+            *,
+            session_key: int,
+            batch_size: int = 100,
+            max_pages: int = 5,
+            search_fallback: bool = True,
+            probe_exact_slugs: bool = True,
+            exact_slug_candidate_limit: int | None = None,
+        ) -> dict[str, Any]:
+            calls["session_key"] = session_key
+            calls["max_pages"] = max_pages
+            calls["search_fallback"] = search_fallback
+            calls["probe_exact_slugs"] = probe_exact_slugs
+            calls["exact_slug_candidate_limit"] = exact_slug_candidate_limit
+            return {"markets": 21}
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.discover_session_polymarket",
+            fake_discover,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.reconcile_mappings",
+            lambda *_args, **_kwargs: {"mapping_rows": 0},
+        )
+
+        result = refresh_latest_session_for_meeting(
+            context,
+            meeting_id=meeting.id,
+            search_fallback=False,
+            discover_max_pages=1,
+            hydrate_market_history=False,
+            sync_calendar=False,
+            hydrate_f1_session_data=False,
+            include_extended_f1_data=False,
+            include_heavy_f1_data=False,
+            refresh_artifacts=False,
+        )
+
+        assert calls == {
+            "session_key": 9201,
+            "max_pages": 1,
+            "search_fallback": False,
+            "probe_exact_slugs": True,
+            "exact_slug_candidate_limit": 64,
+        }
+        assert result["refreshed_session"]["session_code"] == "R"
+        assert result["markets_discovered"] == 21
+        assert result["message"].endswith("Artifacts refresh skipped.")
     finally:
         session.close()
 

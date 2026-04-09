@@ -2,6 +2,7 @@ import Link from "next/link";
 
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
+import { decodeRouteParam } from "../../../lib/route-param";
 import { SessionTimeline } from "../../_components/session-timeline";
 
 export const revalidate = 300;
@@ -10,10 +11,11 @@ type Props = { params: Promise<{ meetingId: string }> };
 
 export default async function GPDetailPage({ params }: Props) {
   const { meetingId } = await params;
+  const normalizedMeetingId = decodeRouteParam(meetingId);
 
   const [meeting, gpSessions, markets, mappings] = await Promise.all([
-    sdk.meeting(meetingId).catch(() => null),
-    sdk.meetingSessions(meetingId).catch(() => []),
+    sdk.meeting(normalizedMeetingId).catch(() => null),
+    sdk.meetingSessions(normalizedMeetingId).catch(() => []),
     sdk.markets().catch(() => []),
     sdk.mappings().catch(() => []),
   ]);

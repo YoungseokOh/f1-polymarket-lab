@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from f1_polymarket_lab.common import MarketTaxonomy
+from f1_polymarket_lab.common import MarketGroup, MarketTaxonomy
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -28,6 +28,8 @@ class F1MeetingResponse(BaseModel):
     season: int
     round_number: int | None = None
     meeting_name: str
+    meeting_slug: str | None = None
+    event_format: str | None = None
     circuit_short_name: str | None = None
     country_name: str | None = None
     location: str | None = None
@@ -153,6 +155,9 @@ class ModelRunResponse(BaseModel):
     config_json: dict[str, object] | None
     metrics_json: dict[str, object] | None
     artifact_uri: str | None
+    registry_run_id: str | None = None
+    promotion_status: str = "inactive"
+    promoted_at: datetime | None = None
     created_at: datetime
 
 
@@ -232,6 +237,122 @@ class PriceHistoryResponse(BaseModel):
     best_ask: float | None
 
 
+class SignalRegistryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    signal_code: str
+    signal_family: str
+    market_taxonomy: str | None = None
+    market_group: str | None = None
+    description: str | None = None
+    version: str
+    config_json: dict[str, object] | None = None
+    is_active: bool
+    created_at: datetime
+
+
+class SignalSnapshotResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    signal_code: str
+    signal_version: str
+    p_yes_raw: float | None = None
+    p_yes_calibrated: float | None = None
+    p_market_ref: float | None = None
+    delta_logit: float | None = None
+    freshness_sec: float | None = None
+    coverage_flag: bool
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class SignalDiagnosticResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    signal_code: str
+    market_taxonomy: MarketTaxonomy | None = None
+    market_group: MarketGroup | None = None
+    phase_bucket: str | None = None
+    brier: float | None = None
+    log_loss: float | None = None
+    ece: float | None = None
+    skill_vs_market: float | None = None
+    coverage_rate: float | None = None
+    residual_correlation_json: dict[str, object] | None = None
+    stability_json: dict[str, object] | None = None
+    metrics_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class EnsemblePredictionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    p_market_ref: float | None = None
+    p_yes_ensemble: float | None = None
+    z_market: float | None = None
+    z_ensemble: float | None = None
+    intercept: float | None = None
+    disagreement_score: float | None = None
+    effective_n: float | None = None
+    uncertainty_score: float | None = None
+    contributions_json: dict[str, object] | None = None
+    coverage_json: dict[str, object] | None = None
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
+
+
+class TradeDecisionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    model_run_id: str
+    ensemble_prediction_id: str | None = None
+    feature_snapshot_id: str | None = None
+    market_id: str | None = None
+    token_id: str | None = None
+    event_id: str | None = None
+    market_taxonomy: MarketTaxonomy
+    market_group: MarketGroup
+    meeting_key: int | None = None
+    as_of_ts: datetime
+    side: str
+    edge: float | None = None
+    threshold: float | None = None
+    spread: float | None = None
+    depth: float | None = None
+    kelly_fraction_raw: float | None = None
+    disagreement_penalty: float | None = None
+    liquidity_factor: float | None = None
+    size_fraction: float | None = None
+    decision_status: str
+    decision_reason: str | None = None
+    metadata_json: dict[str, object] | None = None
+    created_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Action request / response schemas
 # ---------------------------------------------------------------------------
@@ -242,6 +363,25 @@ class ActionStatusResponse(BaseModel):
     status: str
     message: str
     details: dict[str, object] | None = None
+
+
+class OpsCalendarMeetingResponse(BaseModel):
+    season: int
+    meeting_key: int
+    meeting_slug: str
+    ops_slug: str
+    meeting_name: str
+    round_number: int | None = None
+    event_format: str | None = None
+    start_date_utc: datetime | None = None
+    end_date_utc: datetime | None = None
+    country_name: str | None = None
+    location: str | None = None
+    status: str
+    source_conflict: bool = False
+    source_label: str | None = None
+    source_url: str | None = None
+    note: str | None = None
 
 
 class IngestDemoRequest(BaseModel):
@@ -261,11 +401,37 @@ class SyncF1MarketsRequest(BaseModel):
     end_year: int | None = None
 
 
+class SetCalendarOverrideRequest(BaseModel):
+    season: int = 2026
+    meeting_slug: str
+    status: str
+    ops_slug: str | None = None
+    effective_round_number: int | None = None
+    effective_start_date_utc: datetime | None = None
+    effective_end_date_utc: datetime | None = None
+    effective_meeting_name: str | None = None
+    effective_country_name: str | None = None
+    effective_location: str | None = None
+    source_label: str | None = None
+    source_url: str | None = None
+    note: str | None = None
+
+
+class ClearCalendarOverrideRequest(BaseModel):
+    season: int = 2026
+    meeting_slug: str
+
+
 class RefreshLatestSessionRequest(BaseModel):
     meeting_id: str
     search_fallback: bool = True
     discover_max_pages: int = 5
     hydrate_market_history: bool = True
+    sync_calendar: bool = True
+    hydrate_f1_session_data: bool = True
+    include_extended_f1_data: bool = True
+    include_heavy_f1_data: bool = True
+    refresh_artifacts: bool = True
 
 
 class RefreshedSessionResponse(BaseModel):
@@ -274,6 +440,16 @@ class RefreshedSessionResponse(BaseModel):
     session_code: str | None
     session_name: str
     date_end_utc: datetime | None
+
+
+class ArtifactRefreshResponse(BaseModel):
+    gp_short_code: str
+    status: str
+    snapshot_id: str | None = None
+    rebuilt_snapshot: bool = False
+    bet_count: int | None = None
+    total_pnl: float | None = None
+    reason: str | None = None
 
 
 class RefreshLatestSessionResponse(BaseModel):
@@ -287,6 +463,7 @@ class RefreshLatestSessionResponse(BaseModel):
     markets_discovered: int
     mappings_written: int
     markets_hydrated: int
+    artifacts_refreshed: list[ArtifactRefreshResponse] = Field(default_factory=list)
 
 
 class CaptureLiveWeekendRequest(BaseModel):
@@ -384,11 +561,19 @@ class RunBacktestRequest(BaseModel):
     bet_size: float = 10.0
 
 
+class BackfillBacktestsRequest(BaseModel):
+    gp_short_code: str | None = None
+    min_edge: float = 0.05
+    bet_size: float = 10.0
+    rebuild_missing: bool = True
+
+
 class GPRegistryItem(BaseModel):
     name: str
     short_code: str
     meeting_key: int
     season: int
+    meeting_slug: str | None = None
     target_session_code: str
     variant: str
     source_session_code: str | None
@@ -397,6 +582,36 @@ class GPRegistryItem(BaseModel):
     stage_label: str
     display_label: str
     display_description: str
+    required_model_stage: str | None = None
+    live_bet_size: float | None = None
+    live_min_edge: float | None = None
+    live_max_daily_loss: float | None = None
+    live_max_spread: float | None = None
+    calendar_status: str = "scheduled"
+    source_conflict: bool = False
+    override_source_url: str | None = None
+
+
+class WeekendCockpitSessionStageResponse(BaseModel):
+    gp_short_code: str
+    target_session_code: str
+    required_stage: str | None
+    model_ready: bool
+    active_model_run_id: str | None
+    model_blockers: list[str]
+    display_label: str
+
+
+class LiveTradeTicketSummaryResponse(BaseModel):
+    ticket_count: int
+    open_ticket_count: int
+    filled_ticket_count: int
+    cancelled_ticket_count: int
+
+
+class LiveTradeExecutionSummaryResponse(BaseModel):
+    execution_count: int
+    filled_execution_count: int
 
 
 class WeekendCockpitStepResponse(BaseModel):
@@ -417,6 +632,12 @@ class WeekendCockpitStatusResponse(BaseModel):
     auto_selected_gp_short_code: str
     selected_gp_short_code: str
     selected_config: GPRegistryItem
+    calendar_status: str
+    meeting_slug: str
+    source_conflict: bool
+    override_source_url: str | None = None
+    calendar_meetings: list[OpsCalendarMeetingResponse] = Field(default_factory=list)
+    cancelled_meetings: list[OpsCalendarMeetingResponse] = Field(default_factory=list)
     available_configs: list[GPRegistryItem]
     meeting: F1MeetingResponse | None
     focus_session: F1SessionResponse | None
@@ -429,6 +650,13 @@ class WeekendCockpitStatusResponse(BaseModel):
     steps: list[WeekendCockpitStepResponse]
     blockers: list[str]
     ready_to_run: bool
+    model_ready: bool
+    required_stage: str | None
+    active_model_run_id: str | None
+    model_blockers: list[str]
+    session_stage_statuses: list[WeekendCockpitSessionStageResponse]
+    live_ticket_summary: LiveTradeTicketSummaryResponse
+    live_execution_summary: LiveTradeExecutionSummaryResponse
     primary_action_title: str
     primary_action_description: str
     primary_action_cta: str
@@ -537,6 +765,106 @@ class RunWeekendCockpitRequest(BaseModel):
     discover_max_pages: int = 5
 
 
+class LiveSignalRowResponse(BaseModel):
+    market_id: str
+    token_id: str | None = None
+    question: str
+    session_code: str
+    promotion_stage: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    model_prob: float
+    market_price: float | None = None
+    edge: float | None = None
+    spread: float | None = None
+    signal_action: str
+    side_label: str | None = None
+    recommended_size: float
+    max_spread: float | None = None
+    observed_at_utc: str | None = None
+    event_type: str | None = None
+
+
+class LiveTradeSignalBoardResponse(BaseModel):
+    gp_short_code: str
+    required_stage: str | None = None
+    active_model_run_id: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    rows: list[LiveSignalRowResponse]
+    blockers: list[str]
+
+
+class CreateLiveTradeTicketRequest(BaseModel):
+    gp_short_code: str
+    market_id: str
+    observed_market_price: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+    observed_at_utc: datetime | None = None
+    source_event_type: str | None = None
+    bet_size: float | None = Field(default=None, gt=0.0, le=1000.0)
+    min_edge: float | None = Field(default=None, ge=0.0, le=1.0)
+    max_spread: float | None = Field(default=None, ge=0.0, le=1.0)
+
+
+class CreateLiveTradeTicketResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    gp_short_code: str
+    market_id: str
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    promotion_stage: str | None = None
+    signal_action: str
+    side_label: str
+    recommended_size: float
+    market_price: float
+    model_prob: float
+    edge: float
+    observed_spread: float | None = None
+    max_spread: float | None = None
+    observed_at_utc: datetime
+    expires_at: datetime | None = None
+
+
+class RecordLiveTradeFillRequest(BaseModel):
+    ticket_id: str
+    submitted_size: float = Field(gt=0.0, le=1000.0)
+    actual_fill_size: float | None = Field(default=None, gt=0.0, le=1000.0)
+    actual_fill_price: float | None = Field(default=None, gt=0.0, le=1.0)
+    submitted_at: datetime | None = None
+    filled_at: datetime | None = None
+    operator_note: str | None = None
+    external_reference: str | None = None
+    status: str = "filled"
+    realized_pnl: float | None = None
+
+
+class RecordLiveTradeFillResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    execution_id: str
+    execution_status: str
+    ticket_status: str
+
+
+class CancelLiveTradeTicketRequest(BaseModel):
+    ticket_id: str
+    operator_note: str | None = None
+
+
+class CancelLiveTradeTicketResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    ticket_id: str
+    ticket_status: str
+
+
 class WeekendCockpitSettlementSummaryResponse(BaseModel):
     settled_session_ids: list[str] = Field(default_factory=list)
     settled_gp_slugs: list[str] = Field(default_factory=list)
@@ -621,6 +949,55 @@ class PaperTradePositionResponse(BaseModel):
     exit_price: float | None
     exit_time: datetime | None
     realized_pnl: float | None
+
+
+class LiveTradeTicketResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    gp_slug: str
+    session_code: str
+    market_id: str
+    token_id: str | None
+    snapshot_id: str | None
+    model_run_id: str | None
+    promotion_stage: str | None
+    question: str
+    signal_action: str
+    side_label: str
+    model_prob: float
+    market_price: float
+    edge: float
+    recommended_size: float
+    observed_spread: float | None
+    max_spread: float | None
+    observed_at_utc: datetime
+    source_event_type: str | None
+    status: str
+    rationale_json: dict[str, object] | None
+    expires_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class LiveTradeExecutionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    ticket_id: str
+    market_id: str
+    side: str
+    submitted_size: float
+    actual_fill_size: float | None
+    actual_fill_price: float | None
+    submitted_at: datetime
+    filled_at: datetime | None
+    operator_note: str | None
+    external_reference: str | None
+    realized_pnl: float | None
+    status: str
+    created_at: datetime
+    updated_at: datetime
 
 
 class PaperTradeSessionResponse(BaseModel):

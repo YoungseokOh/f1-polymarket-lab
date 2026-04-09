@@ -3,6 +3,9 @@
 import type {
   CaptureLiveWeekendResponse,
   CurrentWeekendOperationsReadiness,
+  LiveTradeExecution,
+  LiveSignalRow as LiveTradeSignalRow,
+  LiveTradeTicket,
   ModelPrediction,
   OperationReadiness,
   PolymarketMarket,
@@ -37,6 +40,32 @@ function operationTone(
   if (status === "ready") return "good";
   if (status === "blocked") return "warn";
   return "default";
+}
+
+function formatCalendarDateRange(
+  meeting: WeekendCockpitStatus["calendarMeetings"][number],
+) {
+  if (!meeting.startDateUtc && !meeting.endDateUtc) return "Dates unavailable";
+  const formatter = new Intl.DateTimeFormat("en-US", {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  });
+  const start = meeting.startDateUtc
+    ? formatter.format(new Date(meeting.startDateUtc))
+    : "TBD";
+  const end = meeting.endDateUtc
+    ? formatter.format(new Date(meeting.endDateUtc))
+    : "TBD";
+  return start === end ? start : `${start} → ${end}`;
+}
+
+function formatEventFormat(value: string | null | undefined) {
+  if (!value) return "Format pending";
+  return value
+    .split("_")
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
 }
 
 function stepTone(status: string): "default" | "good" | "warn" | "live" {
@@ -212,56 +241,14 @@ function currentLiveQuoteSpread(
   return quote.bestAsk - quote.bestBid;
 }
 
-function currentMarketProbability(
-  market: PolymarketMarket,
-  prices: PricePoint[],
-) {
-  const latest = prices.at(-1);
-  if (latest?.price != null) return latest.price;
-  if (latest?.midpoint != null) return latest.midpoint;
-  if (market.lastTradePrice != null) return market.lastTradePrice;
-  if (market.bestBid != null && market.bestAsk != null) {
-    return (market.bestBid + market.bestAsk) / 2;
-  }
-  return market.bestAsk ?? market.bestBid ?? null;
-}
-
-function currentSpread(market: PolymarketMarket, prices: PricePoint[]) {
-  const latest = prices.at(-1);
-  const bestBid = latest?.bestBid ?? market.bestBid;
-  const bestAsk = latest?.bestAsk ?? market.bestAsk;
-  if (bestBid == null || bestAsk == null) return null;
-  return bestAsk - bestBid;
-}
-
-function latestPriceMove(prices: PricePoint[]) {
-  if (prices.length < 2) return null;
-  const latest = prices.at(-1);
-  const previous = prices.at(-2);
-  if (!latest || !previous) return null;
-  const latestValue = latest.price ?? latest.midpoint;
-  const previousValue = previous.price ?? previous.midpoint;
-  if (latestValue == null || previousValue == null) return null;
-  return latestValue - previousValue;
-}
-
-function liveDeltaFromStoredPrice(
-  quote: CaptureLiveWeekendResponse["summary"]["marketQuotes"][number],
-  market: PolymarketMarket,
-  prices: PricePoint[],
-) {
-  const liveValue = currentLiveQuoteProbability(quote);
-  const storedValue = currentMarketProbability(market, prices);
-  if (liveValue == null || storedValue == null) return null;
-  return liveValue - storedValue;
-}
-
 function sessionDisplayName(sessionCode: string | null | undefined) {
   return (
     {
       FP1: "FP1",
       FP2: "FP2",
       FP3: "FP3",
+      SQ: "Sprint Qualifying",
+      S: "Sprint",
       Q: "Qualifying",
       R: "Race",
     }[sessionCode ?? ""] ??
@@ -351,19 +338,10 @@ export function WeekendCockpitPanel({
     capturedAt: string;
     result: CaptureLiveWeekendResponse;
   };
-  type LiveSignalRow = {
-    marketId: string;
-    tokenId: string | null;
-    question: string;
-    marketProb: number | null;
-    modelProb: number | null;
-    edge: number | null;
-    spread: number | null;
+  type LiveSignalRow = LiveTradeSignalRow & {
     priceMove: number | null;
     priceMoveLabel: string;
-    observedAtUtc: string | null;
     priceSource: "live" | "stored";
-    eventType: string | null;
   };
 
   const router = useRouter();
@@ -392,9 +370,22 @@ export function WeekendCockpitPanel({
   const [liveSignalRows, setLiveSignalRows] = useState<LiveSignalRow[]>([]);
   const [isLoadingLiveSignals, setIsLoadingLiveSignals] = useState(false);
   const [liveSignalError, setLiveSignalError] = useState<string | null>(null);
+  const [liveSignalBlockers, setLiveSignalBlockers] = useState<string[]>([]);
   const [manualTradeMarketId, setManualTradeMarketId] = useState<string | null>(
     null,
   );
+  const [liveTickets, setLiveTickets] = useState<LiveTradeTicket[]>([]);
+  const [liveExecutions, setLiveExecutions] = useState<LiveTradeExecution[]>(
+    [],
+  );
+  const [selectedLiveTicketId, setSelectedLiveTicketId] = useState<
+    string | null
+  >(null);
+  const [liveFillSize, setLiveFillSize] = useState("");
+  const [liveFillPrice, setLiveFillPrice] = useState("");
+  const [liveFillNote, setLiveFillNote] = useState("");
+  const [liveFillReference, setLiveFillReference] = useState("");
+  const [isRecordingLiveFill, setIsRecordingLiveFill] = useState(false);
   const [manualTradeShares, setManualTradeShares] = useState("10");
   const [manualTradeMinEdgePts, setManualTradeMinEdgePts] = useState("5");
   const [manualTradeMaxSpreadCents, setManualTradeMaxSpreadCents] =
@@ -425,7 +416,16 @@ export function WeekendCockpitPanel({
     setLiveSignalRows([]);
     setIsLoadingLiveSignals(false);
     setLiveSignalError(null);
+    setLiveSignalBlockers([]);
     setManualTradeMarketId(null);
+    setLiveTickets([]);
+    setLiveExecutions([]);
+    setSelectedLiveTicketId(null);
+    setLiveFillSize("");
+    setLiveFillPrice("");
+    setLiveFillNote("");
+    setLiveFillReference("");
+    setIsRecordingLiveFill(false);
   }, [initialStatus, initialReadiness]);
 
   useEffect(() => {
@@ -443,14 +443,15 @@ export function WeekendCockpitPanel({
   }, []);
 
   useEffect(() => {
-    const targetSessionId = status?.targetSession?.id;
-    const liveModelRunId = status?.latestPaperSession?.modelRunId ?? null;
-    if (!targetSessionId) {
+    const gpShortCode = status?.selectedGpShortCode ?? null;
+    if (gpShortCode === null) {
       setLiveSignalRows([]);
       setLiveSignalError(null);
+      setLiveSignalBlockers([]);
       setIsLoadingLiveSignals(false);
       return;
     }
+    const activeGpShortCode: string = gpShortCode;
 
     let cancelled = false;
     const requestId = liveSignalRequestRef.current + 1;
@@ -459,112 +460,58 @@ export function WeekendCockpitPanel({
     async function loadLiveSignals() {
       setIsLoadingLiveSignals(true);
       setLiveSignalError(null);
+      setLiveSignalBlockers([]);
 
       try {
         const liveQuoteByMarketId = new Map(
           (latestLiveQuotes ?? []).map((quote) => [quote.marketId, quote]),
         );
-        const mappings = await sdk.mappings({
-          f1SessionId: targetSessionId,
-          minConfidence: 0.6,
-          limit: 50,
-        });
-        const marketIds = [
-          ...new Set(
-            mappings
-              .map((mapping) => mapping.polymarketMarketId)
-              .filter((marketId): marketId is string => marketId != null),
-          ),
-        ];
-        if (!marketIds.length) {
-          if (!cancelled && requestId === liveSignalRequestRef.current) {
-            setLiveSignalRows([]);
-          }
-          return;
-        }
-
-        const [markets, predictions] = await Promise.all([
-          Promise.all(
-            marketIds.map(async (marketId) => {
-              try {
-                return await sdk.market(marketId);
-              } catch {
-                return null;
-              }
-            }),
-          ),
-          liveModelRunId
-            ? sdk.predictions(liveModelRunId).catch(() => [])
-            : Promise.resolve([]),
-        ]);
-        const validMarkets = markets.filter(
-          (market): market is PolymarketMarket => market !== null,
-        );
-        const priceEntries = await Promise.all(
-          validMarkets.map(async (market) => {
-            try {
-              const prices = await sdk.marketPrices(market.id);
-              return [market.id, prices] as [string, PricePoint[]];
-            } catch {
-              return [market.id, []] as [string, PricePoint[]];
-            }
-          }),
-        );
-        const pricesByMarketId = new Map(priceEntries);
-        const latestPredictionByMarketId = new Map<string, ModelPrediction>();
-        for (const prediction of predictions) {
-          if (!prediction.marketId) continue;
-          if (latestPredictionByMarketId.has(prediction.marketId)) continue;
-          latestPredictionByMarketId.set(prediction.marketId, prediction);
-        }
-
-        const rows = validMarkets
-          .map((market) => {
-            const prices = pricesByMarketId.get(market.id) ?? [];
-            const latest = prices.at(-1) ?? null;
-            const liveQuote = liveQuoteByMarketId.get(market.id) ?? null;
-            const marketProb = liveQuote
+        const signalBoard = await sdk.liveTradeSignalBoard(activeGpShortCode);
+        const rows = signalBoard.rows
+          .map((row) => {
+            const liveQuote = liveQuoteByMarketId.get(row.marketId) ?? null;
+            const liveMarketPrice = liveQuote
               ? currentLiveQuoteProbability(liveQuote)
-              : currentMarketProbability(market, prices);
-            const prediction =
-              latestPredictionByMarketId.get(market.id) ?? null;
-            const modelProb = prediction?.probabilityYes ?? null;
+              : null;
+            const liveSpread = liveQuote
+              ? currentLiveQuoteSpread(liveQuote)
+              : null;
+            const marketPrice = liveMarketPrice ?? row.marketPrice;
             return {
-              marketId: market.id,
-              tokenId: liveQuote?.tokenId ?? prediction?.tokenId ?? null,
-              question: market.question,
-              marketProb,
-              modelProb,
+              ...row,
+              tokenId: liveQuote?.tokenId ?? row.tokenId,
+              marketPrice,
               edge:
-                modelProb != null && marketProb != null
-                  ? modelProb - marketProb
+                marketPrice != null
+                  ? Number(row.modelProb) - marketPrice
                   : null,
-              spread: liveQuote
-                ? currentLiveQuoteSpread(liveQuote)
-                : currentSpread(market, prices),
-              priceMove: liveQuote
-                ? liveDeltaFromStoredPrice(liveQuote, market, prices)
-                : latestPriceMove(prices),
-              priceMoveLabel: liveQuote ? "Live delta" : "Last move",
-              observedAtUtc:
-                liveQuote?.observedAtUtc ?? latest?.observedAtUtc ?? null,
+              spread: liveSpread ?? row.spread,
+              observedAtUtc: liveQuote?.observedAtUtc ?? row.observedAtUtc,
+              eventType: liveQuote?.eventType ?? row.eventType,
+              priceMove:
+                liveQuote && row.marketPrice != null && liveMarketPrice != null
+                  ? liveMarketPrice - row.marketPrice
+                  : null,
+              priceMoveLabel: liveQuote ? "Live delta" : "Stored gap",
               priceSource: liveQuote ? ("live" as const) : ("stored" as const),
-              eventType: liveQuote?.eventType ?? null,
             };
           })
           .sort((left, right) => {
-            const edgeDelta = (right.edge ?? -999) - (left.edge ?? -999);
+            const edgeDelta =
+              Math.abs(right.edge ?? -999) - Math.abs(left.edge ?? -999);
             if (edgeDelta !== 0) return edgeDelta;
-            return (right.marketProb ?? 0) - (left.marketProb ?? 0);
+            return (right.marketPrice ?? 0) - (left.marketPrice ?? 0);
           });
 
         if (!cancelled && requestId === liveSignalRequestRef.current) {
           setLiveSignalRows(rows);
+          setLiveSignalBlockers(signalBoard.blockers);
         }
       } catch (error) {
         if (!cancelled && requestId === liveSignalRequestRef.current) {
           setLiveSignalRows([]);
           setLiveSignalError(feedbackMessage(error));
+          setLiveSignalBlockers([]);
         }
       } finally {
         if (!cancelled && requestId === liveSignalRequestRef.current) {
@@ -578,11 +525,7 @@ export function WeekendCockpitPanel({
     return () => {
       cancelled = true;
     };
-  }, [
-    latestLiveQuotes,
-    status?.latestPaperSession?.modelRunId,
-    status?.targetSession?.id,
-  ]);
+  }, [latestLiveQuotes, status?.selectedGpShortCode]);
 
   async function loadStatus(gpShortCode?: string) {
     const [next, nextReadiness] = await Promise.all([
@@ -593,6 +536,41 @@ export function WeekendCockpitPanel({
     setOperationsReadiness(nextReadiness);
     return next;
   }
+
+  const loadLiveTradeState = React.useCallback(async (gpShortCode?: string) => {
+    if (!gpShortCode) {
+      setLiveTickets([]);
+      setLiveExecutions([]);
+      return;
+    }
+    const [tickets, executions] = await Promise.all([
+      sdk.liveTradeTickets({ gpSlug: gpShortCode, limit: 20 }),
+      sdk.liveTradeExecutions({ gpSlug: gpShortCode, limit: 20 }),
+    ]);
+    setLiveTickets(tickets);
+    setLiveExecutions(executions);
+  }, []);
+
+  useEffect(() => {
+    const gpShortCode = status?.selectedGpShortCode;
+    if (!gpShortCode) {
+      setLiveTickets([]);
+      setLiveExecutions([]);
+      return;
+    }
+    let cancelled = false;
+    void loadLiveTradeState(gpShortCode).catch((error) => {
+      if (!cancelled) {
+        setLiveFeedback({
+          status: "error",
+          message: feedbackMessage(error),
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadLiveTradeState, status?.selectedGpShortCode]);
 
   async function handleSelectionChange(nextGp: string) {
     liveWatchStopRef.current = true;
@@ -741,11 +719,11 @@ export function WeekendCockpitPanel({
     setShowAdvanced((current) => !current);
   }
 
-  async function handleExecuteManualTrade(row: LiveSignalRow) {
+  async function handleCreateLiveTicket(row: LiveSignalRow) {
     const gpShortCode =
       selectedGpRef.current || statusRef.current?.selectedGpShortCode;
     if (!gpShortCode || row.priceSource !== "live") return;
-    if (row.marketProb == null || row.modelProb == null) return;
+    if (row.marketPrice == null) return;
 
     const shares = parsePositiveNumberInput(manualTradeShares);
     const minEdgePts = parsePositiveNumberInput(manualTradeMinEdgePts);
@@ -768,14 +746,10 @@ export function WeekendCockpitPanel({
     setManualTradeMarketId(row.marketId);
     setLiveFeedback(null);
     try {
-      const result = await sdk.executeManualLivePaperTrade({
+      const result = await sdk.createLiveTradeTicket({
         gp_short_code: gpShortCode,
         market_id: row.marketId,
-        token_id: row.tokenId,
-        model_run_id: statusRef.current?.latestPaperSession?.modelRunId ?? null,
-        snapshot_id: statusRef.current?.latestPaperSession?.snapshotId ?? null,
-        model_prob: row.modelProb,
-        market_price: row.marketProb,
+        observed_market_price: row.marketPrice,
         observed_at_utc: row.observedAtUtc,
         observed_spread: row.spread,
         source_event_type: row.eventType,
@@ -783,11 +757,14 @@ export function WeekendCockpitPanel({
         max_spread: maxSpreadCents == null ? null : maxSpreadCents / 100,
         bet_size: shares,
       });
-      setLiveFeedback({
-        status: result.status === "error" ? "error" : "ok",
-        message: result.message,
-      });
+      setLiveFeedback({ status: "ok", message: result.message });
+      setSelectedLiveTicketId(result.ticketId);
+      setLiveFillSize(String(result.recommendedSize));
+      setLiveFillPrice("");
+      setLiveFillNote("");
+      setLiveFillReference("");
       await loadStatus(gpShortCode);
+      await loadLiveTradeState(gpShortCode);
       router.refresh();
     } catch (error) {
       setLiveFeedback({
@@ -796,6 +773,87 @@ export function WeekendCockpitPanel({
       });
     } finally {
       setManualTradeMarketId(null);
+    }
+  }
+
+  function handlePrepareLiveFill(ticket: LiveTradeTicket) {
+    setSelectedLiveTicketId(ticket.id);
+    setLiveFillSize(String(ticket.recommendedSize));
+    setLiveFillPrice("");
+    setLiveFillNote("");
+    setLiveFillReference("");
+  }
+
+  async function handleRecordLiveFill() {
+    if (!selectedLiveTicketId) return;
+    const gpShortCode =
+      selectedGpRef.current || statusRef.current?.selectedGpShortCode;
+    const submittedSize = parsePositiveNumberInput(liveFillSize);
+    const fillPrice = parsePositiveNumberInput(liveFillPrice);
+    if (submittedSize == null || submittedSize <= 0) {
+      setLiveFeedback({
+        status: "error",
+        message: "Fill size must be a positive number.",
+      });
+      return;
+    }
+    if (fillPrice == null || fillPrice <= 0) {
+      setLiveFeedback({
+        status: "error",
+        message: "Fill price must be a positive number.",
+      });
+      return;
+    }
+
+    setIsRecordingLiveFill(true);
+    setLiveFeedback(null);
+    try {
+      const result = await sdk.recordLiveTradeFill({
+        ticket_id: selectedLiveTicketId,
+        submitted_size: submittedSize,
+        actual_fill_size: submittedSize,
+        actual_fill_price: fillPrice,
+        operator_note: liveFillNote || null,
+        external_reference: liveFillReference || null,
+        status: "filled",
+      });
+      setLiveFeedback({ status: "ok", message: result.message });
+      setSelectedLiveTicketId(null);
+      setLiveFillSize("");
+      setLiveFillPrice("");
+      setLiveFillNote("");
+      setLiveFillReference("");
+      await loadStatus(gpShortCode);
+      await loadLiveTradeState(gpShortCode);
+      router.refresh();
+    } catch (error) {
+      setLiveFeedback({
+        status: "error",
+        message: feedbackMessage(error),
+      });
+    } finally {
+      setIsRecordingLiveFill(false);
+    }
+  }
+
+  async function handleCancelLiveTicket(ticketId: string) {
+    const gpShortCode =
+      selectedGpRef.current || statusRef.current?.selectedGpShortCode;
+    setLiveFeedback(null);
+    try {
+      const result = await sdk.cancelLiveTradeTicket({ ticket_id: ticketId });
+      setLiveFeedback({ status: "ok", message: result.message });
+      if (selectedLiveTicketId === ticketId) {
+        setSelectedLiveTicketId(null);
+      }
+      await loadStatus(gpShortCode);
+      await loadLiveTradeState(gpShortCode);
+      router.refresh();
+    } catch (error) {
+      setLiveFeedback({
+        status: "error",
+        message: feedbackMessage(error),
+      });
     }
   }
 
@@ -846,7 +904,7 @@ export function WeekendCockpitPanel({
     ? topLiveCount(latestLiveSample.result.summary.polymarketEventTypes)
     : null;
   const pricedSignalCount = liveSignalRows.filter(
-    (row) => row.marketProb != null,
+    (row) => row.marketPrice != null,
   ).length;
   const modeledSignalCount = liveSignalRows.filter(
     (row) => row.modelProb != null,
@@ -862,7 +920,11 @@ export function WeekendCockpitPanel({
     isCapturingLive ||
     isLiveWatchActive ||
     manualTradeMarketId !== null;
-  const blockedSteps = status.steps.filter((step) => step.status === "blocked");
+  const blockedSteps = status.steps.filter(
+    (step) =>
+      step.status === "blocked" &&
+      (step.key !== "run_paper_trade" || status.modelBlockers.length === 0),
+  );
   const operationStatuses = operationsReadiness?.actions ?? [];
   const weekendActionStatus =
     operationStatuses.find((action) => action.key === "weekend_cockpit") ??
@@ -887,6 +949,31 @@ export function WeekendCockpitPanel({
             <p className="text-xs text-[#6b7280]">
               Recommended stage:{" "}
               {autoConfig?.display_label ?? status.autoSelectedGpShortCode}
+            </p>
+            {status.requiredStage && (
+              <p className="text-xs text-[#6b7280]">
+                Model stage {status.requiredStage} ·{" "}
+                {status.modelReady
+                  ? `champion ${status.activeModelRunId?.slice(0, 8) ?? "unknown"} active`
+                  : "promotion required"}
+              </p>
+            )}
+            <p className="text-xs text-[#6b7280]">
+              Calendar status {status.calendarStatus}
+              {status.sourceConflict ? " · override active" : ""}
+              {status.overrideSourceUrl ? (
+                <>
+                  {" · "}
+                  <a
+                    href={status.overrideSourceUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[#ffb4b1] underline decoration-[#e10600]/40 underline-offset-2"
+                  >
+                    source
+                  </a>
+                </>
+              ) : null}
             </p>
           </div>
 
@@ -920,6 +1007,105 @@ export function WeekendCockpitPanel({
             <p className="text-xs text-[#6b7280]">
               {selectedConfig.display_description}
             </p>
+          </div>
+        </div>
+
+        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div>
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+                  Ops calendar
+                </p>
+                <p className="mt-1 text-sm text-[#9ca3af]">
+                  Active meetings follow the effective calendar. Cancelled Grands Prix
+                  stay in history with their override source.
+                </p>
+              </div>
+              {status.sourceConflict && (
+                <Badge tone="warn">Override active</Badge>
+              )}
+            </div>
+
+            <div className="grid gap-3 lg:grid-cols-[1.3fr_0.7fr]">
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+                  Upcoming
+                </p>
+                <div className="space-y-2">
+                  {status.calendarMeetings.map((meeting) => {
+                    const isSelected = meeting.meetingSlug === status.meetingSlug;
+                    return (
+                      <div
+                        key={`${meeting.season}-${meeting.meetingSlug}`}
+                        className={`rounded-lg border px-3 py-2 ${
+                          isSelected
+                            ? "border-[#e10600]/40 bg-[#1a0f14]"
+                            : "border-white/10 bg-[#0f1119]"
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="text-sm font-semibold text-white">
+                            {meeting.meetingName}
+                          </p>
+                          {isSelected && <Badge tone="live">Selected</Badge>}
+                          <Badge tone="default">
+                            {formatEventFormat(meeting.eventFormat)}
+                          </Badge>
+                        </div>
+                        <p className="mt-1 text-xs text-[#9ca3af]">
+                          Round {meeting.roundNumber ?? "—"} ·{" "}
+                          {formatCalendarDateRange(meeting)}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-2">
+                <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
+                  Cancelled
+                </p>
+                <div className="space-y-2">
+                  {status.cancelledMeetings.length === 0 ? (
+                    <p className="rounded-lg border border-white/10 bg-[#0f1119] px-3 py-2 text-xs text-[#6b7280]">
+                      No cancelled meetings in the effective calendar.
+                    </p>
+                  ) : (
+                    status.cancelledMeetings.map((meeting) => (
+                      <div
+                        key={`${meeting.season}-${meeting.meetingSlug}`}
+                        className="rounded-lg border border-[#e10600]/20 bg-[#1a0f14] px-3 py-2"
+                      >
+                        <p className="text-sm font-semibold text-white">
+                          {meeting.meetingName}
+                        </p>
+                        <p className="mt-1 text-xs text-[#9ca3af]">
+                          {formatCalendarDateRange(meeting)}
+                        </p>
+                        <p className="mt-1 text-xs text-[#ffb4b1]">
+                          {meeting.sourceLabel ?? "Override"} {meeting.sourceUrl ? "·" : ""}
+                          {meeting.sourceUrl ? (
+                            <>
+                              {" "}
+                              <a
+                                href={meeting.sourceUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="underline decoration-[#e10600]/40 underline-offset-2"
+                              >
+                                source
+                              </a>
+                            </>
+                          ) : null}
+                        </p>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -1193,7 +1379,7 @@ export function WeekendCockpitPanel({
                       model edge when a stage run exists.
                     </p>
                     <p className="mt-1 text-xs text-[#6b7280]">
-                      Click `Paper trade now` to place one manual ticket from
+                      Click `Create ticket` to generate one operator ticket from
                       the current live quote.
                     </p>
                     <div className="mt-3 grid gap-2 md:grid-cols-3">
@@ -1249,10 +1435,15 @@ export function WeekendCockpitPanel({
                       `0.05`, and `4` spread cents equals `0.04`.
                     </p>
                     <p className="mt-1 text-xs text-[#9ca3af]">
-                      {status.latestPaperSession?.modelRunId
-                        ? `Model run: ${status.latestPaperSession.modelRunId}`
-                        : "Run Update to latest once for this stage to unlock model edge."}
+                      {status.requiredStage
+                        ? `Required stage: ${status.requiredStage}`
+                        : "This stage can generate live tickets without a promoted model gate."}
                     </p>
+                    {liveSignalBlockers.length > 0 && (
+                      <div className="mt-3 rounded-xl border border-[#f59e0b]/20 bg-[#f59e0b]/10 px-4 py-3 text-sm text-[#fcd34d]">
+                        {liveSignalBlockers.join(" ")}
+                      </div>
+                    )}
                     {isLoadingLiveSignals ? (
                       <p className="mt-3 text-sm text-[#9ca3af]">
                         Loading linked market signals…
@@ -1340,24 +1531,23 @@ export function WeekendCockpitPanel({
                                     type="button"
                                     onClick={(event) => {
                                       event.preventDefault();
-                                      void handleExecuteManualTrade(row);
+                                      void handleCreateLiveTicket(row);
                                     }}
                                     disabled={
                                       manualTradeMarketId !== null ||
                                       row.priceSource !== "live" ||
-                                      row.marketProb == null ||
-                                      row.modelProb == null
+                                      row.marketPrice == null
                                     }
                                     className="mt-2 inline-flex items-center justify-center rounded-md border border-white/10 bg-[#171a25] px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:border-[#e10600]/40 hover:bg-[#1b2030] disabled:cursor-not-allowed disabled:opacity-50"
                                   >
                                     {manualTradeMarketId === row.marketId
-                                      ? "Placing..."
-                                      : "Paper trade now"}
+                                      ? "Creating..."
+                                      : "Create ticket"}
                                   </button>
                                 </div>
                               </div>
                               <div className="mt-3 grid gap-2 text-xs text-[#9ca3af] sm:grid-cols-4">
-                                <p>Market YES {formatCents(row.marketProb)}</p>
+                                <p>Market YES {formatCents(row.marketPrice)}</p>
                                 <p>Model YES {formatCents(row.modelProb)}</p>
                                 <p>Spread {formatCents(row.spread)}</p>
                                 <p>
@@ -1374,6 +1564,204 @@ export function WeekendCockpitPanel({
                         No linked markets are available for this target session
                         yet.
                       </p>
+                    )}
+                  </div>
+                  <div className="rounded-lg border border-white/[0.06] bg-[#0f1119] px-3 py-3">
+                    <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                      Live tickets
+                    </p>
+                    <p className="mt-1 text-xs text-[#6b7280]">
+                      Operator tickets are separate from paper trades. Record
+                      the actual browser fill after each order.
+                    </p>
+                    <div className="mt-3 grid gap-2 sm:grid-cols-4">
+                      <div className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Tickets
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-white">
+                          {status.liveTicketSummary.ticketCount}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Open
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-white">
+                          {status.liveTicketSummary.openTicketCount}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Executions
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-white">
+                          {status.liveExecutionSummary.executionCount}
+                        </p>
+                      </div>
+                      <div className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-2">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Filled
+                        </p>
+                        <p className="mt-1 text-sm font-medium text-white">
+                          {status.liveExecutionSummary.filledExecutionCount}
+                        </p>
+                      </div>
+                    </div>
+                    {liveTickets.length > 0 ? (
+                      <div className="mt-3 space-y-2">
+                        {liveTickets.slice(0, 4).map((ticket) => (
+                          <div
+                            key={ticket.id}
+                            className="rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-3"
+                          >
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div className="space-y-1">
+                                <p className="text-sm font-medium text-white">
+                                  {ticket.question}
+                                </p>
+                                <p className="text-[11px] text-[#6b7280]">
+                                  {ticket.sideLabel} · edge{" "}
+                                  {formatEdgePoints(ticket.edge)} · size{" "}
+                                  {ticket.recommendedSize}
+                                </p>
+                                <p className="text-[11px] text-[#6b7280]">
+                                  Created {formatCaptureTime(ticket.createdAt)}
+                                  {ticket.expiresAt
+                                    ? ` · expires ${formatCaptureTime(ticket.expiresAt)}`
+                                    : ""}
+                                </p>
+                              </div>
+                              <div className="flex gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    handlePrepareLiveFill(ticket);
+                                  }}
+                                  disabled={ticket.status !== "open"}
+                                  className="inline-flex items-center justify-center rounded-md border border-white/10 bg-[#171a25] px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:border-[#e10600]/40 hover:bg-[#1b2030] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Record fill
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    void handleCancelLiveTicket(ticket.id);
+                                  }}
+                                  disabled={ticket.status !== "open"}
+                                  className="inline-flex items-center justify-center rounded-md border border-white/10 bg-[#171a25] px-3 py-1.5 text-[11px] font-medium text-white transition-colors hover:border-[#e10600]/40 hover:bg-[#1b2030] disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 text-sm text-[#9ca3af]">
+                        No live tickets have been created for this stage yet.
+                      </p>
+                    )}
+                    {selectedLiveTicketId && (
+                      <div className="mt-3 rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-3">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Record browser fill
+                        </p>
+                        <div className="mt-3 grid gap-2 md:grid-cols-2">
+                          <label className="space-y-1">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6b7280]">
+                              Filled size
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.1"
+                              value={liveFillSize}
+                              onChange={(event) => {
+                                setLiveFillSize(event.target.value);
+                              }}
+                              className="w-full rounded-md border border-white/10 bg-[#11131d] px-3 py-2 text-sm text-white focus:border-[#e10600] focus:outline-none"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6b7280]">
+                              Fill price
+                            </span>
+                            <input
+                              type="number"
+                              min="0"
+                              step="0.001"
+                              value={liveFillPrice}
+                              onChange={(event) => {
+                                setLiveFillPrice(event.target.value);
+                              }}
+                              className="w-full rounded-md border border-white/10 bg-[#11131d] px-3 py-2 text-sm text-white focus:border-[#e10600] focus:outline-none"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6b7280]">
+                              Note
+                            </span>
+                            <input
+                              type="text"
+                              value={liveFillNote}
+                              onChange={(event) => {
+                                setLiveFillNote(event.target.value);
+                              }}
+                              className="w-full rounded-md border border-white/10 bg-[#11131d] px-3 py-2 text-sm text-white focus:border-[#e10600] focus:outline-none"
+                            />
+                          </label>
+                          <label className="space-y-1">
+                            <span className="text-[10px] font-bold uppercase tracking-[0.18em] text-[#6b7280]">
+                              External ref
+                            </span>
+                            <input
+                              type="text"
+                              value={liveFillReference}
+                              onChange={(event) => {
+                                setLiveFillReference(event.target.value);
+                              }}
+                              className="w-full rounded-md border border-white/10 bg-[#11131d] px-3 py-2 text-sm text-white focus:border-[#e10600] focus:outline-none"
+                            />
+                          </label>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void handleRecordLiveFill();
+                          }}
+                          disabled={isRecordingLiveFill}
+                          className="mt-3 inline-flex items-center justify-center rounded-lg bg-[#e10600] px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-[#b80500] disabled:cursor-not-allowed disabled:opacity-50"
+                        >
+                          {isRecordingLiveFill ? "Recording..." : "Record fill"}
+                        </button>
+                      </div>
+                    )}
+                    {liveExecutions.length > 0 && (
+                      <div className="mt-3 rounded-lg border border-white/[0.06] bg-[#11131d] px-3 py-3">
+                        <p className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+                          Recent executions
+                        </p>
+                        <div className="mt-2 space-y-2">
+                          {liveExecutions.slice(0, 4).map((execution) => (
+                            <div
+                              key={execution.id}
+                              className="flex flex-wrap items-center justify-between gap-2 text-xs"
+                            >
+                              <p className="text-white">
+                                {execution.ticketId.slice(0, 8)} ·{" "}
+                                {execution.status}
+                              </p>
+                              <p className="text-[#9ca3af]">
+                                {execution.actualFillSize ??
+                                  execution.submittedSize}{" "}
+                                @ {execution.actualFillPrice?.toFixed(3) ?? "—"}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     )}
                   </div>
                   {liveSamples.length > 0 && (
@@ -1473,6 +1861,17 @@ export function WeekendCockpitPanel({
                 Latest report: <code>{weekendActionStatus.lastReportPath}</code>
               </div>
             ) : null}
+          </div>
+        )}
+
+        {status.modelBlockers.length > 0 && (
+          <div className="rounded-xl border border-[#e10600]/20 bg-[#e10600]/10 px-4 py-3 text-sm text-[#ffd9d6]">
+            <p className="font-medium">Model blockers</p>
+            <ul className="mt-2 list-disc space-y-1 pl-5">
+              {status.modelBlockers.map((blocker) => (
+                <li key={blocker}>{blocker}</li>
+              ))}
+            </ul>
           </div>
         )}
 

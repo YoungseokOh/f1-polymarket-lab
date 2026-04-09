@@ -72,6 +72,7 @@ from f1_polymarket_worker.lineage import (
     finish_job_run,
     start_job_run,
 )
+from f1_polymarket_worker.live_trading import summarize_live_trading
 
 # Re-export for weekend_ops callers
 from f1_polymarket_worker.market_discovery import (
@@ -79,6 +80,21 @@ from f1_polymarket_worker.market_discovery import (
     _ensure_utc,
     _market_session_delta_days,
     discover_session_polymarket,  # noqa: F401
+)
+from f1_polymarket_worker.model_registry import (
+    get_active_promoted_model_run,
+    gp_supports_promoted_multitask,
+    required_model_stage_for_gp,
+    score_promoted_multitask_snapshot,
+)
+from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snapshots
+from f1_polymarket_worker.ops_calendar import (
+    EffectiveOpsMeeting,
+    get_ops_stage_config,
+    list_ops_stage_configs,
+    list_ops_stage_configs_for_meeting,
+    resolve_effective_ops_calendar,
+    resolve_ops_season,
 )
 from f1_polymarket_worker.ops_support import (
     job_run_summary,
@@ -133,7 +149,7 @@ VALID_WEEKEND_SESSION_PATTERNS = (
     SPRINT_WEEKEND_SESSION_PATTERN,
 )
 REQUIRED_WEEKEND_MAPPING_CODES = frozenset({"Q", "SQ", "R"})
-COCKPIT_TIMELINE_CODES = ("FP1", "FP2", "FP3", "Q", "R")
+COCKPIT_TIMELINE_CODES = ("FP1", "SQ", "S", "FP2", "FP3", "Q", "R")
 
 
 def _report_slug_from_meeting(meeting: F1Meeting) -> str:
@@ -843,6 +859,32 @@ def _config_payload(config: GPConfig) -> dict[str, Any]:
         "stage_label": config_stage_label(config),
         "display_label": config_display_label(config),
         "display_description": config_display_description(config),
+        "required_model_stage": config.required_model_stage,
+        "live_bet_size": config.live_bet_size,
+        "live_min_edge": config.live_min_edge,
+        "live_max_daily_loss": config.live_max_daily_loss,
+        "live_max_spread": config.live_max_spread,
+    }
+
+
+def _ops_meeting_payload(meeting: EffectiveOpsMeeting) -> dict[str, Any]:
+    return {
+        "season": meeting.season,
+        "meeting_key": meeting.meeting_key,
+        "meeting_slug": meeting.meeting_slug,
+        "ops_slug": meeting.ops_slug,
+        "meeting_name": meeting.meeting_name,
+        "round_number": meeting.round_number,
+        "event_format": meeting.event_format,
+        "start_date_utc": meeting.start_date_utc,
+        "end_date_utc": meeting.end_date_utc,
+        "country_name": meeting.country_name,
+        "location": meeting.location,
+        "status": meeting.status,
+        "source_conflict": meeting.source_conflict,
+        "source_label": meeting.source_label,
+        "source_url": meeting.source_url,
+        "note": meeting.note,
     }
 
 
@@ -879,6 +921,8 @@ def _session_display_name(session_code: str | None) -> str:
         "FP1": "FP1",
         "FP2": "FP2",
         "FP3": "FP3",
+        "SQ": "Sprint Qualifying",
+        "S": "Sprint",
         "Q": "Qualifying",
         "R": "Race",
     }.get(session_code, session_code or "Session")
@@ -1089,67 +1133,55 @@ def _choose_default_config_for_meeting(
     sessions_by_code: dict[str, F1Session],
     now: Any,
 ) -> GPConfig:
-    pre_weekend_config = _find_stage_config(
-        configs,
-        source_session_code=None,
-        target_session_code="Q",
-    )
-    fp1_to_fp2_config = _find_stage_config(
-        configs,
-        source_session_code="FP1",
-        target_session_code="FP2",
-    )
-    fp2_to_q_config = _find_stage_config(
-        configs,
-        source_session_code="FP2",
-        target_session_code="Q",
-    )
-    fp3_to_q_config = _find_stage_config(
-        configs,
-        source_session_code="FP3",
-        target_session_code="Q",
-    )
-    q_to_r_config = _find_stage_config(
-        configs,
-        source_session_code="Q",
-        target_session_code="R",
-    )
-    fp1_session = sessions_by_code.get("FP1")
-    fp2_session = sessions_by_code.get("FP2")
-    fp3_session = sessions_by_code.get("FP3")
-    q_session = sessions_by_code.get("Q")
-
-    if q_to_r_config is not None and _session_has_ended(q_session, now=now):
-        return q_to_r_config
-    if fp3_to_q_config is not None and _session_has_ended(fp3_session, now=now):
-        return fp3_to_q_config
-    if fp2_to_q_config is not None and (
-        _session_is_live(fp2_session, now=now) or _session_has_ended(fp2_session, now=now)
-    ):
-        return fp2_to_q_config
-    if (
-        fp1_to_fp2_config is not None
-        and _session_has_ended(fp1_session, now=now)
-        and not _session_has_started(fp2_session, now=now)
-    ):
-        return fp1_to_fp2_config
-    if pre_weekend_config is not None and not _session_has_ended(fp1_session, now=now):
-        return pre_weekend_config
-
-    ready_configs: list[tuple[int, GPConfig]] = []
-    for config in configs:
+    def source_ready(config: GPConfig) -> bool:
         if config.source_session_code is None:
-            ready_configs.append((_stage_priority(config), config))
-            continue
-        source_session = sessions_by_code.get(config.source_session_code)
-        if (
-            source_session is not None
-            and source_session.date_end_utc is not None
-            and _ensure_utc(source_session.date_end_utc) <= now
-        ):
-            ready_configs.append((_stage_priority(config), config))
+            return True
+        return _session_has_ended(sessions_by_code.get(config.source_session_code), now=now)
+
+    focus_session, _focus_status, _completed_codes, focus_code = _focus_session_state(
+        sessions_by_code,
+        now=now,
+    )
+    if _focus_status == "live" and focus_code == "FP1":
+        pre_weekend = [config for config in configs if config.source_session_code is None]
+        if pre_weekend:
+            return min(pre_weekend, key=lambda config: (config.stage_rank, config.short_code))
+    if _focus_status == "live" and focus_code is not None:
+        next_stage_candidates = [
+            config
+            for config in configs
+            if config.source_session_code == focus_code
+        ]
+        if next_stage_candidates:
+            return min(
+                next_stage_candidates,
+                key=lambda config: (config.stage_rank, config.short_code),
+            )
+    if focus_code is not None:
+        focus_candidates = [
+            config
+            for config in configs
+            if config.target_session_code == focus_code and source_ready(config)
+        ]
+        if focus_candidates:
+            return min(focus_candidates, key=lambda config: (config.stage_rank, config.short_code))
+
+    ready_configs = [config for config in configs if source_ready(config)]
     if ready_configs:
-        return max(ready_configs, key=lambda item: (item[0], item[1].short_code))[1]
+        def ready_sort_key(config: GPConfig) -> tuple[int, float, int, str]:
+            target_session = sessions_by_code.get(config.target_session_code)
+            if target_session is None or target_session.date_start_utc is None:
+                return (2, float("inf"), config.stage_rank, config.short_code)
+            start_at = _ensure_utc(target_session.date_start_utc)
+            bucket = 0 if start_at >= now else 1
+            return (
+                bucket,
+                abs((start_at - now).total_seconds()),
+                config.stage_rank,
+                config.short_code,
+            )
+
+        return min(ready_configs, key=ready_sort_key)
     pre_weekend = [config for config in configs if config.source_session_code is None]
     if pre_weekend:
         return sorted(
@@ -1159,25 +1191,30 @@ def _choose_default_config_for_meeting(
     return min(configs, key=lambda config: (_stage_priority(config), config.short_code))
 
 
-def _auto_select_gp_config(ctx: PipelineContext, *, now: Any) -> GPConfig:
+def _auto_select_gp_config(
+    ctx: PipelineContext,
+    *,
+    now: Any,
+) -> tuple[EffectiveOpsMeeting, GPConfig]:
+    season = resolve_ops_season(ctx.db, now=now)
     configs_by_meeting: dict[tuple[int, int], list[GPConfig]] = defaultdict(list)
-    for config in GP_REGISTRY:
-        configs_by_meeting[(config.meeting_key, config.season)].append(config)
+    meeting_by_key: dict[tuple[int, int], EffectiveOpsMeeting] = {}
+    for meeting, config in list_ops_stage_configs(ctx.db, season=season):
+        key = (meeting.meeting_key, meeting.season)
+        configs_by_meeting[key].append(config)
+        meeting_by_key[key] = meeting
 
-    scored: list[tuple[tuple[int, float], tuple[int, int], F1Meeting | None]] = []
-    for key in configs_by_meeting:
-        meeting = ctx.db.scalar(
-            select(F1Meeting).where(
-                F1Meeting.meeting_key == key[0],
-                F1Meeting.season == key[1],
-            )
-        )
-        scored.append((_meeting_sort_key(meeting, now=now), key, meeting))
+    if not configs_by_meeting:
+        raise ValueError("No active ops stages are available for the loaded calendar.")
 
-    _, selected_key, _ = min(scored, key=lambda item: (item[0], item[1]))
+    scored: list[tuple[tuple[int, float], tuple[int, int]]] = [
+        (_meeting_sort_key(meeting_by_key[key], now=now), key)
+        for key in configs_by_meeting
+    ]
+    _, selected_key = min(scored, key=lambda item: (item[0], item[1]))
     representative = configs_by_meeting[selected_key][0]
     _, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=representative)
-    return _choose_default_config_for_meeting(
+    return meeting_by_key[selected_key], _choose_default_config_for_meeting(
         configs_by_meeting[selected_key],
         sessions_by_code=sessions_by_code,
         now=now,
@@ -1510,7 +1547,18 @@ def _mapping_count_for_config(
     )
 
 
-def _gp_config_for_slug(gp_slug: str) -> GPConfig | None:
+def _gp_config_for_slug(
+    ctx: PipelineContext,
+    *,
+    gp_slug: str,
+    now: Any,
+) -> GPConfig | None:
+    try:
+        _, config = get_ops_stage_config(ctx.db, short_code=gp_slug, now=now)
+        return config
+    except (KeyError, ValueError):
+        pass
+
     for config in GP_REGISTRY:
         if config.short_code == gp_slug:
             return config
@@ -1579,7 +1627,7 @@ def _paper_trade_session_targets_completed_session(
     completed_session: F1Session,
     meeting: F1Meeting | None,
 ) -> bool:
-    gp_config = _gp_config_for_slug(paper_session.gp_slug)
+    gp_config = _gp_config_for_slug(ctx, gp_slug=paper_session.gp_slug, now=utc_now())
     if (
         gp_config is not None
         and meeting is not None
@@ -1640,7 +1688,7 @@ def _candidate_paper_trade_sessions_for_completed_session(
         ):
             continue
         config_json = paper_session.config_json or {}
-        gp_config = _gp_config_for_slug(paper_session.gp_slug)
+        gp_config = _gp_config_for_slug(ctx, gp_slug=paper_session.gp_slug, now=utc_now())
         candidates.append(
             {
                 "session": paper_session,
@@ -2021,8 +2069,17 @@ def get_weekend_cockpit_status(
     gp_short_code: str | None = None,
 ) -> dict[str, Any]:
     now = _ensure_utc(utc_now())
-    auto_config = _auto_select_gp_config(ctx, now=now)
-    selected_config = get_gp_config(gp_short_code) if gp_short_code else auto_config
+    season = resolve_ops_season(ctx.db, now=now)
+    auto_meeting, auto_config = _auto_select_gp_config(ctx, now=now)
+    if gp_short_code:
+        selected_ops_meeting, selected_config = get_ops_stage_config(
+            ctx.db,
+            short_code=gp_short_code,
+            now=now,
+        )
+    else:
+        selected_ops_meeting, selected_config = auto_meeting, auto_config
+
     meeting, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=selected_config)
     focus_session, focus_status, timeline_completed_codes, timeline_active_code = (
         _focus_session_state(sessions_by_code, now=now)
@@ -2044,6 +2101,23 @@ def get_weekend_cockpit_status(
         config=selected_config,
         target_session_id=None if target_session is None else target_session.id,
     )
+    upcoming_calendar = [
+        _ops_meeting_payload(item)
+        for item in resolve_effective_ops_calendar(
+            ctx.db,
+            season=season,
+            include_cancelled=False,
+        )
+    ]
+    cancelled_calendar = [
+        _ops_meeting_payload(item)
+        for item in resolve_effective_ops_calendar(
+            ctx.db,
+            season=season,
+            include_cancelled=True,
+        )
+        if item.status == "cancelled"
+    ]
     latest_paper_session = ctx.db.scalars(
         select(PaperTradeSession)
         .where(PaperTradeSession.gp_slug == selected_config.short_code)
@@ -2324,6 +2398,18 @@ def get_weekend_cockpit_status(
         for step in (hydrate_step, settle_step, discover_step)
         if step["status"] == "blocked"
     ]
+    required_stage = required_model_stage_for_gp(selected_config)
+    active_promoted_model_run = (
+        None
+        if required_stage is None
+        else get_active_promoted_model_run(ctx.db, stage=required_stage)
+    )
+    model_blockers: list[str] = []
+    if required_stage is not None and active_promoted_model_run is None:
+        model_blockers.append(
+            f"A promoted {required_stage} champion is required before paper trading can run."
+        )
+    blockers.extend(model_blockers)
     if blockers:
         run_step = _step_payload(
             key="run_paper_trade",
@@ -2352,13 +2438,50 @@ def get_weekend_cockpit_status(
 
     available_configs = [
         _config_payload(config)
-        for config in GP_REGISTRY
-        if (
-            config.meeting_key == selected_config.meeting_key
-            and config.season == selected_config.season
+        for _, config in list_ops_stage_configs_for_meeting(
+            ctx.db,
+            season=selected_config.season,
+            meeting_key=selected_config.meeting_key,
         )
     ]
-    available_configs.sort(key=lambda config: (config["stage_rank"], config["short_code"]))
+    available_configs.sort(
+        key=lambda config: (config["stage_rank"], config["short_code"])
+    )
+    session_stage_statuses: list[dict[str, Any]] = []
+    meeting_configs = [
+        config
+        for _, config in list_ops_stage_configs_for_meeting(
+            ctx.db,
+            season=selected_config.season,
+            meeting_key=selected_config.meeting_key,
+        )
+    ]
+    for config in sorted(meeting_configs, key=lambda item: (item.stage_rank, item.short_code)):
+        stage = required_model_stage_for_gp(config)
+        active_model_run = (
+            None
+            if stage is None
+            else get_active_promoted_model_run(ctx.db, stage=stage)
+        )
+        config_blockers: list[str] = []
+        if stage is not None and active_model_run is None:
+            config_blockers.append(
+                "A promoted "
+                f"{stage} champion is required before "
+                f"{config.target_session_code} can run."
+            )
+        session_stage_statuses.append(
+            {
+                "gp_short_code": config.short_code,
+                "target_session_code": config.target_session_code,
+                "required_stage": stage,
+                "model_ready": not config_blockers,
+                "active_model_run_id": None if active_model_run is None else active_model_run.id,
+                "model_blockers": config_blockers,
+                "display_label": config_display_label(config),
+            }
+        )
+    live_summary = summarize_live_trading(ctx, gp_slug=selected_config.short_code)
     primary_action = _primary_action_payload(
         config=selected_config,
         sync_step=sync_step,
@@ -2374,6 +2497,12 @@ def get_weekend_cockpit_status(
         "auto_selected_gp_short_code": auto_config.short_code,
         "selected_gp_short_code": selected_config.short_code,
         "selected_config": _config_payload(selected_config),
+        "calendar_status": selected_ops_meeting.status,
+        "meeting_slug": selected_ops_meeting.meeting_slug,
+        "source_conflict": selected_ops_meeting.source_conflict,
+        "override_source_url": selected_ops_meeting.source_url,
+        "calendar_meetings": upcoming_calendar,
+        "cancelled_meetings": cancelled_calendar,
         "available_configs": available_configs,
         "meeting": meeting,
         "focus_session": focus_session,
@@ -2386,6 +2515,23 @@ def get_weekend_cockpit_status(
         "steps": [sync_step, hydrate_step, settle_step, discover_step, run_step],
         "blockers": blockers,
         "ready_to_run": not blockers,
+        "model_ready": not model_blockers,
+        "required_stage": required_stage,
+        "active_model_run_id": (
+            None if active_promoted_model_run is None else active_promoted_model_run.id
+        ),
+        "model_blockers": model_blockers,
+        "session_stage_statuses": session_stage_statuses,
+        "live_ticket_summary": {
+            "ticket_count": live_summary.ticket_count,
+            "open_ticket_count": live_summary.open_ticket_count,
+            "filled_ticket_count": live_summary.filled_ticket_count,
+            "cancelled_ticket_count": live_summary.cancelled_ticket_count,
+        },
+        "live_execution_summary": {
+            "execution_count": live_summary.execution_count,
+            "filled_execution_count": live_summary.filled_execution_count,
+        },
         "primary_action_title": primary_action["primary_action_title"],
         "primary_action_description": primary_action["primary_action_description"],
         "primary_action_cta": primary_action["primary_action_cta"],
@@ -2406,39 +2552,89 @@ def run_gp_paper_trade_pipeline(
     import polars as pl
 
     ensure_default_feature_registry(ctx)
+    required_stage = required_model_stage_for_gp(config)
 
-    if snapshot_id is None:
-        snap_result = build_snapshot(
+    if gp_supports_promoted_multitask(config):
+        if required_stage is None:
+            raise ValueError(f"Unable to resolve promoted multitask stage for {config.short_code}")
+
+        if snapshot_id is None:
+            checkpoint = config.source_session_code
+            if checkpoint is None:
+                raise ValueError(
+                    f"config={config.short_code} is missing source_session_code "
+                    "for multitask scoring"
+                )
+            snap_result = build_multitask_feature_snapshots(
+                ctx,
+                meeting_key=config.meeting_key,
+                season=config.season,
+                checkpoints=(checkpoint,),
+                stage=required_stage,
+            )
+            snapshot_ids = snap_result.get("snapshot_ids", [])
+            if not snapshot_ids:
+                raise ValueError(f"Multitask snapshot build failed: {snap_result}")
+            used_snapshot_id = snapshot_ids[0]
+        else:
+            used_snapshot_id = snapshot_id
+
+        snapshot = ctx.db.get(FeatureSnapshot, used_snapshot_id)
+        if snapshot is None:
+            raise KeyError(f"snapshot_id={used_snapshot_id} not found")
+
+        score_result = score_promoted_multitask_snapshot(
+            ctx.db,
+            data_root=Path(ctx.settings.data_root),
+            snapshot=snapshot,
+            stage=required_stage,
+        )
+        used_model_run_id = str(score_result["model_run_id"])
+        resolved_baseline = "promoted_multitask"
+    else:
+        if snapshot_id is None:
+            snap_result = build_snapshot(
+                ctx,
+                config,
+                meeting_key=config.meeting_key,
+                season=config.season,
+                entry_offset_min=config.entry_offset_min,
+                fidelity=config.fidelity,
+            )
+            used_snapshot_id = snap_result.get("snapshot_id")
+            if not used_snapshot_id:
+                raise ValueError(f"Snapshot build failed: {snap_result}")
+        else:
+            used_snapshot_id = snapshot_id
+
+        baseline_result = run_baseline(
             ctx,
             config,
-            meeting_key=config.meeting_key,
-            season=config.season,
-            entry_offset_min=config.entry_offset_min,
-            fidelity=config.fidelity,
+            snapshot_id=used_snapshot_id,
+            min_edge=min_edge,
         )
-        used_snapshot_id = snap_result.get("snapshot_id")
-        if not used_snapshot_id:
-            raise ValueError(f"Snapshot build failed: {snap_result}")
-    else:
-        used_snapshot_id = snapshot_id
-
-    baseline_result = run_baseline(
-        ctx,
-        config,
-        snapshot_id=used_snapshot_id,
-        min_edge=min_edge,
-    )
-    model_run_ids: list[str] = baseline_result.get("model_runs", [])
-    used_model_run_id, resolved_baseline = select_model_run_id(
-        config,
-        model_run_ids,
-        baseline=baseline,
-    )
+        model_run_ids: list[str] = baseline_result.get("model_runs", [])
+        selected_baseline = baseline
+        if required_stage is not None:
+            champion_run = get_active_promoted_model_run(ctx.db, stage=required_stage)
+            if champion_run is None:
+                raise ValueError(
+                    "A promoted "
+                    f"{required_stage} champion is required before paper trading can run."
+                )
+            selected_baseline = champion_run.model_name
+        used_model_run_id, resolved_baseline = select_model_run_id(
+            config,
+            model_run_ids,
+            baseline=selected_baseline,
+        )
+        snapshot = (
+            None if used_snapshot_id is None else ctx.db.get(FeatureSnapshot, used_snapshot_id)
+        )
 
     predictions = ctx.db.scalars(
         select(ModelPrediction).where(ModelPrediction.model_run_id == used_model_run_id)
     ).all()
-    snapshot = None if used_snapshot_id is None else ctx.db.get(FeatureSnapshot, used_snapshot_id)
     if not predictions:
         raise ValueError("No predictions found for model run")
 
@@ -2518,7 +2714,11 @@ def execute_manual_live_paper_trade(
     max_spread: float | None = None,
     bet_size: float = 10.0,
 ) -> dict[str, Any]:
-    config = get_gp_config(gp_short_code)
+    _, config = get_ops_stage_config(
+        ctx.db,
+        short_code=gp_short_code,
+        now=_ensure_utc(observed_at_utc or utc_now()),
+    )
     market = ctx.db.get(PolymarketMarket, market_id)
     if market is None:
         raise KeyError(f"market_id={market_id} not found")
@@ -2766,6 +2966,11 @@ def run_weekend_cockpit(
         )
         raise ValueError(detail)
 
+    _, config = get_ops_stage_config(
+        ctx.db,
+        short_code=status["selected_gp_short_code"],
+        now=_ensure_utc(utc_now()),
+    )
     executed_steps: list[dict[str, Any]] = []
     settlement_result = {
         "settled_session_ids": [],
@@ -3089,6 +3294,57 @@ def _linked_market_ids_for_session(
     }
 
 
+def _refresh_artifacts_for_session(
+    ctx: PipelineContext,
+    *,
+    meeting_key: int,
+    session_code: str | None,
+) -> list[dict[str, Any]]:
+    if session_code is None:
+        return []
+
+    from f1_polymarket_worker.backtest import backfill_backtests
+
+    updates: list[dict[str, Any]] = []
+    for config in GP_REGISTRY:
+        if config.meeting_key != meeting_key:
+            continue
+        if config.target_session_code != session_code:
+            continue
+
+        result = backfill_backtests(
+            ctx,
+            gp_short_code=config.short_code,
+            rebuild_missing=True,
+        )
+        for item in result.get("processed", []):
+            updates.append(
+                {
+                    "gp_short_code": item["gp_short_code"],
+                    "status": "processed",
+                    "snapshot_id": item.get("snapshot_id"),
+                    "rebuilt_snapshot": bool(item.get("rebuilt_snapshot", False)),
+                    "bet_count": item.get("bet_count"),
+                    "total_pnl": item.get("total_pnl"),
+                    "reason": None,
+                }
+            )
+        for item in result.get("skipped", []):
+            updates.append(
+                {
+                    "gp_short_code": item["gp_short_code"],
+                    "status": "skipped",
+                    "snapshot_id": item.get("snapshot_id"),
+                    "rebuilt_snapshot": False,
+                    "bet_count": None,
+                    "total_pnl": None,
+                    "reason": item.get("reason"),
+                }
+            )
+
+    return updates
+
+
 def refresh_latest_session_for_meeting(
     ctx: PipelineContext,
     *,
@@ -3097,18 +3353,26 @@ def refresh_latest_session_for_meeting(
     discover_max_pages: int = 5,
     hydrate_market_history: bool = True,
     market_history_fidelity: int = 60,
+    sync_calendar: bool = True,
+    hydrate_f1_session_data: bool = True,
+    include_extended_f1_data: bool = True,
+    include_heavy_f1_data: bool = True,
+    refresh_artifacts: bool = True,
 ) -> dict[str, Any]:
     meeting = ctx.db.get(F1Meeting, meeting_id)
     if meeting is None:
         raise KeyError(f"Meeting not found: {meeting_id}")
 
-    sync_f1_calendar(ctx, season=meeting.season)
-    refreshed_meeting = ctx.db.scalar(
-        select(F1Meeting).where(
-            F1Meeting.meeting_key == meeting.meeting_key,
-            F1Meeting.season == meeting.season,
+    if sync_calendar:
+        sync_f1_calendar(ctx, season=meeting.season)
+        refreshed_meeting = ctx.db.scalar(
+            select(F1Meeting).where(
+                F1Meeting.meeting_key == meeting.meeting_key,
+                F1Meeting.season == meeting.season,
+            )
         )
-    )
+    else:
+        refreshed_meeting = meeting
     if refreshed_meeting is None:
         raise KeyError(
             "Meeting missing after calendar sync: "
@@ -3127,17 +3391,26 @@ def refresh_latest_session_for_meeting(
         )
 
     linked_market_ids_before = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
-    hydrate_result = hydrate_f1_session(
-        ctx,
-        session_key=refreshed_session.session_key,
-        include_extended=True,
-        include_heavy=refreshed_session.session_code in {"Q", "SQ", "R"},
-    )
+    hydrate_result = {"records_written": 0, "status": "skipped"}
+    if hydrate_f1_session_data:
+        hydrate_result = hydrate_f1_session(
+            ctx,
+            session_key=refreshed_session.session_key,
+            include_extended=include_extended_f1_data,
+            include_heavy=include_heavy_f1_data,
+        )
+    exact_slug_candidate_limit = 64 if (
+        refreshed_session.session_code == "R"
+        and not search_fallback
+        and discover_max_pages <= 1
+        and not hydrate_f1_session_data
+    ) else None
     discover_result = discover_session_polymarket(
         ctx,
         session_key=refreshed_session.session_key,
         max_pages=discover_max_pages,
         search_fallback=search_fallback,
+        exact_slug_candidate_limit=exact_slug_candidate_limit,
     )
     reconcile_mappings(ctx)
     linked_market_ids_after = _linked_market_ids_for_session(ctx, session_id=refreshed_session.id)
@@ -3153,11 +3426,27 @@ def refresh_latest_session_for_meeting(
             markets_hydrated += 1
 
     session_label = refreshed_session.session_code or refreshed_session.session_name
+    artifact_updates: list[dict[str, Any]] = []
+    if refresh_artifacts:
+        artifact_updates = _refresh_artifacts_for_session(
+            ctx,
+            meeting_key=refreshed_meeting.meeting_key,
+            session_code=refreshed_session.session_code,
+        )
+    processed_artifacts = sum(1 for item in artifact_updates if item["status"] == "processed")
+    skipped_artifacts = sum(1 for item in artifact_updates if item["status"] == "skipped")
+    artifact_message = (
+        f"Artifacts refreshed: {processed_artifacts}, skipped: {skipped_artifacts}."
+        if refresh_artifacts
+        else "Artifacts refresh skipped."
+    )
     return {
         "action": "refresh-latest-session",
         "status": "ok",
         "message": (
-            f"Updated latest ended session {session_label} for {refreshed_meeting.meeting_name}."
+            f"Updated latest ended session {session_label} for "
+            f"{refreshed_meeting.meeting_name}. "
+            f"{artifact_message}"
         ),
         "meeting_id": refreshed_meeting.id,
         "meeting_name": refreshed_meeting.meeting_name,
@@ -3172,6 +3461,7 @@ def refresh_latest_session_for_meeting(
         "markets_discovered": int(discover_result.get("markets", 0) or 0),
         "mappings_written": len(linked_market_ids_after - linked_market_ids_before),
         "markets_hydrated": markets_hydrated,
+        "artifacts_refreshed": artifact_updates,
     }
 
 

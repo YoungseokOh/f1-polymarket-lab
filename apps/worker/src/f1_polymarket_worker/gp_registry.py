@@ -18,9 +18,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import polars as pl
 from f1_polymarket_lab.common import MarketTaxonomy, ensure_dir, stable_uuid, utc_now
 from f1_polymarket_lab.features.driver_profile import enrich_rows_with_driver_profiles
+from f1_polymarket_lab.models.calibration import serialize_reliability_diagram
 from f1_polymarket_lab.storage.models import (
     DatasetVersionManifest,
     EntityMappingF1ToPolymarket,
@@ -110,6 +112,15 @@ class GPConfig:
 
     stage_rank: int = 10
     """Ordering for weekend cockpit stage selection within the same meeting."""
+
+    required_model_stage: str | None = None
+    """The promoted model stage required for live scoring and ticket generation."""
+
+    live_min_edge: float = 0.05
+    live_bet_size: float = 10.0
+    live_max_daily_loss: float = 100.0
+    live_max_spread: float | None = 0.03
+    live_ticket_ttl_min: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -308,20 +319,87 @@ GP_REGISTRY: list[GPConfig] = [
     ),
     GPConfig(
         name="Miami Grand Prix",
-        short_code="miami",
+        short_code="miami_fp1_sq",
         meeting_key=1284,
         season=2026,
         target_session_code="SQ",
-        snapshot_type="fp1_to_sq_pole_quicktest",
-        snapshot_dataset="miami_fp1_to_sq_pole_snapshot",
-        baseline_stage="miami_sq_pole_quicktest",
+        snapshot_type="miami_fp1_to_sq_pole_live_snapshot",
+        snapshot_dataset="miami_fp1_to_sq_pole_live_snapshot",
+        baseline_stage="sq_pole_live_v1",
         baseline_names=("market_implied", "fp1_pace", "hybrid"),
-        report_slug="2026-miami-grand-prix-sq-pole-quicktest",
-        title_suffix="SQ Pole Quick Test",
+        report_slug="2026-miami-grand-prix-sq-pole-live",
+        title_suffix="SQ Pole Live",
         notes=(
-            "This is a paper-edge quick test, not an executable orderbook backtest.",
-            "The universe is limited to Miami GP FP1 -> Sprint Qualifying pole markets.",
+            "Miami live stage for FP1 -> Sprint Qualifying pole markets.",
+            "Used for operator tickets and manual execution support.",
         ),
+        variant="fp1_to_sq",
+        required_model_stage="sq_pole_live_v1",
+        stage_rank=1,
+    ),
+    GPConfig(
+        name="Miami Grand Prix",
+        short_code="miami_sq_sprint",
+        meeting_key=1284,
+        season=2026,
+        target_session_code="S",
+        snapshot_type="miami_sq_to_sprint_winner_live_snapshot",
+        snapshot_dataset="miami_sq_to_sprint_winner_live_snapshot",
+        baseline_stage="sprint_winner_live_v1",
+        baseline_names=("market_implied", "sq_pace", "hybrid"),
+        report_slug="2026-miami-grand-prix-sprint-winner-live",
+        title_suffix="Sprint Winner Live",
+        notes=(
+            "Miami live stage for Sprint Qualifying -> Sprint winner markets.",
+            "Used for operator tickets and manual execution support.",
+        ),
+        variant="sq_to_sprint",
+        source_session_code="SQ",
+        market_taxonomy="sprint_winner",
+        required_model_stage="sprint_winner_live_v1",
+        stage_rank=2,
+    ),
+    GPConfig(
+        name="Miami Grand Prix",
+        short_code="miami_fp1_q",
+        meeting_key=1284,
+        season=2026,
+        target_session_code="Q",
+        snapshot_type="miami_fp1_to_q_pole_live_snapshot",
+        snapshot_dataset="miami_fp1_to_q_pole_live_snapshot",
+        baseline_stage="miami_q_pole_quicktest",
+        baseline_names=("market_implied", "fp1_pace", "hybrid"),
+        report_slug="2026-miami-grand-prix-q-pole-live",
+        title_suffix="Q Pole Live",
+        notes=(
+            "Miami live stage for FP1 -> Qualifying pole markets.",
+            "Live scoring uses the promoted multitask_qr champion.",
+        ),
+        variant="fp1_to_q",
+        required_model_stage="multitask_qr",
+        stage_rank=3,
+    ),
+    GPConfig(
+        name="Miami Grand Prix",
+        short_code="miami_q_r",
+        meeting_key=1284,
+        season=2026,
+        target_session_code="R",
+        snapshot_type="miami_q_to_race_winner_live_snapshot",
+        snapshot_dataset="miami_q_to_race_winner_live_snapshot",
+        baseline_stage="miami_q_race_winner_quicktest",
+        baseline_names=("market_implied", "pre_race_pace", "hybrid"),
+        report_slug="2026-miami-grand-prix-race-winner-live",
+        title_suffix="Race Winner Live",
+        notes=(
+            "Miami live stage for Q -> Race winner markets.",
+            "Live scoring uses the promoted multitask_qr champion.",
+        ),
+        variant="q_to_race",
+        source_session_code="Q",
+        market_taxonomy="race_winner",
+        required_model_stage="multitask_qr",
+        stage_rank=4,
     ),
     GPConfig(
         name="Emilia Romagna Grand Prix",
@@ -397,6 +475,8 @@ def _session_display_name(session_code: str | None) -> str:
         "FP1": "FP1",
         "FP2": "FP2",
         "FP3": "FP3",
+        "SQ": "Sprint Qualifying",
+        "S": "Sprint",
         "Q": "Qualifying",
         "R": "Race",
     }.get(session_code, session_code or "Session")
@@ -415,6 +495,10 @@ def config_display_description(config: GPConfig) -> str:
         return "Review Qualifying markets using pre-practice information only."
     if config.target_session_code == "FP2":
         return "Use FP1 results to find FP2 markets and prepare paper trading."
+    if config.target_session_code == "SQ":
+        return "Use FP1 results to score Sprint Qualifying pole markets for manual execution."
+    if config.target_session_code == "S":
+        return "Use Sprint Qualifying results to score Sprint winner markets for manual execution."
     if config.target_session_code == "Q":
         source_name = _session_display_name(config.source_session_code)
         return f"Use {source_name} results to find Qualifying markets and prepare paper trading."
@@ -657,15 +741,36 @@ def _match_market_driver(
         if exact is not None:
             return exact
     question_text = f"{market.question} {market.description or ''}".lower()
-    matches = []
+    matches_by_key: dict[str, F1Driver] = {}
     for driver in drivers:
         for value in [driver.full_name, driver.broadcast_name, driver.last_name]:
             if value and value.lower() in question_text:
-                matches.append(driver)
+                dedupe_key = (
+                    str(driver.driver_number)
+                    if driver.driver_number is not None
+                    else _normalize_name(driver.full_name or driver.id)
+                )
+                matches_by_key.setdefault(dedupe_key, driver)
                 break
-    if len(matches) == 1:
-        return matches[0]
+    if len(matches_by_key) == 1:
+        return next(iter(matches_by_key.values()))
     return None
+
+
+def _resolve_driver_with_available_results(
+    *,
+    driver: F1Driver,
+    drivers: list[F1Driver],
+    available_driver_ids: set[str],
+) -> F1Driver:
+    if driver.id in available_driver_ids:
+        return driver
+    if driver.driver_number is None:
+        return driver
+    for candidate in drivers:
+        if candidate.driver_number == driver.driver_number and candidate.id in available_driver_ids:
+            return candidate
+    return driver
 
 
 def _select_entry_price_point(
@@ -758,8 +863,8 @@ def _enrich_snapshot_probabilities(rows: list[dict[str, Any]]) -> list[dict[str,
         market_probs = _normalized_market_probabilities(group_rows)
         target_session_code = str(group_rows[0].get("target_session_code") or "")
         pace_signals = (
-            _pre_race_pace_signals(group_rows)
-            if target_session_code == "R"
+            _pre_race_pace_signals(group_rows, target_session_code=target_session_code)
+            if target_session_code in {"R", "S"}
             else _practice_pace_signals(group_rows)
         )
         pace_probs = _softmax(pace_signals)
@@ -850,14 +955,24 @@ def _practice_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
     return signals
 
 
-def _pre_race_pace_signals(rows: list[dict[str, Any]]) -> list[float]:
-    """Weighted pre-race signal using every available session from FP1 through Q."""
-    feature_weights = (
-        ("fp1", 0.3),
-        ("fp2", 0.5),
-        ("fp3", 0.8),
-        ("q", 5.0),
-    )
+def _pre_race_pace_signals(
+    rows: list[dict[str, Any]],
+    *,
+    target_session_code: str,
+) -> list[float]:
+    """Weighted pre-event signal for Sprint or Race outright markets."""
+    if target_session_code == "S":
+        feature_weights = (
+            ("fp1", 0.8),
+            ("sq", 5.0),
+        )
+    else:
+        feature_weights = (
+            ("fp1", 0.3),
+            ("fp2", 0.5),
+            ("fp3", 0.8),
+            ("q", 5.0),
+        )
     sign_specs: list[tuple[str, float, float]] = []
     for prefix, weight in feature_weights:
         sign_specs.extend(
@@ -994,10 +1109,19 @@ def _evaluate_probability_rows(
         if selected
         else None
     )
+    calibration_buckets = (
+        {}
+        if not labeled_rows
+        else serialize_reliability_diagram(
+            np.array(labels, dtype=float),
+            np.array([float(row[probability_key]) for row in labeled_rows], dtype=float),
+        )
+    )
     return {
         "row_count": len(rows),
         "brier_score": brier,
         "log_loss": log_loss,
+        "calibration_buckets": calibration_buckets,
         "top1_hit": top1_hit,
         "top3_hit": top3_hit,
         "bet_count": len(selected),
@@ -1174,6 +1298,7 @@ def _build_session_to_target_snapshot(
     source_session = sessions_by_code.get(config.source_session_code or "FP1")
     if source_session is None:
         raise ValueError(f"Source session {config.source_session_code!r} not found")
+    sq_session = sessions_by_code.get("SQ")
     q_session = (
         sessions_by_code.get("Q")
         if config.target_session_code == "R"
@@ -1242,6 +1367,12 @@ def _build_session_to_target_snapshot(
         ).all())
         if fp3_session else []
     )
+    sq_results = (
+        list(ctx.db.scalars(
+            select(F1SessionResult).where(F1SessionResult.session_id == sq_session.id)
+        ).all())
+        if sq_session else []
+    )
     q_results = (
         list(ctx.db.scalars(
             select(F1SessionResult).where(F1SessionResult.session_id == q_session.id)
@@ -1249,7 +1380,26 @@ def _build_session_to_target_snapshot(
         if q_session else []
     )
 
+    fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
+    fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
+    sq_results_by_driver = {r.driver_id: r for r in sq_results if r.driver_id is not None}
+    q_results_by_driver = {r.driver_id: r for r in q_results if r.driver_id is not None}
     results_by_driver = {r.driver_id: r for r in fp1_results if r.driver_id is not None}
+    source_results_by_driver = {
+        "FP1": results_by_driver,
+        "FP2": fp2_results_by_driver,
+        "FP3": fp3_results_by_driver,
+        "SQ": sq_results_by_driver,
+        "Q": q_results_by_driver,
+    }.get(config.source_session_code or "FP1", results_by_driver)
+    all_result_driver_ids = (
+        set(results_by_driver)
+        | set(fp2_results_by_driver)
+        | set(fp3_results_by_driver)
+        | set(sq_results_by_driver)
+        | set(q_results_by_driver)
+    )
+    source_result_reason = f"missing_{(config.source_session_code or 'fp1').lower()}_result"
     target_is_practice = config.target_session_code in {"FP1", "FP2", "FP3"}
     winner_driver_id = (
         None
@@ -1270,10 +1420,6 @@ def _build_session_to_target_snapshot(
 
     driver_map = _build_driver_map(drivers)
     team_best_gap = _team_best_gap_to_leader(drivers=drivers, fp1_results=fp1_results)
-
-    fp2_results_by_driver = {r.driver_id: r for r in fp2_results if r.driver_id is not None}
-    fp3_results_by_driver = {r.driver_id: r for r in fp3_results if r.driver_id is not None}
-    q_results_by_driver = {r.driver_id: r for r in q_results if r.driver_id is not None}
     fp2_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=fp2_results)
         if fp2_results else {}
@@ -1281,6 +1427,10 @@ def _build_session_to_target_snapshot(
     fp3_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=fp3_results)
         if fp3_results else {}
+    )
+    sq_team_best_gap = (
+        _team_best_gap_to_leader(drivers=drivers, fp1_results=sq_results)
+        if sq_results else {}
     )
     q_team_best_gap = (
         _team_best_gap_to_leader(drivers=drivers, fp1_results=q_results)
@@ -1322,10 +1472,16 @@ def _build_session_to_target_snapshot(
         if driver is None:
             exclusion_reasons.increment("missing_driver_match")
             continue
-        fp1_result = results_by_driver.get(driver.id)
-        if fp1_result is None:
-            exclusion_reasons.increment("missing_fp1_result")
+        driver = _resolve_driver_with_available_results(
+            driver=driver,
+            drivers=drivers,
+            available_driver_ids=all_result_driver_ids,
+        )
+        source_result = source_results_by_driver.get(driver.id)
+        if source_result is None:
+            exclusion_reasons.increment(source_result_reason)
             continue
+        fp1_result = results_by_driver.get(driver.id)
         entry = _select_entry_price_point(
             rows=price_history.get(market.id, []),
             window_start=entry_floor,
@@ -1335,8 +1491,8 @@ def _build_session_to_target_snapshot(
             exclusion_reasons.increment(f"missing_pre_{target_code_lower}_price_history")
             continue
 
-        driver_gap = _result_gap_seconds(fp1_result)
-        team_gap = team_best_gap.get(driver.team_id or "")
+        driver_gap = _result_gap_seconds(fp1_result) if fp1_result is not None else None
+        team_gap = team_best_gap.get(driver.team_id or "") if fp1_result is not None else None
         teammate_gap = (
             None if driver_gap is None or team_gap is None else driver_gap - team_gap
         )
@@ -1360,6 +1516,14 @@ def _build_session_to_target_snapshot(
             if _fp3_gap is not None and _fp3_tg is not None
             else None
         )
+        _sq_r = sq_results_by_driver.get(driver.id) if sq_results else None
+        _sq_gap = _result_gap_seconds(_sq_r) if _sq_r is not None else None
+        _sq_tg = sq_team_best_gap.get(driver.team_id or "") if sq_results else None
+        _sq_teammate = (
+            (_sq_gap - _sq_tg)
+            if _sq_gap is not None and _sq_tg is not None
+            else None
+        )
         _q_r = q_results_by_driver.get(driver.id) if q_results else None
         _q_gap = _result_gap_seconds(_q_r) if _q_r is not None else None
         _q_tg = q_team_best_gap.get(driver.team_id or "") if q_results else None
@@ -1371,7 +1535,7 @@ def _build_session_to_target_snapshot(
 
         # Best-practice aggregates
         _all_gaps = [g for g in [driver_gap, _fp2_gap, _fp3_gap] if g is not None]
-        _fp1_pos = fp1_result.position
+        _fp1_pos = fp1_result.position if fp1_result is not None else None
         _fp2_pos = _fp2_r.position if _fp2_r is not None else None
         _fp3_pos = _fp3_r.position if _fp3_r is not None else None
         _all_positions = [p for p in [_fp1_pos, _fp2_pos, _fp3_pos] if p is not None]
@@ -1431,14 +1595,22 @@ def _build_session_to_target_snapshot(
                 "entry_spread": _coalesce_spread(entry.best_bid, entry.best_ask),
                 "trade_count_pre_entry": len(pre_entry_trades),
                 "last_trade_age_seconds": last_trade_age_seconds,
-                "fp1_position": fp1_result.position,
-                "fp1_result_time_seconds": fp1_result.result_time_seconds,
+                "fp1_position": _fp1_pos,
+                "fp1_result_time_seconds": (
+                    fp1_result.result_time_seconds if fp1_result is not None else None
+                ),
                 "fp1_gap_to_leader_seconds": driver_gap,
                 "fp1_teammate_gap_seconds": teammate_gap,
                 "fp1_team_best_gap_to_leader_seconds": team_gap,
-                "fp1_lap_count": lap_count_by_driver.counts.get(driver.id, 0),
-                "fp1_stint_count": len(
-                    stint_count_by_driver.distinct_counts.get(driver.id, set())
+                "fp1_lap_count": (
+                    lap_count_by_driver.counts.get(driver.id, 0)
+                    if fp1_result is not None
+                    else None
+                ),
+                "fp1_stint_count": (
+                    len(stint_count_by_driver.distinct_counts.get(driver.id, set()))
+                    if fp1_result is not None
+                    else None
                 ),
                 # FP2 features
                 "fp2_position": _fp2_pos,
@@ -1472,6 +1644,14 @@ def _build_session_to_target_snapshot(
                     len(fp3_stint_count_by_driver.distinct_counts.get(driver.id, set()))
                     if fp3_results else None
                 ),
+                # SQ features
+                "sq_position": _sq_r.position if _sq_r is not None else None,
+                "sq_result_time_seconds": (
+                    _sq_r.result_time_seconds if _sq_r is not None else None
+                ),
+                "sq_gap_to_leader_seconds": _sq_gap,
+                "sq_teammate_gap_seconds": _sq_teammate,
+                "sq_team_best_gap_to_leader_seconds": _sq_tg,
                 # Q features
                 "q_position": _q_r.position if _q_r is not None else None,
                 "q_result_time_seconds": (
@@ -1488,8 +1668,14 @@ def _build_session_to_target_snapshot(
                     min(_all_positions) if _all_positions else None
                 ),
                 "latest_fp_number": 3 if fp3_results else (2 if fp2_results else 1),
-                "latest_pre_race_session_code": "Q" if q_results else (
-                    "FP3" if fp3_results else ("FP2" if fp2_results else "FP1")
+                "latest_pre_race_session_code": (
+                    "Q"
+                    if q_results
+                    else (
+                        "SQ"
+                        if sq_results
+                        else ("FP3" if fp3_results else ("FP2" if fp2_results else "FP1"))
+                    )
                 ),
                 "label_yes": (
                     None
@@ -1705,6 +1891,7 @@ def _build_pre_weekend_snapshot(
     for fr in form_results:
         if fr.driver_id is not None:
             form_by_driver[fr.driver_id] = fr
+    form_driver_ids = set(form_by_driver)
 
     q_results = list(
         ctx.db.scalars(
@@ -1728,6 +1915,11 @@ def _build_pre_weekend_snapshot(
         if driver is None:
             exclusion_reasons.increment("missing_driver_match")
             continue
+        driver = _resolve_driver_with_available_results(
+            driver=driver,
+            drivers=drivers,
+            available_driver_ids=form_driver_ids,
+        )
         form_result = form_by_driver.get(driver.id)
         if form_result is None:
             exclusion_reasons.increment("missing_form_result")

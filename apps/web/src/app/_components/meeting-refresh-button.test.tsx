@@ -52,10 +52,10 @@ describe("MeetingRefreshButton", () => {
     );
 
     expect(
-      screen.getByRole("button", { name: "No ended session yet" }),
+      screen.getByRole("button", { name: "No finished session yet" }),
     ).toBeDisabled();
     expect(
-      screen.getByText("This GP does not have an ended session yet."),
+      screen.getByText("This Grand Prix does not have a finished session yet."),
     ).toBeInTheDocument();
   });
 
@@ -71,6 +71,7 @@ describe("MeetingRefreshButton", () => {
       marketsDiscovered: 2,
       mappingsWritten: 1,
       marketsHydrated: 1,
+      artifactsRefreshed: [],
     });
 
     render(
@@ -80,11 +81,21 @@ describe("MeetingRefreshButton", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Update latest: Q" });
+    const button = screen.getByRole("button", {
+      name: "Refresh Qualifying",
+    });
     fireEvent.click(button);
 
     expect(sdk.refreshLatestSession).toHaveBeenCalledWith({
       meeting_id: "meeting:1281",
+      search_fallback: false,
+      discover_max_pages: 1,
+      hydrate_market_history: false,
+      sync_calendar: false,
+      hydrate_f1_session_data: true,
+      include_extended_f1_data: false,
+      include_heavy_f1_data: false,
+      refresh_artifacts: false,
     });
     expect(button).toBeDisabled();
 

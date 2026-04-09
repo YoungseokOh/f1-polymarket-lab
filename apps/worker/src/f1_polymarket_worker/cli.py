@@ -1,12 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from pathlib import Path
 
 import typer
 from f1_polymarket_lab.common import get_settings
-from f1_polymarket_lab.storage.db import Base, build_engine, db_session
+from f1_polymarket_lab.models import SIGNAL_ENSEMBLE_STAGE
+from f1_polymarket_lab.storage.db import db_session
+from f1_polymarket_lab.storage.migrations import (
+    ensure_database_schema,
+    migrate_sqlite_to_postgres,
+)
 
 from f1_polymarket_worker.backtest import (
+    backfill_backtests,
     collect_resolutions,
     run_walk_forward_backtest,
     save_backtest_report,
@@ -47,6 +54,12 @@ from f1_polymarket_worker.pipeline import (
     sync_f1_calendar,
     sync_polymarket_catalog,
 )
+from f1_polymarket_worker.signal_ensemble import (
+    register_default_signals,
+    score_signal_ensemble_snapshot,
+    settle_signal_ensemble_backtest,
+    train_signal_ensemble_from_snapshot_ids,
+)
 
 app = typer.Typer(no_args_is_help=True)
 
@@ -54,9 +67,42 @@ app = typer.Typer(no_args_is_help=True)
 @app.command("bootstrap-db")
 def bootstrap_db() -> None:
     settings = get_settings()
-    engine = build_engine(settings.database_url)
-    Base.metadata.create_all(engine)
-    typer.echo("Database tables ensured.")
+    result = ensure_database_schema(settings.database_url)
+    typer.echo(result)
+
+
+@app.command("migrate-sqlite-to-postgres")
+def migrate_sqlite_to_postgres_command(
+    sqlite_url: str = typer.Option(
+        "sqlite+pysqlite:///./data/lab.db",
+        "--sqlite-url",
+        help="Source SQLite database URL.",
+    ),
+    postgres_url: str | None = typer.Option(
+        None,
+        "--postgres-url",
+        help="Target PostgreSQL database URL. Defaults to the configured database_url.",
+    ),
+    batch_size: int = typer.Option(1000, "--batch-size", min=1),
+    truncate_target: bool = typer.Option(
+        False,
+        "--truncate-target/--fail-if-nonempty",
+        help=(
+            "Replace existing PostgreSQL data instead of failing when target tables are "
+            "non-empty."
+        ),
+    ),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    result = migrate_sqlite_to_postgres(
+        sqlite_url=sqlite_url,
+        postgres_url=postgres_url or settings.database_url,
+        batch_size=batch_size,
+        truncate_target=truncate_target,
+        execute=execute,
+    )
+    typer.echo(result)
 
 
 @app.command("ingest-demo")
@@ -77,6 +123,110 @@ def sync_f1_calendar_command(
         context = PipelineContext(db=session, execute=execute)
         result = sync_f1_calendar(context, season=season)
     typer.echo(result)
+
+
+@app.command("set-f1-calendar-override")
+def set_f1_calendar_override_command(
+    season: int = 2026,
+    meeting_slug: str = typer.Option(..., "--meeting-slug"),
+    status: str = typer.Option(..., "--status"),
+    ops_slug: str | None = typer.Option(None, "--ops-slug"),
+    effective_round_number: int | None = typer.Option(None, "--effective-round-number"),
+    effective_start_date_utc: str | None = typer.Option(None, "--effective-start-date-utc"),
+    effective_end_date_utc: str | None = typer.Option(None, "--effective-end-date-utc"),
+    effective_meeting_name: str | None = typer.Option(None, "--effective-meeting-name"),
+    effective_country_name: str | None = typer.Option(None, "--effective-country-name"),
+    effective_location: str | None = typer.Option(None, "--effective-location"),
+    source_label: str | None = typer.Option(None, "--source-label"),
+    source_url: str | None = typer.Option(None, "--source-url"),
+    note: str | None = typer.Option(None, "--note"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.ops_calendar import set_calendar_override
+    from f1_polymarket_worker.pipeline import parse_dt
+
+    payload = {
+        "season": season,
+        "meeting_slug": meeting_slug,
+        "status": status,
+        "ops_slug": ops_slug,
+        "effective_round_number": effective_round_number,
+        "effective_start_date_utc": parse_dt(effective_start_date_utc),
+        "effective_end_date_utc": parse_dt(effective_end_date_utc),
+        "effective_meeting_name": effective_meeting_name,
+        "effective_country_name": effective_country_name,
+        "effective_location": effective_location,
+        "source_label": source_label,
+        "source_url": source_url,
+        "note": note,
+    }
+    if not execute:
+        typer.echo({"status": "planned", **payload})
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        override = set_calendar_override(
+            session,
+            season=season,
+            meeting_slug=meeting_slug,
+            status=status,
+            ops_slug=ops_slug,
+            effective_round_number=effective_round_number,
+            effective_start_date_utc=parse_dt(effective_start_date_utc),
+            effective_end_date_utc=parse_dt(effective_end_date_utc),
+            effective_meeting_name=effective_meeting_name,
+            effective_country_name=effective_country_name,
+            effective_location=effective_location,
+            source_label=source_label,
+            source_url=source_url,
+            note=note,
+        )
+        typer.echo(
+            {
+                "status": "ok",
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "override_status": override.status,
+                "ops_slug": override.ops_slug,
+                "source_url": override.source_url,
+            }
+        )
+
+
+@app.command("clear-f1-calendar-override")
+def clear_f1_calendar_override_command(
+    season: int = 2026,
+    meeting_slug: str = typer.Option(..., "--meeting-slug"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.ops_calendar import clear_calendar_override
+
+    if not execute:
+        typer.echo(
+            {
+                "status": "planned",
+                "season": season,
+                "meeting_slug": meeting_slug,
+            }
+        )
+        return
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        override = clear_calendar_override(
+            session,
+            season=season,
+            meeting_slug=meeting_slug,
+        )
+        typer.echo(
+            {
+                "status": "ok",
+                "season": override.season,
+                "meeting_slug": override.meeting_slug,
+                "is_active": override.is_active,
+            }
+        )
 
 
 @app.command("hydrate-f1-session")
@@ -806,6 +956,26 @@ def settle_backtest_command(
     typer.echo(result)
 
 
+@app.command("backfill-backtests")
+def backfill_backtests_command(
+    gp_short_code: str | None = None,
+    min_edge: float = 0.05,
+    bet_size: float = 10.0,
+    rebuild_missing: bool = typer.Option(True, "--rebuild-missing/--stored-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=True)
+        result = backfill_backtests(
+            context,
+            gp_short_code=gp_short_code,
+            min_edge=min_edge,
+            bet_size=bet_size,
+            rebuild_missing=rebuild_missing,
+        )
+    typer.echo(result)
+
+
 @app.command("settle-single-gp")
 def settle_single_gp_command(
     meeting_key: int = typer.Option(..., "--meeting-key"),
@@ -901,6 +1071,12 @@ def train_multitask_walk_forward_command(
     from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
     from f1_polymarket_lab.storage.repository import upsert_records
 
+    from f1_polymarket_worker.model_registry import (
+        log_run_to_mlflow,
+        mlflow_experiment_name_for_stage,
+        model_artifact_dir,
+    )
+
     def load_snapshot_frames(paths: list[str]) -> list[pl_module.DataFrame]:
         frames: list[pl_module.DataFrame] = []
         for path in paths:
@@ -975,12 +1151,17 @@ def train_multitask_walk_forward_command(
             test_df = pl_module.concat(test_frames)
 
             model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
+            artifact_dir = model_artifact_dir(
+                data_root=Path(settings.data_root),
+                model_run_id=model_run_id,
+            )
             result = train_multitask_split(
                 train_df,
                 test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 config=MultitaskTrainerConfig(),
+                artifact_dir=artifact_dir,
             )
 
             test_timestamps = (
@@ -988,18 +1169,60 @@ def train_multitask_walk_forward_command(
                 if "as_of_ts" in test_df.columns
                 else []
             )
+            train_snapshot_ids = [
+                str(row["snapshot_id"])
+                for meeting_key in split.train_meeting_keys
+                for row in grouped[meeting_key]
+            ]
+            test_snapshot_ids = [str(row["snapshot_id"]) for row in test_snapshots]
+
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "predictions.json").write_text(
+                json.dumps(result.predictions, indent=2, default=str),
+                encoding="utf-8",
+            )
+            (artifact_dir / "metrics.json").write_text(
+                json.dumps(result.metrics, indent=2, default=str),
+                encoding="utf-8",
+            )
+
+            registry_run_id = log_run_to_mlflow(
+                tracking_uri=settings.mlflow_tracking_uri,
+                experiment_name=mlflow_experiment_name_for_stage(stage),
+                run_name=f"{stage}:{split.test_meeting_key}",
+                params={
+                    **result.config,
+                    "manifest_path": manifest,
+                    "train_snapshot_ids": train_snapshot_ids,
+                    "test_snapshot_ids": test_snapshot_ids,
+                },
+                metrics=result.metrics,
+                tags={
+                    "stage": stage,
+                    "model_family": "torch_multitask",
+                    "test_meeting_key": str(split.test_meeting_key),
+                },
+                artifact_dir=artifact_dir,
+            )
 
             run_record = {
                 "id": result.model_run_id,
                 "stage": stage,
                 "model_family": "torch_multitask",
-                "model_name": "shared_encoder_multitask_v1",
+                "model_name": "shared_encoder_multitask_v2",
                 "dataset_version": "multitask_v1",
                 "feature_snapshot_id": None,
                 "test_start": min(test_timestamps) if test_timestamps else None,
                 "test_end": max(test_timestamps) if test_timestamps else None,
-                "config_json": result.config,
+                "config_json": {
+                    **result.config,
+                    "manifest_path": manifest,
+                    "train_snapshot_ids": train_snapshot_ids,
+                    "test_snapshot_ids": test_snapshot_ids,
+                },
                 "metrics_json": result.metrics,
+                "artifact_uri": str(artifact_dir),
+                "registry_run_id": registry_run_id,
             }
             upsert_records(session, ModelRun, [run_record], conflict_columns=["id"])
 
@@ -1034,6 +1257,145 @@ def train_multitask_walk_forward_command(
             )
 
         typer.echo(f"Multitask walk-forward training complete: {len(all_results)} folds evaluated.")
+
+
+@app.command("promote-model-run")
+def promote_model_run_command(
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import ModelRun
+
+    from f1_polymarket_worker.model_registry import evaluate_promotion_gate, promote_model_run
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        model_run = session.get(ModelRun, model_run_id)
+        if model_run is None:
+            typer.echo(f"model_run_id={model_run_id} not found")
+            raise typer.Exit(1)
+
+        decision = evaluate_promotion_gate(model_run.metrics_json)
+        if not execute:
+            if decision.eligible:
+                typer.echo(f"[plan] Would promote model_run_id={model_run_id} for stage={stage}")
+            else:
+                typer.echo("[plan] Promotion would fail: " + "; ".join(decision.failed_rules))
+            return
+
+        promotion = promote_model_run(session, model_run_id=model_run_id, stage=stage)
+        typer.echo(f"Promoted model_run_id={promotion.model_run_id} for stage={promotion.stage}")
+
+
+@app.command("score-multitask-snapshot")
+def score_multitask_snapshot_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import FeatureSnapshot
+
+    from f1_polymarket_worker.model_registry import (
+        get_active_promoted_model_run,
+        score_promoted_multitask_snapshot,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        snapshot = session.get(FeatureSnapshot, snapshot_id)
+        if snapshot is None:
+            typer.echo(f"snapshot_id={snapshot_id} not found")
+            raise typer.Exit(1)
+
+        champion = get_active_promoted_model_run(session, stage=stage)
+        if champion is None:
+            typer.echo(f"No active promoted champion exists for stage={stage}")
+            raise typer.Exit(1)
+
+        if not execute:
+            typer.echo(f"[plan] Would score snapshot_id={snapshot_id} with champion={champion.id}")
+            return
+
+        result = score_promoted_multitask_snapshot(
+            session,
+            data_root=Path(settings.data_root),
+            snapshot=snapshot,
+            stage=stage,
+        )
+        typer.echo(f"Scored snapshot_id={snapshot_id} with model_run_id={result['model_run_id']}")
+
+
+@app.command("register-default-signals")
+def register_default_signals_command(
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = register_default_signals(context)
+    typer.echo(result)
+
+
+@app.command("train-signal-ensemble")
+def train_signal_ensemble_command(
+    snapshot_ids: str = typer.Option(
+        ..., "--snapshot-ids", help="Comma-separated snapshot IDs in time order"
+    ),
+    stage: str = typer.Option(SIGNAL_ENSEMBLE_STAGE, "--stage"),
+    min_edge: float = typer.Option(0.05, "--min-edge"),
+    max_spread: float | None = typer.Option(None, "--max-spread"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.models import SignalEnsembleConfig
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = train_signal_ensemble_from_snapshot_ids(
+            context,
+            snapshot_ids=[value.strip() for value in snapshot_ids.split(",") if value.strip()],
+            stage=stage,
+            config=SignalEnsembleConfig(
+                min_edge=min_edge,
+                max_spread=max_spread,
+            ),
+        )
+    typer.echo(result)
+
+
+@app.command("score-signal-ensemble-snapshot")
+def score_signal_ensemble_snapshot_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = score_signal_ensemble_snapshot(
+            context,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+        )
+    typer.echo(result)
+
+
+@app.command("run-signal-ensemble-backtest")
+def run_signal_ensemble_backtest_command(
+    snapshot_id: str = typer.Option(..., "--snapshot-id"),
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        context = PipelineContext(db=session, execute=execute)
+        result = settle_signal_ensemble_backtest(
+            context,
+            snapshot_id=snapshot_id,
+            model_run_id=model_run_id,
+        )
+    typer.echo(result)
 
 
 @app.command("run-multitask-autoresearch")
@@ -1527,12 +1889,14 @@ def paper_trade_command(
     """Run paper trading simulation using model predictions."""
     from f1_polymarket_lab.storage.models import FeatureSnapshot, ModelPrediction
 
+    from f1_polymarket_worker.model_registry import ensure_model_run_allowed_for_paper_trade
     from f1_polymarket_worker.paper_trading import PaperTradeConfig, PaperTradingEngine
 
     settings = get_settings()
     with db_session(settings.database_url) as session:
         from sqlalchemy import select
 
+        ensure_model_run_allowed_for_paper_trade(session, model_run_id=model_run_id)
         preds = session.scalars(
             select(ModelPrediction).where(ModelPrediction.model_run_id == model_run_id)
         ).all()

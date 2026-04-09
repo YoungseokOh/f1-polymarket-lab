@@ -10,8 +10,18 @@ make db-upgrade
 make ingest-demo
 ```
 
-`make bootstrap` runs `uv sync --all-packages --group dev`, so the default dev toolchain and the
-workspace packages install together, including `torch` for multitask trainer tests.
+`make bootstrap` installs the workspace Python packages plus the optional
+modeling dependencies needed for the full local test suite. On macOS it also
+verifies the `libomp` runtime that LightGBM needs, using Homebrew bottles when
+available and a source-build fallback on older Intel macOS installs.
+
+If you already have local data in `data/lab.db`, migrate it into Postgres before
+continuing:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --plan-only
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --execute
+```
 
 ## Full Historical Backfill
 
@@ -47,6 +57,16 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli reconci
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
 ```
 
+To rebuild labeled snapshots, baseline runs, and settled backtests for the
+matching GP stage after results arrive:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-backtests
+
+# Use this only when you explicitly want to reuse stored snapshots as-is.
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli backfill-backtests --stored-only
+```
+
 ## Weekend Validation
 
 ```bash
@@ -79,6 +99,51 @@ make api
 # GET /api/v1/paper-trading/sessions
 # GET /api/v1/paper-trading/sessions/{id}/positions
 ```
+
+## Miami Live Trading
+
+Miami sprint-weekend live trading is split into four GP registry entries:
+
+- `miami_fp1_sq` for Sprint Qualifying pole tickets
+- `miami_sq_sprint` for Sprint winner tickets
+- `miami_fp1_q` for Qualifying pole tickets
+- `miami_q_r` for Race winner tickets
+
+Promoted champions are required per session stage:
+
+- `sq_pole_live_v1` for `miami_fp1_sq`
+- `sprint_winner_live_v1` for `miami_sq_sprint`
+- `multitask_qr` for `miami_fp1_q` and `miami_q_r`
+
+The live trading path is operator-assisted. Create the ticket in the cockpit, place the order in the
+Polymarket browser, then record the actual fill back into the system.
+
+```bash
+make db-upgrade
+make api
+make web
+```
+
+The API routes behind the cockpit are:
+
+```text
+GET  /api/v1/live-trading/signal-board
+GET  /api/v1/live-trading/tickets
+GET  /api/v1/live-trading/executions
+POST /api/v1/actions/create-live-trade-ticket
+POST /api/v1/actions/record-live-trade-fill
+POST /api/v1/actions/cancel-live-trade-ticket
+```
+
+Miami v1 live-ticket creation will block when any of the following are true:
+
+- the session's required promoted champion is missing
+- the selected snapshot or artifact version is incompatible
+- no live quote is available
+- the observed spread is wider than the configured maximum
+- the daily loss budget has already been consumed
+- the target session is outside the live trading window
+- another open live ticket already exists for the same market
 
 ## Live Event Capture
 

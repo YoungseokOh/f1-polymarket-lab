@@ -1,0 +1,242 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from pathlib import Path
+
+import polars as pl
+import pytest
+from f1_polymarket_lab.storage.db import Base
+from f1_polymarket_lab.storage.models import (
+    FeatureSnapshot,
+    ModelPrediction,
+    ModelRun,
+    ModelRunPromotion,
+)
+from f1_polymarket_worker.model_registry import (
+    MULTITASK_PROMOTION_STAGE,
+    promote_model_run,
+    score_promoted_multitask_snapshot,
+)
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+
+def build_session() -> Session:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    return Session(engine)
+
+
+def test_promote_model_run_marks_previous_active_run_superseded(tmp_path: Path) -> None:
+    session = build_session()
+    try:
+        artifact_a = tmp_path / "run-a"
+        artifact_b = tmp_path / "run-b"
+        artifact_a.mkdir(parents=True)
+        artifact_b.mkdir(parents=True)
+        session.add_all(
+            [
+                ModelRun(
+                    id="run-a",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    dataset_version="multitask_v1",
+                    metrics_json={
+                        "total_pnl": 8.0,
+                        "roi_pct": 11.0,
+                        "bet_count": 24,
+                        "ece": 0.05,
+                        "family_pnl_share_max": 0.52,
+                    },
+                    artifact_uri=str(artifact_a),
+                ),
+                ModelRun(
+                    id="run-b",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    dataset_version="multitask_v1",
+                    metrics_json={
+                        "total_pnl": 12.0,
+                        "roi_pct": 15.0,
+                        "bet_count": 28,
+                        "ece": 0.04,
+                        "family_pnl_share_max": 0.49,
+                    },
+                    artifact_uri=str(artifact_b),
+                ),
+                ModelRunPromotion(
+                    id="promotion-run-a",
+                    model_run_id="run-a",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    status="active",
+                    gate_metrics_json={"total_pnl": 8.0},
+                    promoted_at=datetime(2026, 3, 28, 7, 0, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+        promotion = promote_model_run(
+            session,
+            model_run_id="run-b",
+            stage=MULTITASK_PROMOTION_STAGE,
+        )
+        session.commit()
+
+        previous = session.scalar(
+            select(ModelRunPromotion).where(ModelRunPromotion.model_run_id == "run-a")
+        )
+
+        assert promotion.model_run_id == "run-b"
+        assert previous is not None
+        assert previous.status == "superseded"
+    finally:
+        session.close()
+
+
+def test_promote_model_run_rejects_failed_gate(tmp_path: Path) -> None:
+    session = build_session()
+    try:
+        artifact_dir = tmp_path / "run-fail"
+        artifact_dir.mkdir(parents=True)
+        session.add(
+            ModelRun(
+                id="run-fail",
+                stage=MULTITASK_PROMOTION_STAGE,
+                model_family="torch_multitask",
+                model_name="shared_encoder_multitask_v2",
+                dataset_version="multitask_v1",
+                metrics_json={
+                    "total_pnl": -1.0,
+                    "roi_pct": 2.0,
+                    "bet_count": 24,
+                    "ece": 0.04,
+                    "family_pnl_share_max": 0.49,
+                },
+                artifact_uri=str(artifact_dir),
+            )
+        )
+        session.commit()
+
+        with pytest.raises(ValueError, match="Promotion gate failed"):
+            promote_model_run(
+                session,
+                model_run_id="run-fail",
+                stage=MULTITASK_PROMOTION_STAGE,
+            )
+    finally:
+        session.close()
+
+
+def test_score_promoted_multitask_snapshot_persists_scored_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = build_session()
+    try:
+        artifact_dir = tmp_path / "champion-run"
+        artifact_dir.mkdir(parents=True)
+        snapshot_path = tmp_path / "snapshot.parquet"
+        pl.DataFrame(
+            [
+                {
+                    "meeting_key": 1281,
+                    "market_id": "market-1",
+                    "token_id": "token-1",
+                    "target_market_family": "pole",
+                    "as_of_checkpoint": "Q",
+                    "entry_yes_price": 0.44,
+                    "label_yes": 1,
+                }
+            ]
+        ).write_parquet(snapshot_path)
+
+        session.add_all(
+            [
+                FeatureSnapshot(
+                    id="snapshot-1",
+                    market_id=None,
+                    session_id=None,
+                    as_of_ts=datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+                    snapshot_type="multitask_qr_q",
+                    feature_version="multitask_v1",
+                    storage_path=str(snapshot_path),
+                    row_count=1,
+                ),
+                ModelRun(
+                    id="champion-run",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    dataset_version="multitask_v1",
+                    metrics_json={
+                        "total_pnl": 12.0,
+                        "roi_pct": 15.0,
+                        "bet_count": 28,
+                        "ece": 0.04,
+                        "family_pnl_share_max": 0.49,
+                    },
+                    artifact_uri=str(artifact_dir),
+                    registry_run_id="mlflow-champion-run",
+                ),
+                ModelRunPromotion(
+                    id="promotion-champion",
+                    model_run_id="champion-run",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    status="active",
+                    gate_metrics_json={"total_pnl": 12.0},
+                    promoted_at=datetime(2026, 3, 28, 7, 50, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.commit()
+
+        monkeypatch.setattr(
+            "f1_polymarket_lab.models.score_multitask_frame",
+            lambda frame, **kwargs: [
+                {
+                    "model_run_id": kwargs["model_run_id"],
+                    "market_id": "market-1",
+                    "token_id": "token-1",
+                    "as_of_ts": datetime(2026, 3, 28, 8, 5, tzinfo=timezone.utc),
+                    "probability_yes": 0.63,
+                    "probability_no": 0.37,
+                    "raw_score": 0.61,
+                    "calibration_version": "isotonic_v1",
+                    "explanation_json": {
+                        "target_market_family": "pole",
+                        "as_of_checkpoint": "Q",
+                        "stage": MULTITASK_PROMOTION_STAGE,
+                        "feature_snapshot_id": "snapshot-1",
+                    },
+                }
+            ],
+        )
+
+        snapshot = session.get(FeatureSnapshot, "snapshot-1")
+        assert snapshot is not None
+
+        result = score_promoted_multitask_snapshot(
+            session,
+            data_root=tmp_path,
+            snapshot=snapshot,
+            stage=MULTITASK_PROMOTION_STAGE,
+        )
+        session.commit()
+
+        scored_run = session.get(ModelRun, result["model_run_id"])
+        predictions = session.scalars(
+            select(ModelPrediction).where(ModelPrediction.model_run_id == result["model_run_id"])
+        ).all()
+
+        assert result["source_model_run_id"] == "champion-run"
+        assert Path(result["artifact_path"]).exists()
+        assert scored_run is not None
+        assert scored_run.registry_run_id == "mlflow-champion-run"
+        assert scored_run.config_json["parent_model_run_id"] == "champion-run"
+        assert len(predictions) == 1
+        assert predictions[0].probability_yes == pytest.approx(0.63)
+    finally:
+        session.close()

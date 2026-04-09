@@ -11,6 +11,7 @@ from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.models.multitask_model import MultitaskModelConfig, MultitaskTabularModel
 from f1_polymarket_lab.models.multitask_trainer import (
     MultitaskTrainerConfig,
+    score_multitask_frame,
     train_multitask_split,
 )
 from f1_polymarket_lab.storage.db import Base
@@ -106,6 +107,46 @@ def test_train_multitask_split_returns_predictions_for_each_head() -> None:
     assert "roi_pct" in result.metrics
     assert "family_pnl_share_max" in result.metrics
     assert "family_metrics" in result.metrics
+    assert "checkpoint_metrics" in result.metrics
+    assert "family_checkpoint_metrics" in result.metrics
+    assert "family_pnl_share_max" in result.metrics
+    assert result.metrics["fit_row_count"] > 0
+    assert result.metrics["validation_row_count"] > 0
+    assert result.metrics["best_epoch"] >= 1
+
+
+def test_train_multitask_split_saves_artifacts_and_scores_frame(tmp_path: Path) -> None:
+    train_df = pl.concat([build_multitask_df(100), build_multitask_df(200)])
+    test_df = build_multitask_df_for_checkpoint(300, "Q")
+    artifact_dir = tmp_path / "multitask-artifacts"
+
+    result = train_multitask_split(
+        train_df,
+        test_df,
+        model_run_id="mt-run-artifacts",
+        stage="multitask_qr",
+        config=MultitaskTrainerConfig(max_epochs=2, batch_size=8),
+        artifact_dir=artifact_dir,
+    )
+    scored_predictions = score_multitask_frame(
+        test_df,
+        artifact_dir=artifact_dir,
+        model_run_id="mt-run-scored",
+        stage="multitask_qr",
+        feature_snapshot_id="snapshot-300",
+    )
+
+    assert result.metrics["checkpoint_metrics"]["Q"]["row_count"] == len(test_df)
+    assert (artifact_dir / "model_bundle.pt").exists()
+    assert (artifact_dir / "calibrators.json").exists()
+    assert (artifact_dir / "trainer_config.json").exists()
+    assert len(scored_predictions) == len(test_df)
+    assert {
+        row["explanation_json"]["feature_snapshot_id"] for row in scored_predictions
+    } == {"snapshot-300"}
+    assert {
+        row["explanation_json"]["as_of_checkpoint"] for row in scored_predictions
+    } == {"Q"}
 
 
 def test_train_multitask_walk_forward_cli_plan_only(tmp_path: Path) -> None:
@@ -211,8 +252,15 @@ def test_train_multitask_walk_forward_cli_execute_persists_all_checkpoints(
     def fake_db_session(_: str) -> Session:
         yield session
 
-    monkeypatch.setattr("f1_polymarket_worker.cli.get_settings", lambda: Settings())
+    monkeypatch.setattr(
+        "f1_polymarket_worker.cli.get_settings",
+        lambda: Settings(data_root=tmp_path),
+    )
     monkeypatch.setattr("f1_polymarket_worker.cli.db_session", fake_db_session)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_registry.log_run_to_mlflow",
+        lambda **kwargs: "mlflow-test-run",
+    )
 
     runner = CliRunner()
     result = runner.invoke(
@@ -232,5 +280,6 @@ def test_train_multitask_walk_forward_cli_execute_persists_all_checkpoints(
 
     assert result.exit_code == 0
     assert len(runs) == 1
+    assert runs[0].registry_run_id == "mlflow-test-run"
     assert len(predictions) == len(build_multitask_df(1281)) * 2
     assert {row.explanation_json["as_of_checkpoint"] for row in predictions} == {"FP1", "Q"}

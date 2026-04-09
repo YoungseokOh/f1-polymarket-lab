@@ -98,6 +98,118 @@ describe("sdk", () => {
     );
   });
 
+  it("maps lineage observability resources", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "job-1",
+            job_name: "sync-calendar",
+            source: "openf1",
+            dataset: "sessions",
+            status: "completed",
+            execute_mode: "execute",
+            records_written: 22,
+            started_at: "2026-03-28T01:00:00Z",
+            finished_at: "2026-03-28T01:01:00Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "cursor-1",
+            source: "polymarket",
+            dataset: "markets",
+            cursor_key: "next_cursor",
+            cursor_value: { page: 3 },
+            updated_at: "2026-03-28T01:02:00Z",
+          },
+        ],
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        json: async () => [
+          {
+            id: "dq-1",
+            dataset: "polymarket_ws_message_manifest",
+            status: "fail",
+            metrics_json: { row_count: 0 },
+            observed_at: "2026-03-28T01:03:00Z",
+          },
+        ],
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const [jobs, cursors, qualityResults] = await Promise.all([
+      sdk.ingestionJobs({ limit: 5 }),
+      sdk.cursorStates({ limit: 10 }),
+      sdk.qualityResults({ limit: 10 }),
+    ]);
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "http://127.0.0.1:8000/api/v1/lineage/jobs?limit=5",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "http://127.0.0.1:8000/api/v1/lineage/cursors?limit=10",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      3,
+      "http://127.0.0.1:8000/api/v1/quality/results?limit=10",
+      expect.objectContaining({
+        cache: "no-store",
+      }),
+    );
+    expect(jobs[0]).toEqual(
+      expect.objectContaining({
+        jobName: "sync-calendar",
+        executeMode: "execute",
+        recordsWritten: 22,
+      }),
+    );
+    expect(cursors[0]).toEqual(
+      expect.objectContaining({
+        cursorKey: "next_cursor",
+        cursorValue: { page: 3 },
+      }),
+    );
+    expect(qualityResults[0]).toEqual(
+      expect.objectContaining({
+        dataset: "polymarket_ws_message_manifest",
+        status: "fail",
+        metricsJson: { row_count: 0 },
+      }),
+    );
+  });
+
+  it("extracts detail strings from failed action responses", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 409,
+      statusText: "Conflict",
+      text: async () =>
+        JSON.stringify({
+          detail: "No Polymarket mappings found for SQ session",
+        }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(sdk.runBacktest({ gp_short_code: "china" })).rejects.toThrow(
+      "API request failed: 409 No Polymarket mappings found for SQ session",
+    );
+  });
+
   it("maps weekend cockpit status payloads", async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -110,6 +222,7 @@ describe("sdk", () => {
           short_code: "japan_pre",
           meeting_key: 1281,
           season: 2026,
+          meeting_slug: "japanese-grand-prix",
           target_session_code: "Q",
           variant: "pre_weekend",
           source_session_code: null,
@@ -120,12 +233,58 @@ describe("sdk", () => {
           display_description:
             "Review Qualifying markets before practice sessions begin.",
         },
+        calendar_status: "scheduled",
+        meeting_slug: "japanese-grand-prix",
+        source_conflict: false,
+        override_source_url: null,
+        calendar_meetings: [
+          {
+            season: 2026,
+            meeting_key: 1281,
+            meeting_slug: "japanese-grand-prix",
+            ops_slug: "japan",
+            meeting_name: "Japanese Grand Prix",
+            round_number: 3,
+            event_format: "conventional",
+            start_date_utc: "2026-03-27T02:30:00Z",
+            end_date_utc: "2026-03-29T07:00:00Z",
+            country_name: "Japan",
+            location: "Suzuka",
+            status: "scheduled",
+            source_conflict: false,
+            source_label: null,
+            source_url: null,
+            note: null,
+          },
+        ],
+        cancelled_meetings: [
+          {
+            season: 2026,
+            meeting_key: 1282,
+            meeting_slug: "bahrain-grand-prix",
+            ops_slug: "bahrain",
+            meeting_name: "Bahrain Grand Prix",
+            round_number: 2,
+            event_format: "conventional",
+            start_date_utc: "2026-04-10T10:30:00Z",
+            end_date_utc: "2026-04-12T16:00:00Z",
+            country_name: "Bahrain",
+            location: "Sakhir",
+            status: "cancelled",
+            source_conflict: true,
+            source_label: "Formula 1 official",
+            source_url:
+              "https://www.formula1.com/en/latest/article/bahrain-and-saudi-arabian-grands-prix-will-not-take-place-in-april.1hnqllVG85RSt8pbFc5Ivx/",
+            note: null,
+          },
+        ],
         available_configs: [
           {
             name: "Japanese Grand Prix",
             short_code: "japan_pre",
             meeting_key: 1281,
             season: 2026,
+            meeting_slug: "japanese-grand-prix",
             target_session_code: "Q",
             variant: "pre_weekend",
             source_session_code: null,
@@ -143,6 +302,8 @@ describe("sdk", () => {
           season: 2026,
           round_number: 3,
           meeting_name: "Japanese Grand Prix",
+          meeting_slug: "japanese-grand-prix",
+          event_format: "conventional",
           circuit_short_name: "Suzuka",
           country_name: "Japan",
           location: "Suzuka",
@@ -193,6 +354,21 @@ describe("sdk", () => {
         ],
         blockers: [],
         ready_to_run: true,
+        model_ready: true,
+        required_stage: null,
+        active_model_run_id: null,
+        model_blockers: [],
+        session_stage_statuses: [],
+        live_ticket_summary: {
+          ticket_count: 0,
+          open_ticket_count: 0,
+          filled_ticket_count: 0,
+          cancelled_ticket_count: 0,
+        },
+        live_execution_summary: {
+          execution_count: 0,
+          filled_execution_count: 0,
+        },
         primary_action_title: "Prepare Qualifying markets",
         primary_action_description:
           "This will discover Qualifying markets first, then continue into paper trading.",
@@ -215,7 +391,38 @@ describe("sdk", () => {
       expect.objectContaining({
         autoSelectedGpShortCode: "japan_pre",
         selectedGpShortCode: "japan_pre",
+        calendarStatus: "scheduled",
+        meetingSlug: "japanese-grand-prix",
+        sourceConflict: false,
+        overrideSourceUrl: null,
         readyToRun: true,
+        modelReady: true,
+        requiredStage: null,
+        activeModelRunId: null,
+        modelBlockers: [],
+        sessionStageStatuses: [],
+        liveTicketSummary: {
+          ticketCount: 0,
+          openTicketCount: 0,
+          filledTicketCount: 0,
+          cancelledTicketCount: 0,
+        },
+        liveExecutionSummary: {
+          executionCount: 0,
+          filledExecutionCount: 0,
+        },
+        calendarMeetings: [
+          expect.objectContaining({
+            meetingSlug: "japanese-grand-prix",
+            opsSlug: "japan",
+          }),
+        ],
+        cancelledMeetings: [
+          expect.objectContaining({
+            meetingSlug: "bahrain-grand-prix",
+            status: "cancelled",
+          }),
+        ],
         focusStatus: "upcoming",
         timelineActiveCode: "Q",
         primaryActionTitle: "Prepare Qualifying markets",
@@ -336,6 +543,17 @@ describe("sdk", () => {
         markets_discovered: 4,
         mappings_written: 2,
         markets_hydrated: 3,
+        artifacts_refreshed: [
+          {
+            gp_short_code: "japan_fp3",
+            status: "processed",
+            snapshot_id: "snapshot:fp3",
+            rebuilt_snapshot: true,
+            bet_count: 1,
+            total_pnl: 9.6,
+            reason: null,
+          },
+        ],
       }),
     });
     vi.stubGlobal("fetch", fetchMock);
@@ -359,6 +577,13 @@ describe("sdk", () => {
         marketsDiscovered: 4,
         mappingsWritten: 2,
         marketsHydrated: 3,
+        artifactsRefreshed: [
+          expect.objectContaining({
+            gpShortCode: "japan_fp3",
+            rebuiltSnapshot: true,
+            totalPnl: 9.6,
+          }),
+        ],
         refreshedSession: expect.objectContaining({
           sessionCode: "Q",
           sessionKey: 11249,

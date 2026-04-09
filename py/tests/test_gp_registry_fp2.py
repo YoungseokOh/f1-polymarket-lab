@@ -21,7 +21,14 @@ from f1_polymarket_lab.storage.models import (
     PolymarketToken,
     PolymarketTrade,
 )
-from f1_polymarket_worker.gp_registry import build_snapshot, get_gp_config, run_baseline
+from f1_polymarket_worker.gp_registry import (
+    _build_driver_map,
+    _match_market_driver,
+    _resolve_driver_with_available_results,
+    build_snapshot,
+    get_gp_config,
+    run_baseline,
+)
 from f1_polymarket_worker.pipeline import PipelineContext
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
@@ -377,6 +384,78 @@ def seed_japan_fp2_fixture(session: Session) -> None:
     session.commit()
 
 
+def test_match_market_driver_dedupes_duplicate_driver_sources() -> None:
+    drivers = [
+        F1Driver(
+            id="driver-openf1-antonelli",
+            driver_number=12,
+            full_name="Andrea Kimi Antonelli",
+            first_name="Kimi",
+            last_name="Antonelli",
+            broadcast_name="ANT",
+            raw_payload={},
+        ),
+        F1Driver(
+            id="driver-legacy-antonelli",
+            driver_number=12,
+            full_name="Kimi ANTONELLI",
+            first_name="Kimi",
+            last_name="Antonelli",
+            broadcast_name="K ANTONELLI",
+            raw_payload={},
+        ),
+    ]
+    market = PolymarketMarket(
+        id="market-antonelli",
+        question="Will Andrea Kimi Antonelli win the 2026 F1 Japanese Grand Prix?",
+        slug="antonelli-race",
+        taxonomy="race_winner",
+        condition_id="condition-antonelli",
+        active=True,
+        closed=False,
+    )
+
+    match = _match_market_driver(
+        market=market,
+        drivers=drivers,
+        driver_map=_build_driver_map(drivers),
+    )
+
+    assert match is not None
+    assert match.driver_number == 12
+
+
+def test_resolve_driver_with_available_results_prefers_result_backed_driver() -> None:
+    drivers = [
+        F1Driver(
+            id="driver-openf1-antonelli",
+            driver_number=12,
+            full_name="Andrea Kimi Antonelli",
+            first_name="Andrea Kimi",
+            last_name="Antonelli",
+            broadcast_name="A K ANTONELLI",
+            raw_payload={},
+        ),
+        F1Driver(
+            id="driver-results-antonelli",
+            driver_number=12,
+            full_name="Kimi ANTONELLI",
+            first_name="Kimi",
+            last_name="Antonelli",
+            broadcast_name="K ANTONELLI",
+            raw_payload={},
+        ),
+    ]
+
+    resolved = _resolve_driver_with_available_results(
+        driver=drivers[0],
+        drivers=drivers,
+        available_driver_ids={"driver-results-antonelli"},
+    )
+
+    assert resolved.id == "driver-results-antonelli"
+
+
 def seed_japan_q_race_fixture(session: Session) -> None:
     meeting = F1Meeting(
         id="meeting-race-1281",
@@ -439,6 +518,16 @@ def seed_japan_q_race_fixture(session: Session) -> None:
             first_name="Kimi",
             last_name="Antonelli",
             broadcast_name="K ANTONELLI",
+            team_id="team-mercedes",
+            raw_payload={},
+        ),
+        F1Driver(
+            id="driver-openf1-antonelli",
+            driver_number=12,
+            full_name="Andrea Kimi Antonelli",
+            first_name="Andrea Kimi",
+            last_name="Antonelli",
+            broadcast_name="A K ANTONELLI",
             team_id="team-mercedes",
             raw_payload={},
         ),
@@ -684,6 +773,7 @@ def test_build_japan_q_to_race_snapshot_uses_fp1_through_q_signal(
     snapshot = session.get(FeatureSnapshot, snapshot_id)
     assert snapshot is not None
     rows = pl.read_parquet(snapshot.storage_path).to_dicts()
+    assert len(rows) == 3
     assert {row["market_taxonomy"] for row in rows} == {"race_winner"}
     assert {row["source_session_code"] for row in rows} == {"Q"}
     assert {row["target_session_code"] for row in rows} == {"R"}
@@ -691,7 +781,9 @@ def test_build_japan_q_to_race_snapshot_uses_fp1_through_q_signal(
 
     antonelli_row = next(row for row in rows if row["driver_name"] == "Kimi ANTONELLI")
     piastri_row = next(row for row in rows if row["driver_name"] == "Oscar PIASTRI")
+    assert antonelli_row["driver_id"] == "driver-antonelli"
     assert antonelli_row["q_position"] == 1
+    assert antonelli_row["label_yes"] == 1
     assert piastri_row["q_position"] == 3
 
     baseline_result = run_baseline(context, config, snapshot_id=snapshot_id, min_edge=0.05)
@@ -719,3 +811,29 @@ def test_build_japan_q_to_race_snapshot_uses_fp1_through_q_signal(
         probability_by_market["market-race-antonelli"]
         > probability_by_market["market-race-piastri"]
     )
+
+
+def test_build_japan_q_to_race_snapshot_keeps_driver_without_fp1_result(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_japan_q_race_fixture(session)
+
+    fp1_antonelli = session.get(F1SessionResult, "fp1-driver-antonelli")
+    assert fp1_antonelli is not None
+    session.delete(fp1_antonelli)
+    session.commit()
+
+    config = get_gp_config("japan_q_race")
+    snapshot_result = build_snapshot(context, config, meeting_key=1281, season=2026)
+
+    snapshot = session.get(FeatureSnapshot, snapshot_result["snapshot_id"])
+    assert snapshot is not None
+    rows = pl.read_parquet(snapshot.storage_path).to_dicts()
+    assert len(rows) == 3
+
+    antonelli_row = next(row for row in rows if row["driver_id"] == "driver-antonelli")
+    assert antonelli_row["fp1_position"] is None
+    assert antonelli_row["fp1_lap_count"] is None
+    assert antonelli_row["q_position"] == 1
+    assert antonelli_row["label_yes"] == 1

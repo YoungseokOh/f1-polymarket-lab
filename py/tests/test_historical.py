@@ -502,10 +502,12 @@ def test_backfill_f1_history_all_splits_historical_and_openf1_ranges(
         season_end: int,
         include_extended: bool,
         heavy_mode: str,
+        linked_markets_only: bool,
     ) -> dict[str, object]:
         assert ctx is context
         assert include_extended is True
         assert heavy_mode == "weekend"
+        assert linked_markets_only is False
         calls.append(("openf1", season_start, season_end))
         return {"status": "completed", "sessions_hydrated": 3}
 

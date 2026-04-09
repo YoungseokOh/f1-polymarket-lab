@@ -17,6 +17,8 @@ Current schema baseline includes the required canonical table families:
   - data quality metadata uses stable symbolic IDs, so `data_quality_checks.id`, `data_quality_results.id`, and `data_quality_results.check_id` allow longer identifiers than UUID-only tables
 - F1:
   - `f1_meetings`, `f1_sessions`, `f1_drivers`, `f1_teams`
+  - `f1_meetings` now stores `meeting_slug` and `event_format` for ops-stage planning
+  - `f1_calendar_overrides` is the authority layer for schedule corrections such as cancelled or postponed GPs
   - `f1_session_results`, `f1_laps`, `f1_stints`
   - `f1_weather`, `f1_race_control`, `f1_positions`, `f1_intervals`, `f1_pit`
   - `f1_telemetry_index`, `f1_team_radio_metadata`, `f1_starting_grid`
@@ -40,5 +42,6 @@ Current schema baseline includes the required canonical table families:
 - Gold:
   - `dataset_version_manifest`
   - `feature_registry`, `feature_snapshots`, `snapshot_run_manifest`
-  - `model_runs`, `model_predictions`
+  - `model_runs`, `model_run_promotions`, `model_predictions`
   - `backtest_orders`, `backtest_positions`, `backtest_results`
+  - `live_trade_tickets`, `live_trade_executions`
