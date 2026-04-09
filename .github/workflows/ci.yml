@@ -47,6 +47,22 @@ jobs:
   test:
     runs-on: ubuntu-latest
     needs: lint
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: f1_polymarket_lab_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d f1_polymarket_lab_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      TEST_POSTGRES_URL: postgresql+psycopg://postgres:postgres@127.0.0.1:5432/f1_polymarket_lab_test
     steps:
       - uses: actions/checkout@v4
 
@@ -72,4 +88,3 @@ jobs:
 
       - name: JS tests
         run: pnpm test
-

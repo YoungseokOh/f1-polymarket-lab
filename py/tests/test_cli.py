@@ -195,3 +195,5 @@ def test_bootstrap_db_creates_lineage_tables(tmp_path: Path) -> None:
         "SELECT name FROM sqlite_master WHERE type='table' AND name='ingestion_job_runs'"
     )
     assert cur.fetchone() == ("ingestion_job_runs",)
+    cur.execute("SELECT version_num FROM alembic_version")
+    assert cur.fetchone() == ("20260408_0013",)

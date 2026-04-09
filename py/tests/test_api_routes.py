@@ -840,7 +840,7 @@ def test_ingest_demo_endpoint_returns_409_for_sqlite_lock(
 
     assert response.status_code == 409
     assert response.json()["detail"] == (
-        "Another write action is still running against the SQLite lab database. "
+        "Another write action is already in progress or the database is temporarily busy. "
         "Wait for it to finish, then retry."
     )
 

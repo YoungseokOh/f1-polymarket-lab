@@ -24,9 +24,11 @@ This repository now supports a reusable signal-combination layer that sits on to
 - Run the ensemble backtest path:
   - `uv run python -m f1_polymarket_worker.cli run-signal-ensemble-backtest --snapshot-id <id> --model-run-id <run_id> --execute`
 
-For local API development without a running Postgres instance:
+For local API development:
 
-- `DATABASE_URL_OVERRIDE=sqlite+pysqlite:///./data/lab.db make api`
+- `make infra-up`
+- `make db-upgrade`
+- `make api`
 - `make web`
 
 ## Modeling flow

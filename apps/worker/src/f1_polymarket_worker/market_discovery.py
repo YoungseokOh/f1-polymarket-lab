@@ -708,7 +708,7 @@ def _build_market_records(
 
 
 def _flush_polymarket_catalog_dependencies(ctx: PipelineContext) -> None:
-    """Persist parent market rows before child tables in SQLite fallback mode."""
+    """Persist parent market rows before dependent tables and downstream exports."""
     ctx.db.flush()
 
 

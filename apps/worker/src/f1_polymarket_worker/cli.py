@@ -6,7 +6,11 @@ from pathlib import Path
 import typer
 from f1_polymarket_lab.common import get_settings
 from f1_polymarket_lab.models import SIGNAL_ENSEMBLE_STAGE
-from f1_polymarket_lab.storage.db import Base, build_engine, db_session
+from f1_polymarket_lab.storage.db import db_session
+from f1_polymarket_lab.storage.migrations import (
+    ensure_database_schema,
+    migrate_sqlite_to_postgres,
+)
 
 from f1_polymarket_worker.backtest import (
     backfill_backtests,
@@ -63,9 +67,42 @@ app = typer.Typer(no_args_is_help=True)
 @app.command("bootstrap-db")
 def bootstrap_db() -> None:
     settings = get_settings()
-    engine = build_engine(settings.database_url)
-    Base.metadata.create_all(engine)
-    typer.echo("Database tables ensured.")
+    result = ensure_database_schema(settings.database_url)
+    typer.echo(result)
+
+
+@app.command("migrate-sqlite-to-postgres")
+def migrate_sqlite_to_postgres_command(
+    sqlite_url: str = typer.Option(
+        "sqlite+pysqlite:///./data/lab.db",
+        "--sqlite-url",
+        help="Source SQLite database URL.",
+    ),
+    postgres_url: str | None = typer.Option(
+        None,
+        "--postgres-url",
+        help="Target PostgreSQL database URL. Defaults to the configured database_url.",
+    ),
+    batch_size: int = typer.Option(1000, "--batch-size", min=1),
+    truncate_target: bool = typer.Option(
+        False,
+        "--truncate-target/--fail-if-nonempty",
+        help=(
+            "Replace existing PostgreSQL data instead of failing when target tables are "
+            "non-empty."
+        ),
+    ),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    settings = get_settings()
+    result = migrate_sqlite_to_postgres(
+        sqlite_url=sqlite_url,
+        postgres_url=postgres_url or settings.database_url,
+        batch_size=batch_size,
+        truncate_target=truncate_target,
+        execute=execute,
+    )
+    typer.echo(result)
 
 
 @app.command("ingest-demo")
@@ -129,7 +166,22 @@ def set_f1_calendar_override_command(
 
     settings = get_settings()
     with db_session(settings.database_url) as session:
-        override = set_calendar_override(session, **payload)
+        override = set_calendar_override(
+            session,
+            season=season,
+            meeting_slug=meeting_slug,
+            status=status,
+            ops_slug=ops_slug,
+            effective_round_number=effective_round_number,
+            effective_start_date_utc=parse_dt(effective_start_date_utc),
+            effective_end_date_utc=parse_dt(effective_end_date_utc),
+            effective_meeting_name=effective_meeting_name,
+            effective_country_name=effective_country_name,
+            effective_location=effective_location,
+            source_label=source_label,
+            source_url=source_url,
+            note=note,
+        )
         typer.echo(
             {
                 "status": "ok",
@@ -483,8 +535,6 @@ def validate_f1_weekend_subset_command(
     typer.echo(result)
 
 
-
-
 # ---------------------------------------------------------------------------
 # Dynamic GP quicktest commands — auto-registered from GP_REGISTRY
 # ---------------------------------------------------------------------------
@@ -514,6 +564,7 @@ def _register_gp_commands() -> None:
                         fidelity=fidelity,
                     )
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"build-{code}-snapshot")(_make_build())
@@ -528,10 +579,9 @@ def _register_gp_commands() -> None:
                 settings = get_settings()
                 with db_session(settings.database_url) as session:
                     context = PipelineContext(db=session, execute=execute)
-                    result = run_baseline(
-                        context, cfg, snapshot_id=snapshot_id, min_edge=min_edge
-                    )
+                    result = run_baseline(context, cfg, snapshot_id=snapshot_id, min_edge=min_edge)
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"run-{code}-baseline")(_make_run())
@@ -555,6 +605,7 @@ def _register_gp_commands() -> None:
                         min_edge=min_edge,
                     )
                 typer.echo(result)
+
             return _cmd
 
         app.command(f"report-{code}-quicktest")(_make_report())
@@ -613,13 +664,9 @@ def _register_gp_commands() -> None:
                                 )
                             ).all()
                             market_ids = [
-                                m.polymarket_market_id
-                                for m in mappings
-                                if m.polymarket_market_id
+                                m.polymarket_market_id for m in mappings if m.polymarket_market_id
                             ]
-                            typer.echo(
-                                f"[0/3] Refreshing prices for {len(market_ids)} markets..."
-                            )
+                            typer.echo(f"[0/3] Refreshing prices for {len(market_ids)} markets...")
                             for mid in market_ids:
                                 try:
                                     hydrate_polymarket_market(context, market_id=mid, fidelity=60)
@@ -663,9 +710,7 @@ def _register_gp_commands() -> None:
                         model_run_ids,
                         baseline=baseline,
                     )
-                    typer.echo(
-                        f"  baseline={resolved_baseline}, model_run_id={used_model_run_id}"
-                    )
+                    typer.echo(f"  baseline={resolved_baseline}, model_run_id={used_model_run_id}")
 
                     if not execute:
                         typer.echo(
@@ -1011,8 +1056,7 @@ def train_multitask_walk_forward_command(
     if not execute:
         for split in splits:
             typer.echo(
-                f"[plan] train on {split.train_meeting_keys} "
-                f"-> test {split.test_meeting_key}"
+                f"[plan] train on {split.train_meeting_keys} -> test {split.test_meeting_key}"
             )
         return
 
@@ -1050,8 +1094,7 @@ def train_multitask_walk_forward_command(
                 continue
             if not test_frames:
                 typer.echo(
-                    f"Skipping test meeting_key={split.test_meeting_key}: "
-                    "no non-empty test rows"
+                    f"Skipping test meeting_key={split.test_meeting_key}: no non-empty test rows"
                 )
                 continue
 
@@ -1072,11 +1115,11 @@ def train_multitask_walk_forward_command(
                 artifact_dir=artifact_dir,
             )
 
-            test_timestamps = [
-                value
-                for value in test_df["as_of_ts"].to_list()
-                if isinstance(value, datetime)
-            ] if "as_of_ts" in test_df.columns else []
+            test_timestamps = (
+                [value for value in test_df["as_of_ts"].to_list() if isinstance(value, datetime)]
+                if "as_of_ts" in test_df.columns
+                else []
+            )
             train_snapshot_ids = [
                 str(row["snapshot_id"])
                 for meeting_key in split.train_meeting_keys
@@ -1189,15 +1232,11 @@ def promote_model_run_command(
             if decision.eligible:
                 typer.echo(f"[plan] Would promote model_run_id={model_run_id} for stage={stage}")
             else:
-                typer.echo(
-                    "[plan] Promotion would fail: " + "; ".join(decision.failed_rules)
-                )
+                typer.echo("[plan] Promotion would fail: " + "; ".join(decision.failed_rules))
             return
 
         promotion = promote_model_run(session, model_run_id=model_run_id, stage=stage)
-        typer.echo(
-            f"Promoted model_run_id={promotion.model_run_id} for stage={promotion.stage}"
-        )
+        typer.echo(f"Promoted model_run_id={promotion.model_run_id} for stage={promotion.stage}")
 
 
 @app.command("score-multitask-snapshot")
@@ -1226,9 +1265,7 @@ def score_multitask_snapshot_command(
             raise typer.Exit(1)
 
         if not execute:
-            typer.echo(
-                f"[plan] Would score snapshot_id={snapshot_id} with champion={champion.id}"
-            )
+            typer.echo(f"[plan] Would score snapshot_id={snapshot_id} with champion={champion.id}")
             return
 
         result = score_promoted_multitask_snapshot(
@@ -1237,9 +1274,7 @@ def score_multitask_snapshot_command(
             snapshot=snapshot,
             stage=stage,
         )
-        typer.echo(
-            f"Scored snapshot_id={snapshot_id} with model_run_id={result['model_run_id']}"
-        )
+        typer.echo(f"Scored snapshot_id={snapshot_id} with model_run_id={result['model_run_id']}")
 
 
 @app.command("register-default-signals")
@@ -1357,15 +1392,21 @@ def run_multitask_autoresearch_command(
 @app.command("train-xgb-walk-forward")
 def train_xgb_walk_forward_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
     min_edge: float = typer.Option(0.05, "--min-edge"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
     execute: bool = typer.Option(False, "--execute/--plan-only"),
 ) -> None:
@@ -1419,7 +1460,8 @@ def train_xgb_walk_forward_command(
 
             model_run_id = stable_uuid("xgb-run", key_to_sid[sp.test_meeting_key], stage)
             result = train_one_split(
-                train_df, test_df,
+                train_df,
+                test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 min_edge=min_edge,
@@ -1441,7 +1483,9 @@ def train_xgb_walk_forward_command(
 
             pred_records = [ModelPrediction(**p) for p in result.predictions]
             upsert_records(
-                session, ModelPrediction, pred_records,
+                session,
+                ModelPrediction,
+                pred_records,
                 key_columns=["model_run_id", "market_id"],
             )
 
@@ -1458,15 +1502,21 @@ def train_xgb_walk_forward_command(
 @app.command("train-lgbm-walk-forward")
 def train_lgbm_walk_forward_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("lgbm_pole_quicktest", "--stage"),
     min_edge: float = typer.Option(0.05, "--min-edge"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
     execute: bool = typer.Option(False, "--execute/--plan-only"),
 ) -> None:
@@ -1518,7 +1568,8 @@ def train_lgbm_walk_forward_command(
 
             model_run_id = stable_uuid("lgbm-run", key_to_sid[sp.test_meeting_key], stage)
             result = train_one_split_lgbm(
-                train_df, test_df,
+                train_df,
+                test_df,
                 model_run_id=model_run_id,
                 stage=stage,
                 min_edge=min_edge,
@@ -1540,7 +1591,9 @@ def train_lgbm_walk_forward_command(
 
             pred_records = [ModelPrediction(**p) for p in result.predictions]
             upsert_records(
-                session, ModelPrediction, pred_records,
+                session,
+                ModelPrediction,
+                pred_records,
                 key_columns=["model_run_id", "market_id"],
             )
 
@@ -1557,15 +1610,21 @@ def train_lgbm_walk_forward_command(
 @app.command("tune-xgb-optuna")
 def tune_xgb_optuna_command(
     snapshot_ids: str = typer.Option(
-        ..., "--snapshot-ids", help="Comma-separated snapshot IDs",
+        ...,
+        "--snapshot-ids",
+        help="Comma-separated snapshot IDs",
     ),
     meeting_keys: str = typer.Option(
-        ..., "--meeting-keys", help="Comma-separated meeting keys",
+        ...,
+        "--meeting-keys",
+        help="Comma-separated meeting keys",
     ),
     stage: str = typer.Option("xgb_pole_quicktest", "--stage"),
     n_trials: int = typer.Option(50, "--n-trials"),
     min_train_gps: int = typer.Option(
-        2, "--min-train-gps", help="Min training GPs",
+        2,
+        "--min-train-gps",
+        help="Min training GPs",
     ),
 ) -> None:
     """Run Optuna hyperparameter search for XGBoost."""
@@ -1622,9 +1681,7 @@ def paper_trade_command(
 
         ensure_model_run_allowed_for_paper_trade(session, model_run_id=model_run_id)
         preds = session.scalars(
-            select(ModelPrediction).where(
-                ModelPrediction.model_run_id == model_run_id
-            )
+            select(ModelPrediction).where(ModelPrediction.model_run_id == model_run_id)
         ).all()
 
         snap = session.get(FeatureSnapshot, snapshot_id)
@@ -1686,8 +1743,10 @@ def paper_trade_command(
         )
         session.commit()
 
-        typer.echo(f"Paper trading complete: {summary['trades_executed']} trades, "
-                   f"PnL: ${summary['total_pnl']:.2f}")
+        typer.echo(
+            f"Paper trading complete: {summary['trades_executed']} trades, "
+            f"PnL: ${summary['total_pnl']:.2f}"
+        )
         typer.echo(f"Session ID: {pt_session_id}")
         typer.echo(f"Log saved: {log_path}")
 
@@ -1726,9 +1785,7 @@ def settle_paper_trade_session_command(
         # Find GP config
         cfg = next((g for g in GP_REGISTRY if g.short_code == gp_slug), None)
         if cfg is None:
-            typer.echo(
-                f"Unknown gp_slug: {gp_slug}. Known: {[g.short_code for g in GP_REGISTRY]}"
-            )
+            typer.echo(f"Unknown gp_slug: {gp_slug}. Known: {[g.short_code for g in GP_REGISTRY]}")
             raise typer.Exit(1)
 
         # Find paper trade session
@@ -1747,9 +1804,7 @@ def settle_paper_trade_session_command(
 
         # Load snapshot to get market_id → driver_id mapping
         snap = (
-            session.get(FeatureSnapshot, pt_session.snapshot_id)
-            if pt_session.snapshot_id
-            else None
+            session.get(FeatureSnapshot, pt_session.snapshot_id) if pt_session.snapshot_id else None
         )
         if snap is None or not snap.storage_path:
             typer.echo("No snapshot found for this session; cannot settle.")
@@ -1763,15 +1818,12 @@ def settle_paper_trade_session_command(
                 market_to_driver[str(mid)] = str(did)
 
         # Find the target session (Q for pole, R for race winner)
-        meeting = session.scalar(
-            select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key)
-        )
+        meeting = session.scalar(select(F1Meeting).where(F1Meeting.meeting_key == cfg.meeting_key))
         if meeting is None:
             typer.echo(f"Meeting {cfg.meeting_key} not found in DB.")
             raise typer.Exit(1)
         target_session = session.scalar(
-            select(F1Session)
-            .where(
+            select(F1Session).where(
                 F1Session.meeting_id == meeting.id,
                 F1Session.session_code == cfg.target_session_code,
             )
@@ -1785,8 +1837,7 @@ def settle_paper_trade_session_command(
 
         # Get winner (position == 1) from F1SessionResult
         winner_result = session.scalar(
-            select(F1SessionResult)
-            .where(
+            select(F1SessionResult).where(
                 F1SessionResult.session_id == target_session.id,
                 F1SessionResult.position == 1,
             )
@@ -1803,8 +1854,7 @@ def settle_paper_trade_session_command(
 
         # Load open positions
         open_positions = session.scalars(
-            select(PaperTradePosition)
-            .where(
+            select(PaperTradePosition).where(
                 PaperTradePosition.session_id == pt_session.id,
                 PaperTradePosition.status == "open",
             )
@@ -1924,7 +1974,7 @@ def h2h_signals_command(
         signal_str = s["signal"].upper()
         flag = " ★" if s["is_teammate_h2h"] and abs(s["edge"]) >= 0.10 else ""
         typer.echo(
-            f"  {s['token_driver']+' > '+s['other_driver']:<30} {tm:>3} "
+            f"  {s['token_driver'] + ' > ' + s['other_driver']:<30} {tm:>3} "
             f"{s['token_price']:>6.3f} {s['model_prob']:>6.3f} "
             f"{s['edge']:>+7.3f}  {signal_str}{flag}"
         )
@@ -1943,9 +1993,7 @@ def build_multitask_qr_snapshots_command(
 ) -> None:
     from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snapshots
 
-    checkpoint_tuple = tuple(
-        part.strip() for part in checkpoints.split(",") if part.strip()
-    )
+    checkpoint_tuple = tuple(part.strip() for part in checkpoints.split(",") if part.strip())
     settings = get_settings()
     with db_session(settings.database_url) as session:
         context = PipelineContext(db=session, execute=execute, settings=settings)

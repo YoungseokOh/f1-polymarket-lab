@@ -67,6 +67,9 @@ pythonpath = [
   "py/agent/src"
 ]
 testpaths = ["py/tests"]
+markers = [
+  "postgres_integration: requires TEST_POSTGRES_URL and runs against a temporary PostgreSQL database"
+]
 
 [tool.mypy]
 python_version = "3.10"

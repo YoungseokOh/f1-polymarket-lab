@@ -39,11 +39,17 @@ action_router = APIRouter(prefix="/api/v1", tags=["actions"])
 
 log = logging.getLogger(__name__)
 
-_SQLITE_LOCK_DETAIL = (
-    "Another write action is still running against the SQLite lab database. "
+_WRITE_CONFLICT_DETAIL = (
+    "Another write action is already in progress or the database is temporarily busy. "
     "Wait for it to finish, then retry."
 )
-_SQLITE_LOCK_MARKERS = ("database is locked", "database table is locked")
+_WRITE_CONFLICT_MARKERS = (
+    "database is locked",
+    "database table is locked",
+    "deadlock detected",
+    "could not serialize access due to concurrent update",
+    "canceling statement due to lock timeout",
+)
 
 
 def _rollback_quietly(db: Session) -> None:
@@ -53,13 +59,13 @@ def _rollback_quietly(db: Session) -> None:
         log.debug("rollback failed while handling action error", exc_info=True)
 
 
-def _is_sqlite_lock_error(exc: BaseException) -> bool:
+def _is_retryable_write_conflict(exc: BaseException) -> bool:
     current: BaseException | None = exc
     seen: set[int] = set()
 
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if any(marker in str(current).lower() for marker in _SQLITE_LOCK_MARKERS):
+        if any(marker in str(current).lower() for marker in _WRITE_CONFLICT_MARKERS):
             return True
         if isinstance(current, SQLAlchemyOperationalError) and current.orig is not None:
             current = current.orig
@@ -89,9 +95,9 @@ def _raise_action_error(
     if value_error_status is not None and isinstance(exc, ValueError):
         raise HTTPException(status_code=value_error_status, detail=str(exc)) from exc
 
-    if _is_sqlite_lock_error(exc):
+    if _is_retryable_write_conflict(exc):
         log.warning("%s", log_message, exc_info=True)
-        raise HTTPException(status_code=409, detail=_SQLITE_LOCK_DETAIL) from exc
+        raise HTTPException(status_code=409, detail=_WRITE_CONFLICT_DETAIL) from exc
 
     log.exception(log_message)
     raise HTTPException(status_code=500, detail=str(exc)) from exc

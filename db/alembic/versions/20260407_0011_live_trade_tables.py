@@ -11,44 +11,54 @@ branch_labels = None
 depends_on = None
 
 
+def _has_index(bind: sa.Connection, table_name: str, index_name: str) -> bool:
+    inspector = sa.inspect(bind)
+    return index_name in {index["name"] for index in inspector.get_indexes(table_name)}
+
+
 def upgrade() -> None:
-    op.create_table(
-        "live_trade_tickets",
-        sa.Column("id", sa.String(length=36), primary_key=True),
-        sa.Column("gp_slug", sa.String(length=128), nullable=False),
-        sa.Column("session_code", sa.String(length=16), nullable=False),
-        sa.Column("market_id", sa.String(length=64), nullable=False),
-        sa.Column("token_id", sa.String(length=128), nullable=True),
-        sa.Column("snapshot_id", sa.String(length=36), nullable=True),
-        sa.Column("model_run_id", sa.String(length=36), nullable=True),
-        sa.Column("promotion_stage", sa.String(length=64), nullable=True),
-        sa.Column("question", sa.Text(), nullable=False),
-        sa.Column("signal_action", sa.String(length=16), nullable=False),
-        sa.Column("side_label", sa.String(length=8), nullable=False),
-        sa.Column("model_prob", sa.Float(), nullable=False),
-        sa.Column("market_price", sa.Float(), nullable=False),
-        sa.Column("edge", sa.Float(), nullable=False),
-        sa.Column("recommended_size", sa.Float(), nullable=False),
-        sa.Column("observed_spread", sa.Float(), nullable=True),
-        sa.Column("max_spread", sa.Float(), nullable=True),
-        sa.Column("observed_at_utc", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("source_event_type", sa.String(length=64), nullable=True),
-        sa.Column("status", sa.String(length=32), nullable=False, server_default="open"),
-        sa.Column("rationale_json", sa.JSON(), nullable=True),
-        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-    )
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    existing_tables = set(inspector.get_table_names())
+
+    if "live_trade_tickets" not in existing_tables:
+        op.create_table(
+            "live_trade_tickets",
+            sa.Column("id", sa.String(length=36), primary_key=True),
+            sa.Column("gp_slug", sa.String(length=128), nullable=False),
+            sa.Column("session_code", sa.String(length=16), nullable=False),
+            sa.Column("market_id", sa.String(length=64), nullable=False),
+            sa.Column("token_id", sa.String(length=128), nullable=True),
+            sa.Column("snapshot_id", sa.String(length=36), nullable=True),
+            sa.Column("model_run_id", sa.String(length=36), nullable=True),
+            sa.Column("promotion_stage", sa.String(length=64), nullable=True),
+            sa.Column("question", sa.Text(), nullable=False),
+            sa.Column("signal_action", sa.String(length=16), nullable=False),
+            sa.Column("side_label", sa.String(length=8), nullable=False),
+            sa.Column("model_prob", sa.Float(), nullable=False),
+            sa.Column("market_price", sa.Float(), nullable=False),
+            sa.Column("edge", sa.Float(), nullable=False),
+            sa.Column("recommended_size", sa.Float(), nullable=False),
+            sa.Column("observed_spread", sa.Float(), nullable=True),
+            sa.Column("max_spread", sa.Float(), nullable=True),
+            sa.Column("observed_at_utc", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("source_event_type", sa.String(length=64), nullable=True),
+            sa.Column("status", sa.String(length=32), nullable=False, server_default="open"),
+            sa.Column("rationale_json", sa.JSON(), nullable=True),
+            sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+        )
     for index_name, columns in (
         ("ix_live_trade_tickets_gp_slug", ["gp_slug"]),
         ("ix_live_trade_tickets_session_code", ["session_code"]),
@@ -60,49 +70,52 @@ def upgrade() -> None:
         ("ix_live_trade_tickets_observed_at_utc", ["observed_at_utc"]),
         ("ix_live_trade_tickets_status", ["status"]),
     ):
-        op.create_index(index_name, "live_trade_tickets", columns, unique=False)
+        if _has_index(bind, "live_trade_tickets", index_name) is False:
+            op.create_index(index_name, "live_trade_tickets", columns, unique=False)
 
-    op.create_table(
-        "live_trade_executions",
-        sa.Column("id", sa.String(length=36), primary_key=True),
-        sa.Column("ticket_id", sa.String(length=36), nullable=False),
-        sa.Column("market_id", sa.String(length=64), nullable=False),
-        sa.Column("side", sa.String(length=16), nullable=False),
-        sa.Column("submitted_size", sa.Float(), nullable=False),
-        sa.Column("actual_fill_size", sa.Float(), nullable=True),
-        sa.Column("actual_fill_price", sa.Float(), nullable=True),
-        sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=False),
-        sa.Column("filled_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("operator_note", sa.Text(), nullable=True),
-        sa.Column("external_reference", sa.String(length=128), nullable=True),
-        sa.Column("realized_pnl", sa.Float(), nullable=True),
-        sa.Column(
-            "status",
-            sa.String(length=32),
-            nullable=False,
-            server_default="submitted",
-        ),
-        sa.Column(
-            "created_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(timezone=True),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.UniqueConstraint("ticket_id", name="uq_live_trade_executions_ticket"),
-    )
+    if "live_trade_executions" not in existing_tables:
+        op.create_table(
+            "live_trade_executions",
+            sa.Column("id", sa.String(length=36), primary_key=True),
+            sa.Column("ticket_id", sa.String(length=36), nullable=False),
+            sa.Column("market_id", sa.String(length=64), nullable=False),
+            sa.Column("side", sa.String(length=16), nullable=False),
+            sa.Column("submitted_size", sa.Float(), nullable=False),
+            sa.Column("actual_fill_size", sa.Float(), nullable=True),
+            sa.Column("actual_fill_price", sa.Float(), nullable=True),
+            sa.Column("submitted_at", sa.DateTime(timezone=True), nullable=False),
+            sa.Column("filled_at", sa.DateTime(timezone=True), nullable=True),
+            sa.Column("operator_note", sa.Text(), nullable=True),
+            sa.Column("external_reference", sa.String(length=128), nullable=True),
+            sa.Column("realized_pnl", sa.Float(), nullable=True),
+            sa.Column(
+                "status",
+                sa.String(length=32),
+                nullable=False,
+                server_default="submitted",
+            ),
+            sa.Column(
+                "created_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(timezone=True),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.UniqueConstraint("ticket_id", name="uq_live_trade_executions_ticket"),
+        )
     for index_name, columns in (
         ("ix_live_trade_executions_ticket_id", ["ticket_id"]),
         ("ix_live_trade_executions_market_id", ["market_id"]),
         ("ix_live_trade_executions_submitted_at", ["submitted_at"]),
         ("ix_live_trade_executions_status", ["status"]),
     ):
-        op.create_index(index_name, "live_trade_executions", columns, unique=False)
+        if _has_index(bind, "live_trade_executions", index_name) is False:
+            op.create_index(index_name, "live_trade_executions", columns, unique=False)
 
 
 def downgrade() -> None:

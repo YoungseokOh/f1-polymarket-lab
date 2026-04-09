@@ -22,6 +22,13 @@ LightGBM needs. Sonoma-or-newer machines use the Homebrew bottle path; older
 Intel macOS installs fall back to a local source build so `lightgbm` imports
 without manual runtime fixes.
 
+To migrate an existing local SQLite lab database into Postgres:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --plan-only
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --execute
+```
+
 Override the demo backfill scope if needed:
 
 ```bash
@@ -31,7 +38,7 @@ make ingest-demo DEMO_WEEKENDS=2 DEMO_MARKET_BATCHES=3
 ## Stack
 
 - **Ingestion:** OpenF1, F1DB (Jolpica), Polymarket REST + WebSocket
-- **Storage:** SQLite (local) / PostgreSQL (prod), Alembic migrations, Bronze/Silver data lake
+- **Storage:** PostgreSQL-first relational storage, Alembic migrations, Bronze/Silver data lake, SQLite source artifacts where required
 - **Features:** Snapshot-based feature registry with walk-forward splits
 - **Models:** XGBoost / LightGBM with Optuna tuning and isotonic calibration
 - **Backtesting:** Walk-forward backtest engine with PnL and calibration metrics

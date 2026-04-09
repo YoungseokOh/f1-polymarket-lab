@@ -15,6 +15,14 @@ modeling dependencies needed for the full local test suite. On macOS it also
 verifies the `libomp` runtime that LightGBM needs, using Homebrew bottles when
 available and a source-build fallback on older Intel macOS installs.
 
+If you already have local data in `data/lab.db`, migrate it into Postgres before
+continuing:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --plan-only
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli migrate-sqlite-to-postgres --execute
+```
+
 ## Full Historical Backfill
 
 ```bash
