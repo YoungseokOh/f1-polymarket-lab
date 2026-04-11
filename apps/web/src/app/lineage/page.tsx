@@ -97,9 +97,9 @@ export default async function LineagePage() {
                 : "The current issues are limited to optional live-data capture and do not block the main market, prediction, or backtest pages."}
             </p>
             <ul className="space-y-2">
-              {attentionMessages.map((message) => (
+              {attentionMessages.map((message, index) => (
                 <li
-                  key={message}
+                  key={`${index}:${message}`}
                   className="rounded-lg border border-white/[0.05] bg-white/[0.03] px-4 py-3 text-sm text-[#d1d5db]"
                 >
                   {message}

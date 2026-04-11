@@ -763,6 +763,24 @@ def test_current_weekend_operations_readiness_endpoint_serializes_worker_payload
     assert payload["actions"][0]["last_job_run"]["job_name"] == "run-weekend-cockpit"
 
 
+def test_current_weekend_operations_readiness_endpoint_supports_season_only_query(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        response = client.get(
+            "/api/v1/operations/current-weekend-readiness",
+            params={"season": 2026},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["selected_config"]["season"] == 2026
+    assert payload["selected_gp_short_code"]
+    assert isinstance(payload["actions"], list)
+
+
 def test_run_weekend_cockpit_endpoint_serializes_worker_result(
     tmp_path: Path,
     monkeypatch,

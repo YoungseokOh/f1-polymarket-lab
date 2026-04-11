@@ -16,8 +16,8 @@ export function PageStatusBanner({ messages }: PageStatusBannerProps) {
     >
       <p className="font-medium">Some data is not fully available yet.</p>
       <ul className="mt-2 list-disc space-y-1 pl-5">
-        {messages.map((message) => (
-          <li key={message}>{message}</li>
+        {messages.map((message, index) => (
+          <li key={`${index}:${message}`}>{message}</li>
         ))}
       </ul>
     </div>

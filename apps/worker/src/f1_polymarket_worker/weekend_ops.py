@@ -1247,12 +1247,20 @@ def _selected_config_for_operations(
     now: Any,
 ) -> GPConfig:
     if gp_short_code is not None:
-        return get_gp_config(gp_short_code)
+        try:
+            _, config = get_ops_stage_config(ctx.db, short_code=gp_short_code, now=now)
+            return config
+        except KeyError:
+            return get_gp_config(gp_short_code)
     if meeting_key is not None:
         return _default_config_for_meeting_key(meeting_key, season=season)
-    auto_config = _auto_select_gp_config(ctx, now=now)
+    _, auto_config = _auto_select_gp_config(ctx, now=now)
     if season is not None and auto_config.season != season:
-        season_configs = [config for config in GP_REGISTRY if config.season == season]
+        season_configs = [
+            config for _, config in list_ops_stage_configs(ctx.db, season=season)
+        ]
+        if not season_configs:
+            season_configs = [config for config in GP_REGISTRY if config.season == season]
         if not season_configs:
             raise ValueError(f"No GP config found for season={season}.")
         return min(season_configs, key=lambda config: (config.stage_rank, config.short_code))

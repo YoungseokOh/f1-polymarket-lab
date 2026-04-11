@@ -25,4 +25,21 @@ describe("PageStatusBanner", () => {
       screen.getByText("Session feed unavailable: boom"),
     ).toBeInTheDocument();
   });
+
+  it("renders duplicate degraded messages without collapsing them", () => {
+    render(
+      <PageStatusBanner
+        messages={[
+          "Recent ingestion run failed for refresh-driver-affinity.",
+          "Recent ingestion run failed for refresh-driver-affinity.",
+        ]}
+      />,
+    );
+
+    expect(
+      screen.getAllByText(
+        "Recent ingestion run failed for refresh-driver-affinity.",
+      ),
+    ).toHaveLength(2);
+  });
 });
