@@ -8,6 +8,7 @@ import type {
   IngestionJobRun,
 } from "@f1/shared-types";
 import { Badge, Panel } from "@f1/ui";
+import React from "react";
 import { describeQualityDataset } from "../../lib/display";
 import { type Column, DataTable } from "./data-table";
 import { StatusIndicator } from "./status-indicator";
@@ -50,6 +51,37 @@ function summarizeRecord(
       return `${key}=…`;
     })
     .join(" · ");
+}
+
+function formatSummaryLabel(key: string): string {
+  const normalized = key
+    .replace(/^f1_/, "F1 ")
+    .replace(/^polymarket_/, "Polymarket ")
+    .replace(/_/g, " ");
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function demoIngestSummary(
+  job: IngestionJobRun,
+): Array<{ key: string; label: string; value: number }> {
+  if (job.jobName !== "ingest-demo" || !job.cursorAfter) {
+    return [];
+  }
+
+  return Object.entries(job.cursorAfter).reduce<
+    Array<{ key: string; label: string; value: number }>
+  >((details, [key, value]) => {
+    if (key === "records_written" || typeof value !== "number") {
+      return details;
+    }
+
+    details.push({
+      key,
+      label: formatSummaryLabel(key),
+      value,
+    });
+    return details;
+  }, []);
 }
 
 const freshnessColumns: Column<FreshnessRecord>[] = [
@@ -108,9 +140,44 @@ const jobColumns: Column<IngestionJobRun>[] = [
   {
     key: "jobName",
     header: "Job",
-    render: (job) => (
-      <span className="font-medium text-white">{job.jobName}</span>
-    ),
+    render: (job) => {
+      const plannedInputs = summarizeRecord(job.plannedInputs, "");
+      const details = demoIngestSummary(job);
+      const cursorSummary =
+        job.jobName === "ingest-demo"
+          ? ""
+          : summarizeRecord(job.cursorAfter, "");
+
+      return (
+        <div className="space-y-2">
+          <p className="font-medium text-white">{job.jobName}</p>
+          {plannedInputs ? (
+            <p className="text-xs text-[#9ca3af]">Inputs {plannedInputs}</p>
+          ) : null}
+          {details.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {details.map((detail) => (
+                <span
+                  key={detail.key}
+                  className="inline-flex items-center gap-1 rounded-full border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[11px]"
+                >
+                  <span className="text-[#9ca3af]">{detail.label}</span>
+                  <span className="tabular-nums text-white">
+                    {detail.value.toLocaleString()}
+                  </span>
+                </span>
+              ))}
+            </div>
+          ) : null}
+          {cursorSummary ? (
+            <p className="text-xs text-[#9ca3af]">Cursor {cursorSummary}</p>
+          ) : null}
+          {job.errorMessage ? (
+            <p className="text-xs text-[#fca5a5]">{job.errorMessage}</p>
+          ) : null}
+        </div>
+      );
+    },
     sortValue: (job) => job.jobName,
   },
   {
@@ -136,7 +203,7 @@ const jobColumns: Column<IngestionJobRun>[] = [
     header: "Records",
     render: (job) => (
       <span className="tabular-nums text-sm text-[#d1d5db]">
-        {job.recordsWritten ?? "—"}
+        {job.recordsWritten != null ? job.recordsWritten.toLocaleString() : "—"}
       </span>
     ),
     sortValue: (job) => job.recordsWritten ?? -1,

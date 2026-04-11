@@ -50,7 +50,10 @@ describe("DashboardActions", () => {
           dataset: "demo_ingest",
           status: "completed",
           executeMode: "execute",
+          plannedInputs: null,
+          cursorAfter: null,
           recordsWritten: 321,
+          errorMessage: null,
           startedAt: "2026-04-11T10:00:00Z",
           finishedAt: "2026-04-11T10:02:00Z",
         }}
@@ -72,7 +75,10 @@ describe("DashboardActions", () => {
         dataset: "demo_ingest",
         status: "completed",
         executeMode: "execute",
+        plannedInputs: null,
+        cursorAfter: null,
         recordsWritten: 456,
+        errorMessage: null,
         startedAt: "2026-04-11T10:05:00Z",
         finishedAt: "2026-04-11T10:06:00Z",
       } satisfies IngestionJobRun,
@@ -87,7 +93,10 @@ describe("DashboardActions", () => {
           dataset: "demo_ingest",
           status: "running",
           executeMode: "execute",
+          plannedInputs: null,
+          cursorAfter: null,
           recordsWritten: null,
+          errorMessage: null,
           startedAt: "2026-04-11T10:05:00Z",
           finishedAt: null,
         }}
@@ -96,7 +105,9 @@ describe("DashboardActions", () => {
 
     expect(screen.getByText("Running")).toBeInTheDocument();
     expect(
-      screen.getByText("Refreshing automatically while this ingest is running."),
+      screen.getByText(
+        "Refreshing automatically while this ingest is running.",
+      ),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -124,7 +135,10 @@ describe("DashboardActions", () => {
         dataset: "demo_ingest",
         status: "running",
         executeMode: "execute",
+        plannedInputs: null,
+        cursorAfter: null,
         recordsWritten: null,
+        errorMessage: null,
         startedAt: "2026-04-11T10:10:00Z",
         finishedAt: null,
       } satisfies IngestionJobRun,

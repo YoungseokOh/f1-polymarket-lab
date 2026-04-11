@@ -47,7 +47,10 @@ export interface IngestionJobRun {
   dataset: string;
   status: string;
   executeMode: string;
+  plannedInputs: Record<string, unknown> | null;
+  cursorAfter: Record<string, unknown> | null;
   recordsWritten: number | null;
+  errorMessage: string | null;
   startedAt: string;
   finishedAt: string | null;
 }

@@ -111,7 +111,10 @@ describe("sdk", () => {
             dataset: "sessions",
             status: "completed",
             execute_mode: "execute",
+            planned_inputs: { season: 2026 },
+            cursor_after: { synced_at: "2026-03-28T01:01:00Z" },
             records_written: 22,
+            error_message: null,
             started_at: "2026-03-28T01:00:00Z",
             finished_at: "2026-03-28T01:01:00Z",
           },
@@ -175,7 +178,10 @@ describe("sdk", () => {
       expect.objectContaining({
         jobName: "sync-calendar",
         executeMode: "execute",
+        plannedInputs: { season: 2026 },
+        cursorAfter: { synced_at: "2026-03-28T01:01:00Z" },
         recordsWritten: 22,
+        errorMessage: null,
       }),
     );
     expect(cursors[0]).toEqual(

@@ -13,6 +13,7 @@ from f1_polymarket_lab.storage.models import (
     F1CalendarOverride,
     F1Meeting,
     F1Session,
+    IngestionJobRun,
     LiveTradeExecution,
     LiveTradeTicket,
     ModelRun,
@@ -760,6 +761,52 @@ def test_current_weekend_operations_readiness_endpoint_serializes_worker_payload
     assert payload["selected_gp_short_code"] == "japan_fp1_fp2"
     assert payload["actions"][0]["key"] == "weekend_cockpit"
     assert payload["actions"][0]["last_job_run"]["job_name"] == "run-weekend-cockpit"
+
+
+def test_lineage_jobs_endpoint_exposes_run_details(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'api-test.sqlite'}", future=True)
+        with Session(engine) as session:
+            session.add(
+                IngestionJobRun(
+                    id="job-demo-1",
+                    job_name="ingest-demo",
+                    source="demo",
+                    dataset="demo_ingest",
+                    status="completed",
+                    execute_mode="execute",
+                    planned_inputs={"season": 2026, "weekends": 1, "market_batches": 1},
+                    cursor_after={
+                        "f1_sessions": 120,
+                        "polymarket_markets": 67,
+                        "entity_mappings": 86,
+                        "feature_registry": 54,
+                        "records_written": 4174,
+                    },
+                    records_written=4174,
+                    error_message=None,
+                    started_at=datetime(2026, 4, 11, 13, 2, tzinfo=timezone.utc),
+                    finished_at=datetime(2026, 4, 11, 13, 3, tzinfo=timezone.utc),
+                )
+            )
+            session.commit()
+        engine.dispose()
+
+        response = client.get("/api/v1/lineage/jobs", params={"limit": 5})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload[0]["job_name"] == "ingest-demo"
+    assert payload[0]["planned_inputs"] == {
+        "season": 2026,
+        "weekends": 1,
+        "market_batches": 1,
+    }
+    assert payload[0]["cursor_after"]["f1_sessions"] == 120
+    assert payload[0]["cursor_after"]["entity_mappings"] == 86
+    assert payload[0]["error_message"] is None
 
 
 def test_current_weekend_operations_readiness_endpoint_supports_season_only_query(

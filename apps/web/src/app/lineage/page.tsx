@@ -9,7 +9,7 @@ import {
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
 import { LineageTableSection } from "../_components/lineage-table-section";
 
-export const revalidate = 300;
+export const revalidate = 0;
 
 export default async function LineagePage() {
   const [
@@ -59,13 +59,20 @@ export default async function LineagePage() {
   const coreFailingChecks = failingChecks.filter(
     (result) => !describeQualityDataset(result.dataset).optional,
   );
+  const failedJobMessages = Array.from(
+    failedJobs.reduce((counts, job) => {
+      counts.set(job.jobName, (counts.get(job.jobName) ?? 0) + 1);
+      return counts;
+    }, new Map<string, number>()),
+  ).map(([jobName, count]) =>
+    count === 1
+      ? `Recent ingestion run failed for ${jobName}. Check the ingestion panel below for the run timestamp and source dataset.`
+      : `${count} recent ingestion runs failed for ${jobName}. Check the ingestion panel below for the run timestamp and source dataset.`,
+  );
   const attentionMessages = [
     ...coreFailingChecks.map(describeQualityAlert),
     ...optionalFailingChecks.map(describeQualityAlert),
-    ...failedJobs.map(
-      (job) =>
-        `Recent ingestion run failed for ${job.jobName}. Check the ingestion panel below for the run timestamp and source dataset.`,
-    ),
+    ...failedJobMessages,
   ];
 
   return (

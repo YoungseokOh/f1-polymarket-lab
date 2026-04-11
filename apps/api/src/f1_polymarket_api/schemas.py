@@ -107,7 +107,10 @@ class IngestionJobRunResponse(BaseModel):
     dataset: str
     status: str
     execute_mode: str
+    planned_inputs: dict[str, object] | None = None
+    cursor_after: dict[str, object] | None = None
     records_written: int | None
+    error_message: str | None = None
     started_at: datetime
     finished_at: datetime | None
 

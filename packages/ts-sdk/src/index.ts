@@ -9,10 +9,10 @@ import type {
   CancelLiveTradeTicketResponse,
   CaptureLiveWeekendRequest,
   CaptureLiveWeekendResponse,
-  CurrentWeekendOperationsReadiness,
   ClearCalendarOverrideRequest,
   CreateLiveTradeTicketRequest,
   CreateLiveTradeTicketResponse,
+  CurrentWeekendOperationsReadiness,
   CursorState,
   DataQualityResult,
   DriverAffinityEntry,
@@ -202,7 +202,10 @@ type IngestionJobRunApi = {
   dataset: string;
   status: string;
   execute_mode: string;
+  planned_inputs: Record<string, unknown> | null;
+  cursor_after: Record<string, unknown> | null;
   records_written: number | null;
+  error_message: string | null;
   started_at: string;
   finished_at: string | null;
 };
@@ -310,7 +313,10 @@ function mapIngestionJobRun(record: IngestionJobRunApi): IngestionJobRun {
     dataset: record.dataset,
     status: record.status,
     executeMode: record.execute_mode,
+    plannedInputs: record.planned_inputs,
+    cursorAfter: record.cursor_after,
     recordsWritten: record.records_written,
+    errorMessage: record.error_message,
     startedAt: record.started_at,
     finishedAt: record.finished_at,
   };
@@ -1997,7 +2003,9 @@ function mapRunWeekendCockpitResponse(
     modelRunId: record.model_run_id,
     ptSessionId: record.pt_session_id,
     ...(record.job_run_id !== undefined ? { jobRunId: record.job_run_id } : {}),
-    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.report_path !== undefined
+      ? { reportPath: record.report_path }
+      : {}),
     ...(record.preflight_summary !== undefined
       ? {
           preflightSummary: record.preflight_summary
@@ -2112,7 +2120,9 @@ function mapCaptureLiveWeekendResponse(
     marketCount: record.market_count,
     polymarketMarketIds: record.polymarket_market_ids,
     recordsWritten: record.records_written,
-    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.report_path !== undefined
+      ? { reportPath: record.report_path }
+      : {}),
     ...(record.preflight_summary !== undefined
       ? {
           preflightSummary: record.preflight_summary
@@ -2308,7 +2318,9 @@ function mapRefreshDriverAffinityResponse(
     sourceMaxSessionEndUtc: record.source_max_session_end_utc,
     hydratedSessionKeys: record.hydrated_session_keys,
     ...(record.job_run_id !== undefined ? { jobRunId: record.job_run_id } : {}),
-    ...(record.report_path !== undefined ? { reportPath: record.report_path } : {}),
+    ...(record.report_path !== undefined
+      ? { reportPath: record.report_path }
+      : {}),
     ...(record.preflight_summary !== undefined
       ? {
           preflightSummary: record.preflight_summary

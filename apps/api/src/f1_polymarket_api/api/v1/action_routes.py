@@ -72,6 +72,7 @@ def _run_ingest_demo_background(
                 db,
                 run,
                 status="completed",
+                cursor_after=summary,
                 records_written=summary.get("records_written", 0),
             )
         db.commit()
