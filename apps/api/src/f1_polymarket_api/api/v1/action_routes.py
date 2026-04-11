@@ -49,23 +49,43 @@ class _ActionBusyError(RuntimeError):
 def _run_ingest_demo_background(
     session_maker,
     *,
+    job_run_id: str,
     season: int,
     weekends: int,
     market_batches: int,
 ) -> None:
+    from f1_polymarket_lab.storage.models import IngestionJobRun
     from f1_polymarket_worker.demo_ingest import ingest_demo
+    from f1_polymarket_worker.lineage import finish_job_run
 
     db = session_maker()
     try:
+        run = db.get(IngestionJobRun, job_run_id)
         ingest_demo(
             db,
             season=season,
             weekends=weekends,
             market_batches=market_batches,
         )
+        if run is not None:
+            finish_job_run(db, run, status="completed", records_written=0)
         db.commit()
-    except Exception:
+    except Exception as exc:
         db.rollback()
+        try:
+            run = db.get(IngestionJobRun, job_run_id)
+            if run is not None:
+                finish_job_run(
+                    db,
+                    run,
+                    status="failed",
+                    records_written=0,
+                    error_message=str(exc),
+                )
+                db.commit()
+        except Exception:
+            db.rollback()
+            log.exception("ingest-demo background job status update failed")
         log.exception("ingest-demo background job failed")
     finally:
         db.close()
@@ -78,14 +98,46 @@ def _start_ingest_demo_background(
     season: int,
     weekends: int,
     market_batches: int,
-) -> None:
+) -> str:
+    from f1_polymarket_worker.lineage import ensure_job_definition, start_job_run
+
     if not _INGEST_DEMO_LOCK.acquire(blocking=False):
         raise _ActionBusyError(_WRITE_CONFLICT_DETAIL)
+
+    db = session_maker()
+    try:
+        definition = ensure_job_definition(
+            db,
+            job_name="ingest-demo",
+            source="demo",
+            dataset="demo_ingest",
+            description="Seed a lightweight demo ingestion run for the dashboard.",
+            schedule_hint="manual",
+        )
+        run = start_job_run(
+            db,
+            definition=definition,
+            execute=True,
+            planned_inputs={
+                "season": season,
+                "weekends": weekends,
+                "market_batches": market_batches,
+            },
+        )
+        db.commit()
+        job_run_id = run.id
+    except Exception:
+        db.rollback()
+        _INGEST_DEMO_LOCK.release()
+        raise
+    finally:
+        db.close()
 
     thread = threading.Thread(
         target=_run_ingest_demo_background,
         kwargs={
             "session_maker": session_maker,
+            "job_run_id": job_run_id,
             "season": season,
             "weekends": weekends,
             "market_batches": market_batches,
@@ -95,6 +147,7 @@ def _start_ingest_demo_background(
     )
     try:
         thread.start()
+        return job_run_id
     except Exception:
         _INGEST_DEMO_LOCK.release()
         raise
@@ -169,7 +222,7 @@ def action_ingest_demo(
     request: Request,
 ) -> ActionStatusResponse:
     try:
-        _start_ingest_demo_background(
+        job_run_id = _start_ingest_demo_background(
             _get_session_maker(request),
             season=body.season,
             weekends=body.weekends,
@@ -181,10 +234,11 @@ def action_ingest_demo(
             message=(
                 "Demo ingestion started "
                 f"(season={body.season}, weekends={body.weekends}, "
-                f"market_batches={body.market_batches})."
+                f"market_batches={body.market_batches}, job_run_id={job_run_id})."
             ),
             details={
                 "queued": True,
+                "job_run_id": job_run_id,
                 "season": body.season,
                 "weekends": body.weekends,
                 "market_batches": body.market_batches,

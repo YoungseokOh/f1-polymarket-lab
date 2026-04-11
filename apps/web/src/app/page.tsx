@@ -1,6 +1,11 @@
 import Link from "next/link";
 
-import type { F1Meeting, F1Session, PolymarketMarket } from "@f1/shared-types";
+import type {
+  F1Meeting,
+  F1Session,
+  IngestionJobRun,
+  PolymarketMarket,
+} from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
 
@@ -66,6 +71,7 @@ export default async function HomePage() {
     modelRunsState,
     predictionsState,
     backtestResultsState,
+    ingestionJobsState,
   ] = await Promise.all([
     loadResource(
       sdk.health,
@@ -83,6 +89,7 @@ export default async function HomePage() {
     loadResource(sdk.modelRuns, [], "Model runs"),
     loadResource(sdk.predictions, [], "Predictions"),
     loadResource(sdk.backtestResults, [], "Backtest results"),
+    loadResource(() => sdk.ingestionJobs({ limit: 25 }), [], "Ingestion jobs"),
   ]);
   const { season: scheduleSeason, meetings } = selectScheduleMeetings(
     meetingsState.data,
@@ -104,6 +111,10 @@ export default async function HomePage() {
   const modelRuns = modelRunsState.data;
   const predictions = predictionsState.data;
   const backtestResults = backtestResultsState.data;
+  const latestDemoIngestJob =
+    ingestionJobsState.data.find(
+      (job): job is IngestionJobRun => job.jobName === "ingest-demo",
+    ) ?? null;
   const degradedMessages = collectResourceErrors([
     healthState,
     freshnessState,
@@ -114,6 +125,7 @@ export default async function HomePage() {
     modelRunsState,
     predictionsState,
     backtestResultsState,
+    ingestionJobsState,
   ]);
 
   const now = new Date();
@@ -216,7 +228,7 @@ export default async function HomePage() {
       </section>
 
       {/* Quick Actions */}
-      <DashboardActions />
+      <DashboardActions latestDemoIngestJob={latestDemoIngestJob} />
 
       {/* Stats Row */}
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">

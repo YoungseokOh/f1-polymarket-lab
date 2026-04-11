@@ -1035,6 +1035,7 @@ def test_ingest_demo_endpoint_starts_background_job(
     def fake_start(session_maker, **kwargs):
         calls["session_maker"] = session_maker
         calls.update(kwargs)
+        return "job-demo-1"
 
     monkeypatch.setattr(
         "f1_polymarket_api.api.v1.action_routes._start_ingest_demo_background",
@@ -1050,6 +1051,7 @@ def test_ingest_demo_endpoint_starts_background_job(
     payload = response.json()
     assert payload["action"] == "ingest-demo"
     assert payload["details"]["queued"] is True
+    assert payload["details"]["job_run_id"] == "job-demo-1"
     assert calls["season"] == 2026
     assert calls["weekends"] == 1
     assert calls["market_batches"] == 1
