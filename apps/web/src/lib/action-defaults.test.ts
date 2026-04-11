@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  buildDashboardDemoIngestRequest,
   buildDashboardMarketSyncRequest,
   buildLatestSessionRefreshRequest,
 } from "./action-defaults";
@@ -14,6 +15,16 @@ describe("buildDashboardMarketSyncRequest", () => {
       search_fallback: false,
       start_year: 2026,
       end_year: 2026,
+    });
+  });
+});
+
+describe("buildDashboardDemoIngestRequest", () => {
+  it("keeps the dashboard demo ingest lightweight", () => {
+    expect(buildDashboardDemoIngestRequest()).toEqual({
+      season: 2026,
+      weekends: 1,
+      market_batches: 1,
     });
   });
 });

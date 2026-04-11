@@ -1,6 +1,8 @@
 import type {
   CurrentWeekendOperationsReadiness,
   DriverAffinityReport,
+  F1Meeting,
+  F1Session,
   PaperTradePosition,
   PaperTradeSession,
   PolymarketMarket,
@@ -10,6 +12,7 @@ import { sdk } from "@f1/ts-sdk";
 import { Panel, StatCard } from "@f1/ui";
 import { PageStatusBanner } from "../../components/page-status-banner";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { selectScheduleMeetings } from "../../lib/schedule";
 import { meetingRefreshTargetForConfig } from "../../lib/session-refresh";
 import { DriverAffinitySummary } from "../_components/driver-affinity-summary";
 import { WeekendCockpitPanel } from "../_components/weekend-cockpit-panel";
@@ -333,42 +336,57 @@ function HowPaperTradingWorks({
 }
 
 export default async function PaperTradingPage() {
-  const affinityRefreshState = await loadResource(
-    () => sdk.refreshDriverAffinity({ season: 2026 }),
-    null as RefreshDriverAffinityResponse | null,
-    "Driver affinity refresh",
-  );
-  const affinityState = await loadResource(
-    () => sdk.driverAffinity(2026),
-    null as DriverAffinityReport | null,
-    "Driver affinity",
-  );
+  const [
+    affinityRefreshState,
+    affinityState,
+    cockpitState,
+    readinessState,
+    meetingsState,
+    paperSessionsState,
+  ] = await Promise.all([
+    loadResource(
+      () => sdk.refreshDriverAffinity({ season: 2026 }),
+      null as RefreshDriverAffinityResponse | null,
+      "Driver affinity refresh",
+    ),
+    loadResource(
+      () => sdk.driverAffinity(2026),
+      null as DriverAffinityReport | null,
+      "Driver affinity",
+    ),
+    loadResource(
+      () => sdk.weekendCockpitStatus(),
+      null,
+      "Weekend cockpit",
+    ),
+    loadResource(
+      () => sdk.currentWeekendReadiness(),
+      null as CurrentWeekendOperationsReadiness | null,
+      "Weekend operations readiness",
+    ),
+    loadResource(
+      () => sdk.meetings({ limit: 100 }),
+      [] as F1Meeting[],
+      "Meeting feed",
+    ),
+    loadResource(
+      () => sdk.paperTradeSessions(),
+      [] as PaperTradeSession[],
+      "Paper trading sessions",
+    ),
+  ]);
   const affinityReport =
     affinityState.data ?? affinityRefreshState.data?.report ?? null;
-  const cockpitState = await loadResource(
-    () => sdk.weekendCockpitStatus(),
-    null,
-    "Weekend cockpit",
-  );
-  const readinessState = await loadResource(
-    () => sdk.currentWeekendReadiness(),
-    null as CurrentWeekendOperationsReadiness | null,
-    "Weekend operations readiness",
+  const { season: scheduleSeason, meetings } = selectScheduleMeetings(
+    meetingsState.data,
   );
   const f1SessionsState = await loadResource(
-    () => sdk.sessions({ limit: 250 }),
-    [],
+    () =>
+      scheduleSeason == null
+        ? Promise.resolve([] as F1Session[])
+        : sdk.sessions({ limit: 1000, season: scheduleSeason }),
+    [] as F1Session[],
     "Session feed",
-  );
-  const meetingsState = await loadResource(
-    () => sdk.meetings({ limit: 100 }),
-    [],
-    "Meeting feed",
-  );
-  const paperSessionsState = await loadResource(
-    () => sdk.paperTradeSessions(),
-    [] as PaperTradeSession[],
-    "Paper trading sessions",
   );
   const sessions = paperSessionsState.data;
   const positionsState = await loadResource(
@@ -444,7 +462,7 @@ export default async function PaperTradingPage() {
       config.short_code,
       meetingRefreshTargetForConfig(
         config,
-        meetingsState.data,
+        meetings,
         f1SessionsState.data,
       ),
     ]),

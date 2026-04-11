@@ -42,7 +42,7 @@ from f1_polymarket_worker.backtest import (
     collect_resolutions,
     settle_backtest,
 )
-from f1_polymarket_worker.gp_registry import get_gp_config
+from f1_polymarket_worker.gp_registry import GPConfig, get_gp_config, resolve_gp_config
 from f1_polymarket_worker.pipeline import PipelineContext
 from f1_polymarket_worker.quicktest import (
     _enrich_snapshot_probabilities,
@@ -659,12 +659,16 @@ def _seed_snapshot_for_backfill(
     session: Session,
     tmp_path: Path,
     *,
-    gp_short_code: str,
+    gp_short_code: str | None = None,
+    config: GPConfig | None = None,
     labels: list[int | None],
     snapshot_id: str | None = None,
     seed_target_results: bool = False,
 ) -> FeatureSnapshot:
-    config = get_gp_config(gp_short_code)
+    if config is None:
+        if gp_short_code is None:
+            raise ValueError("gp_short_code or config is required")
+        config = get_gp_config(gp_short_code)
     meeting = session.get(F1Meeting, f"meeting:{config.meeting_key}") or F1Meeting(
         id=f"meeting:{config.meeting_key}",
         meeting_key=config.meeting_key,
@@ -672,7 +676,10 @@ def _seed_snapshot_for_backfill(
         meeting_name=config.name,
         raw_payload={},
     )
-    session_record = session.get(F1Session, f"session:{config.meeting_key}:{config.short_code}") or F1Session(
+    session_record = session.get(
+        F1Session,
+        f"session:{config.meeting_key}:{config.short_code}",
+    ) or F1Session(
         id=f"session:{config.meeting_key}:{config.short_code}",
         meeting_id=meeting.id,
         session_key=config.meeting_key,
@@ -718,6 +725,60 @@ def _seed_snapshot_for_backfill(
 
 
 class TestBackfillBacktests:
+    def test_backfills_dynamic_ops_stage_snapshot(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+    ) -> None:
+        session, ctx = build_context(tmp_path)
+        session.merge(
+            F1Meeting(
+                id="meeting:1284",
+                meeting_key=1284,
+                season=2026,
+                round_number=4,
+                meeting_name="Miami Grand Prix",
+                meeting_slug="miami-grand-prix",
+                event_format="sprint",
+                raw_payload={},
+            )
+        )
+        session.commit()
+
+        config = resolve_gp_config("miami_fp1_q", db=session)
+        snapshot = _seed_snapshot_for_backfill(
+            session,
+            tmp_path,
+            config=config,
+            labels=[1, 0],
+        )
+
+        baseline_calls: list[str] = []
+        settle_calls: list[str] = []
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.gp_registry.run_baseline",
+            lambda *_args, snapshot_id, **_kwargs: baseline_calls.append(snapshot_id) or {},
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.backtest.settle_single_gp",
+            lambda *_args, snapshot_id, **_kwargs: settle_calls.append(snapshot_id)
+            or {
+                "backtest": {
+                    "backtest_run_id": "bt-miami",
+                    "metrics": {"bet_count": 1, "total_pnl": 2.5},
+                }
+            },
+        )
+
+        result = backfill_backtests(ctx, gp_short_code="miami_fp1_q")
+
+        assert result["processed_count"] == 1
+        assert result["skipped_count"] == 0
+        assert baseline_calls == [snapshot.id]
+        assert settle_calls == [snapshot.id]
+        assert result["processed"][0]["gp_short_code"] == "miami_fp1_q"
+
     def test_backfills_labeled_snapshot(self, tmp_path: Path, monkeypatch) -> None:
         session, ctx = build_context(tmp_path)
         snapshot = _seed_snapshot_for_backfill(
@@ -737,7 +798,12 @@ class TestBackfillBacktests:
         monkeypatch.setattr(
             "f1_polymarket_worker.backtest.settle_single_gp",
             lambda *_args, snapshot_id, **_kwargs: settle_calls.append(snapshot_id)
-            or {"backtest": {"backtest_run_id": "bt-1", "metrics": {"bet_count": 2, "total_pnl": 4.5}}},
+            or {
+                "backtest": {
+                    "backtest_run_id": "bt-1",
+                    "metrics": {"bet_count": 2, "total_pnl": 4.5},
+                }
+            },
         )
 
         result = backfill_backtests(ctx, gp_short_code="japan_fp3")

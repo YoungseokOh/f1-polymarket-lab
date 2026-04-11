@@ -11,6 +11,7 @@ import {
   formatSessionCodeLabel,
 } from "../../lib/display";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { selectScheduleMeetings } from "../../lib/schedule";
 import { latestEndedSessionForMeeting } from "../../lib/session-refresh";
 import { MeetingRefreshButton } from "../_components/meeting-refresh-button";
 
@@ -259,12 +260,23 @@ function renderMeetingSection(
 }
 
 export default async function SessionsPage() {
-  const [sessionsState, meetingsState] = await Promise.all([
-    loadResource(() => sdk.sessions({ limit: 250 }), [], "Session feed"),
-    loadResource(() => sdk.meetings({ limit: 100 }), [], "Meeting feed"),
-  ]);
+  const meetingsState = await loadResource(
+    () => sdk.meetings({ limit: 100 }),
+    [] as F1Meeting[],
+    "Meeting feed",
+  );
+  const { season: scheduleSeason, meetings } = selectScheduleMeetings(
+    meetingsState.data,
+  );
+  const sessionsState = await loadResource(
+    () =>
+      scheduleSeason == null
+        ? Promise.resolve([] as F1Session[])
+        : sdk.sessions({ limit: 1000, season: scheduleSeason }),
+    [] as F1Session[],
+    "Session feed",
+  );
   const sessions = sessionsState.data;
-  const meetings = meetingsState.data;
   const degradedMessages = collectResourceErrors([
     sessionsState,
     meetingsState,

@@ -43,6 +43,7 @@ from f1_polymarket_lab.storage.models import (
 )
 from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy import func, select
+from sqlalchemy.orm import Session
 
 from f1_polymarket_worker.lineage import (
     ensure_job_definition,
@@ -461,6 +462,24 @@ def get_gp_config(short_code: str) -> GPConfig:
         if config.short_code == short_code:
             return config
     raise KeyError(f"Unknown GP short_code: {short_code!r}")
+
+
+def resolve_gp_config(
+    short_code: str,
+    *,
+    db: Session | None = None,
+    now: datetime | None = None,
+) -> GPConfig:
+    """Resolve dynamic ops-stage configs first, then fall back to the legacy registry."""
+    if db is not None:
+        from f1_polymarket_worker.ops_calendar import get_ops_stage_config
+
+        try:
+            _, config = get_ops_stage_config(db, short_code=short_code, now=now)
+            return config
+        except KeyError:
+            pass
+    return get_gp_config(short_code)
 
 
 def config_stage_label(config: GPConfig) -> str:

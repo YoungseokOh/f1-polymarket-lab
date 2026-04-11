@@ -386,8 +386,8 @@ class OpsCalendarMeetingResponse(BaseModel):
 
 class IngestDemoRequest(BaseModel):
     season: int = 2026
-    weekends: int = 2
-    market_batches: int = 3
+    weekends: int = 1
+    market_batches: int = 1
 
 
 class SyncCalendarRequest(BaseModel):

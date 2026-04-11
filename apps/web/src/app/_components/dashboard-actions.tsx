@@ -3,7 +3,10 @@
 import { sdk } from "@f1/ts-sdk";
 import { Panel } from "@f1/ui";
 import { useRouter } from "next/navigation";
-import { buildDashboardMarketSyncRequest } from "../../lib/action-defaults";
+import {
+  buildDashboardDemoIngestRequest,
+  buildDashboardMarketSyncRequest,
+} from "../../lib/action-defaults";
 import { ActionButton } from "./action-button";
 
 export function DashboardActions() {
@@ -35,7 +38,7 @@ export function DashboardActions() {
           label="Ingest Demo Data"
           variant="secondary"
           onAction={async () => {
-            const res = await sdk.ingestDemo({ season: 2026 });
+            const res = await sdk.ingestDemo(buildDashboardDemoIngestRequest());
             router.refresh();
             return res.message;
           }}

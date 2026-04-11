@@ -64,6 +64,7 @@ from f1_polymarket_worker.gp_registry import (
     config_display_label,
     config_stage_label,
     get_gp_config,
+    resolve_gp_config,
     run_baseline,
     select_model_run_id,
 )
@@ -2895,7 +2896,7 @@ def run_weekend_cockpit(
     discover_max_pages: int = 5,
 ) -> dict[str, Any]:
     status = get_weekend_cockpit_status(ctx, gp_short_code=gp_short_code)
-    config = get_gp_config(status["selected_gp_short_code"])
+    config = resolve_gp_config(status["selected_gp_short_code"], db=ctx.db)
     meeting = status["meeting"]
     preflight_summary = _weekend_cockpit_action_status(
         ctx,

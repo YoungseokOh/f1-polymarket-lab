@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import sqlite3
 from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
 
+from f1_polymarket_api.api.v1 import action_routes
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.main import app
 from f1_polymarket_lab.storage.db import Base
@@ -23,7 +23,6 @@ from f1_polymarket_lab.storage.models import (
 )
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
-from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session, sessionmaker
 
 
@@ -919,6 +918,50 @@ def test_backfill_backtests_endpoint_serializes_worker_result(
     assert "Settled 1 snapshot" in payload["message"]
 
 
+def test_run_backtest_endpoint_accepts_dynamic_ops_stage_code(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_build_snapshot(*args, **kwargs):
+        config = kwargs.get("config") or args[1]
+        calls["gp_short_code"] = config.short_code
+        return {"snapshot_id": "snapshot-1"}
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.gp_registry.build_snapshot",
+        fake_build_snapshot,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.gp_registry.run_baseline",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.backtest.settle_single_gp",
+        lambda *args, **kwargs: {
+            "backtest": {
+                "backtest_run_id": "bt-miami",
+                "metrics": {"bet_count": 2, "total_pnl": 3.5, "roi_pct": 0.175},
+            }
+        },
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/run-backtest",
+            json={"gp_short_code": "miami_fp1_q"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "run-backtest"
+    assert calls["gp_short_code"] == "miami_fp1_q"
+    assert "miami_fp1_q" in payload["message"]
+
+
 def test_run_backtest_endpoint_returns_409_for_missing_polymarket_mappings(
     tmp_path: Path,
     monkeypatch,
@@ -952,18 +995,79 @@ def test_run_backtest_endpoint_returns_409_for_missing_polymarket_mappings(
     assert response.json()["detail"] == "No Polymarket mappings found for SQ session"
 
 
-def test_ingest_demo_endpoint_returns_409_for_sqlite_lock(
+def test_run_paper_trade_endpoint_accepts_dynamic_ops_stage_code(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    def fail_ingest(*args, **kwargs):
-        raise OperationalError(
-            "insert into demo",
-            {},
-            sqlite3.OperationalError("database is locked"),
+    calls: dict[str, object] = {}
+
+    def fake_run_gp_paper_trade_pipeline(*args, **kwargs):
+        config = kwargs.get("config") or args[1]
+        calls["gp_short_code"] = config.short_code
+        return {"trades_executed": 2, "total_pnl": 1.25}
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.run_gp_paper_trade_pipeline",
+        fake_run_gp_paper_trade_pipeline,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/run-paper-trade",
+            json={"gp_short_code": "miami_fp1_q"},
         )
 
-    monkeypatch.setattr("f1_polymarket_worker.demo_ingest.ingest_demo", fail_ingest)
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "run-paper-trade"
+    assert calls["gp_short_code"] == "miami_fp1_q"
+    assert "Miami Grand Prix" in payload["message"]
+
+
+def test_ingest_demo_endpoint_starts_background_job(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    def fake_start(session_maker, **kwargs):
+        calls["session_maker"] = session_maker
+        calls.update(kwargs)
+
+    monkeypatch.setattr(
+        "f1_polymarket_api.api.v1.action_routes._start_ingest_demo_background",
+        fake_start,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post("/api/v1/actions/ingest-demo", json={})
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "ingest-demo"
+    assert payload["details"]["queued"] is True
+    assert calls["season"] == 2026
+    assert calls["weekends"] == 1
+    assert calls["market_batches"] == 1
+
+
+def test_ingest_demo_endpoint_returns_409_when_job_is_already_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_api.api.v1.action_routes._start_ingest_demo_background",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            action_routes._ActionBusyError(
+                "Another write action is already in progress or the database is temporarily busy. "
+                "Wait for it to finish, then retry."
+            )
+        ),
+    )
 
     with build_test_client(tmp_path) as client:
         response = client.post("/api/v1/actions/ingest-demo", json={})
@@ -971,10 +1075,6 @@ def test_ingest_demo_endpoint_returns_409_for_sqlite_lock(
     app.dependency_overrides.clear()
 
     assert response.status_code == 409
-    assert response.json()["detail"] == (
-        "Another write action is already in progress or the database is temporarily busy. "
-        "Wait for it to finish, then retry."
-    )
 
 
 def test_refresh_latest_session_endpoint_serializes_worker_result(

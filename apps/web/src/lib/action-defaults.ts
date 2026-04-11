@@ -1,4 +1,5 @@
 import type {
+  IngestDemoRequest,
   RefreshLatestSessionRequest,
   RefreshedSessionSummary,
   SyncF1MarketsRequest,
@@ -13,6 +14,14 @@ export function buildDashboardMarketSyncRequest(
     search_fallback: false,
     start_year: currentSeason,
     end_year: currentSeason,
+  };
+}
+
+export function buildDashboardDemoIngestRequest(): IngestDemoRequest {
+  return {
+    season: 2026,
+    weekends: 1,
+    market_batches: 1,
   };
 }
 

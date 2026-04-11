@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import threading
 from typing import NoReturn
 
-from f1_polymarket_api.dependencies import get_db_session
+from f1_polymarket_api.dependencies import _get_session_maker, get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
     BackfillBacktestsRequest,
@@ -31,13 +32,72 @@ from f1_polymarket_api.schemas import (
     SyncCalendarRequest,
     SyncF1MarketsRequest,
 )
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.orm import Session
 
 action_router = APIRouter(prefix="/api/v1", tags=["actions"])
 
 log = logging.getLogger(__name__)
+_INGEST_DEMO_LOCK = threading.Lock()
+
+
+class _ActionBusyError(RuntimeError):
+    pass
+
+
+def _run_ingest_demo_background(
+    session_maker,
+    *,
+    season: int,
+    weekends: int,
+    market_batches: int,
+) -> None:
+    from f1_polymarket_worker.demo_ingest import ingest_demo
+
+    db = session_maker()
+    try:
+        ingest_demo(
+            db,
+            season=season,
+            weekends=weekends,
+            market_batches=market_batches,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        log.exception("ingest-demo background job failed")
+    finally:
+        db.close()
+        _INGEST_DEMO_LOCK.release()
+
+
+def _start_ingest_demo_background(
+    session_maker,
+    *,
+    season: int,
+    weekends: int,
+    market_batches: int,
+) -> None:
+    if not _INGEST_DEMO_LOCK.acquire(blocking=False):
+        raise _ActionBusyError(_WRITE_CONFLICT_DETAIL)
+
+    thread = threading.Thread(
+        target=_run_ingest_demo_background,
+        kwargs={
+            "session_maker": session_maker,
+            "season": season,
+            "weekends": weekends,
+            "market_batches": market_batches,
+        },
+        daemon=True,
+        name="ingest-demo-background",
+    )
+    try:
+        thread.start()
+    except Exception:
+        _INGEST_DEMO_LOCK.release()
+        raise
 
 _WRITE_CONFLICT_DETAIL = (
     "Another write action is already in progress or the database is temporarily busy. "
@@ -106,25 +166,35 @@ def _raise_action_error(
 @action_router.post("/actions/ingest-demo", response_model=ActionStatusResponse)
 def action_ingest_demo(
     body: IngestDemoRequest,
-    db: Session = Depends(get_db_session),
+    request: Request,
 ) -> ActionStatusResponse:
-    from f1_polymarket_worker.demo_ingest import ingest_demo
-
     try:
-        ingest_demo(
-            db,
+        _start_ingest_demo_background(
+            _get_session_maker(request),
             season=body.season,
             weekends=body.weekends,
             market_batches=body.market_batches,
         )
-        db.commit()
         return ActionStatusResponse(
             action="ingest-demo",
             status="ok",
-            message=f"Demo ingestion complete (season={body.season}, weekends={body.weekends}).",
+            message=(
+                "Demo ingestion started "
+                f"(season={body.season}, weekends={body.weekends}, "
+                f"market_batches={body.market_batches})."
+            ),
+            details={
+                "queued": True,
+                "season": body.season,
+                "weekends": body.weekends,
+                "market_batches": body.market_batches,
+            },
         )
+    except _ActionBusyError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
-        _raise_action_error(db, exc=exc, log_message="ingest-demo failed")
+        log.exception("ingest-demo failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @action_router.post("/actions/sync-calendar", response_model=ActionStatusResponse)
@@ -240,22 +310,14 @@ def action_run_backtest(
 ) -> ActionStatusResponse:
     from f1_polymarket_worker.backtest import settle_single_gp
     from f1_polymarket_worker.gp_registry import (
-        GP_REGISTRY,
         build_snapshot,
+        resolve_gp_config,
         run_baseline,
     )
     from f1_polymarket_worker.pipeline import PipelineContext
 
-    config = next(
-        (gp for gp in GP_REGISTRY if gp.short_code == body.gp_short_code), None
-    )
-    if config is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"GP short_code '{body.gp_short_code}' not found in registry.",
-        )
-
     try:
+        config = resolve_gp_config(body.gp_short_code, db=db)
         ctx = PipelineContext(db=db, execute=True)
 
         # 1. Build feature snapshot
@@ -306,6 +368,7 @@ def action_run_backtest(
             db,
             exc=exc,
             log_message="run-backtest failed",
+            key_error_status=404,
             value_error_status=409,
         )
 
@@ -347,6 +410,7 @@ def action_backfill_backtests(
             db,
             exc=exc,
             log_message="backfill-backtests failed",
+            key_error_status=404,
             value_error_status=409,
         )
 
@@ -691,12 +755,12 @@ def action_run_paper_trade(
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
     """Run the full paper trading pipeline for a GP."""
-    from f1_polymarket_worker.gp_registry import get_gp_config
+    from f1_polymarket_worker.gp_registry import resolve_gp_config
     from f1_polymarket_worker.pipeline import PipelineContext
     from f1_polymarket_worker.weekend_ops import run_gp_paper_trade_pipeline
 
     try:
-        config = get_gp_config(body.gp_short_code)
+        config = resolve_gp_config(body.gp_short_code, db=db)
         ctx = PipelineContext(db=db, execute=True)
         result = run_gp_paper_trade_pipeline(
             ctx,

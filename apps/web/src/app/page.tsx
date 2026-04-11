@@ -1,12 +1,13 @@
 import Link from "next/link";
 
-import type { PolymarketMarket } from "@f1/shared-types";
+import type { F1Meeting, F1Session, PolymarketMarket } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Badge, Panel, StatCard } from "@f1/ui";
 
 import { PageStatusBanner } from "../components/page-status-banner";
 import { backtestPnl } from "../lib/backtest-metrics";
 import { collectResourceErrors, loadResource } from "../lib/resource-state";
+import { selectScheduleMeetings } from "../lib/schedule";
 import { DashboardActions } from "./_components/dashboard-actions";
 import { SessionTimeline } from "./_components/session-timeline";
 import { StatusIndicator } from "./_components/status-indicator";
@@ -51,10 +52,14 @@ function groupByTaxonomy(markets: PolymarketMarket[]) {
 }
 
 export default async function HomePage() {
+  const meetingsStatePromise = loadResource(
+    () => sdk.meetings({ limit: 100 }),
+    [] as F1Meeting[],
+    "Meeting feed",
+  );
   const [
     healthState,
     freshnessState,
-    sessionsState,
     meetingsState,
     marketsState,
     mappingsState,
@@ -72,19 +77,28 @@ export default async function HomePage() {
       "API health",
     ),
     loadResource(() => sdk.freshness({ limit: 100 }), [], "Freshness feed"),
-    loadResource(() => sdk.sessions({ limit: 250 }), [], "Session feed"),
-    loadResource(() => sdk.meetings({ limit: 100 }), [], "Meeting feed"),
+    meetingsStatePromise,
     loadResource(() => sdk.markets({ limit: 250 }), [], "Market feed"),
     loadResource(() => sdk.mappings({ limit: 250 }), [], "Mapping feed"),
     loadResource(sdk.modelRuns, [], "Model runs"),
     loadResource(sdk.predictions, [], "Predictions"),
     loadResource(sdk.backtestResults, [], "Backtest results"),
   ]);
+  const { season: scheduleSeason, meetings } = selectScheduleMeetings(
+    meetingsState.data,
+  );
+  const sessionsState = await loadResource(
+    () =>
+      scheduleSeason == null
+        ? Promise.resolve([] as F1Session[])
+        : sdk.sessions({ limit: 1000, season: scheduleSeason }),
+    [] as F1Session[],
+    "Session feed",
+  );
 
   const health = healthState.data;
   const freshness = freshnessState.data;
   const sessions = sessionsState.data;
-  const meetings = meetingsState.data;
   const markets = marketsState.data;
   const mappings = mappingsState.data;
   const modelRuns = modelRunsState.data;

@@ -1064,12 +1064,16 @@ def backfill_backtests(
     from f1_polymarket_worker.gp_registry import (
         GP_REGISTRY,
         build_snapshot,
-        get_gp_config,
         resolve_baseline_name,
+        resolve_gp_config,
         run_baseline,
     )
 
-    configs = [get_gp_config(gp_short_code)] if gp_short_code else list(GP_REGISTRY)
+    configs = (
+        [resolve_gp_config(gp_short_code, db=ctx.db)]
+        if gp_short_code
+        else list(GP_REGISTRY)
+    )
     processed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
