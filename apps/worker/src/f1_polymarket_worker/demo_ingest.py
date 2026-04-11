@@ -47,6 +47,8 @@ from f1_polymarket_lab.storage.models import (
 from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy.orm import Session
 
+DemoIngestSummary = dict[str, int]
+
 
 def parse_dt(value: Any) -> datetime | None:
     if value in (None, ""):
@@ -126,7 +128,7 @@ def ingest_f1_demo(
     *,
     season: int,
     weekends: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], DemoIngestSummary]:
     openf1 = OpenF1Connector()
     fastf1 = FastF1ScheduleConnector(get_settings().data_root / "cache" / "fastf1")
 
@@ -466,7 +468,18 @@ def ingest_f1_demo(
     lake.write_silver("f1_weather", weather_rows, partition=f"season={season}")
     lake.write_silver("f1_race_control", race_control_rows, partition=f"season={season}")
 
-    return meeting_rows, session_rows
+    return meeting_rows, session_rows, {
+        "f1_meetings": len(meeting_rows),
+        "f1_sessions": len(session_rows),
+        "f1_drivers": len(driver_rows),
+        "f1_teams": len(team_rows),
+        "f1_session_results": len(result_rows),
+        "f1_laps": len(lap_rows),
+        "f1_stints": len(stint_rows),
+        "f1_weather": len(weather_rows),
+        "f1_race_control": len(race_control_rows),
+        "circuit_metadata": len(circuit_rows),
+    }
 
 
 def extract_event_rows(markets: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -519,7 +532,7 @@ def ingest_polymarket_demo(
     lake: LakeWriter,
     *,
     market_batches: int,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], DemoIngestSummary]:
     connector = PolymarketConnector()
 
     f1_keywords = [
@@ -758,7 +771,15 @@ def ingest_polymarket_demo(
     lake.write_silver("polymarket_price_history", history_rows)
     lake.write_silver("polymarket_trades", trade_rows)
 
-    return market_rows
+    return market_rows, {
+        "polymarket_events": len(event_rows),
+        "polymarket_markets": len(market_rows),
+        "polymarket_tokens": len(token_rows),
+        "polymarket_rules": len(rule_rows),
+        "polymarket_orderbook_snapshots": len(orderbook_rows),
+        "polymarket_price_history": len(history_rows),
+        "polymarket_trades": len(trade_rows),
+    }
 
 
 def build_mappings(
@@ -767,7 +788,7 @@ def build_mappings(
     meetings: list[dict[str, Any]],
     sessions: list[dict[str, Any]],
     markets: list[dict[str, Any]],
-) -> None:
+) -> int:
     _ = meetings
     session_candidates = [
         session for session in sessions if session["session_code"] in {"FP1", "FP2", "FP3"}
@@ -814,9 +835,10 @@ def build_mappings(
         )
 
     upsert_records(db, EntityMappingF1ToPolymarket, mapping_rows)
+    return len(mapping_rows)
 
 
-def seed_feature_registry(db: Session) -> None:
+def seed_feature_registry(db: Session) -> int:
     rows = [
         {
             "id": f"feature:{definition.feature_name}",
@@ -831,12 +853,42 @@ def seed_feature_registry(db: Session) -> None:
         for definition in default_feature_registry()
     ]
     upsert_records(db, FeatureRegistry, rows)
+    return len(rows)
 
 
-def ingest_demo(db: Session, *, season: int, weekends: int, market_batches: int) -> None:
+def ingest_demo(
+    db: Session,
+    *,
+    season: int,
+    weekends: int,
+    market_batches: int,
+) -> DemoIngestSummary:
     settings = get_settings()
     lake = LakeWriter(settings.data_root)
-    meetings, sessions = ingest_f1_demo(db, lake, season=season, weekends=weekends)
-    markets = ingest_polymarket_demo(db, lake, market_batches=market_batches)
-    build_mappings(db, meetings=meetings, sessions=sessions, markets=markets)
-    seed_feature_registry(db)
+    meetings, sessions, f1_summary = ingest_f1_demo(
+        db,
+        lake,
+        season=season,
+        weekends=weekends,
+    )
+    markets, polymarket_summary = ingest_polymarket_demo(
+        db,
+        lake,
+        market_batches=market_batches,
+    )
+    mappings_written = build_mappings(
+        db,
+        meetings=meetings,
+        sessions=sessions,
+        markets=markets,
+    )
+    feature_registry_rows = seed_feature_registry(db)
+    records_written = sum(f1_summary.values()) + sum(polymarket_summary.values())
+    records_written += mappings_written + feature_registry_rows
+    return {
+        **f1_summary,
+        **polymarket_summary,
+        "entity_mappings": mappings_written,
+        "feature_registry": feature_registry_rows,
+        "records_written": records_written,
+    }

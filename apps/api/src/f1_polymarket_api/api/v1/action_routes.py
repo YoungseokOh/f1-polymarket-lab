@@ -61,14 +61,19 @@ def _run_ingest_demo_background(
     db = session_maker()
     try:
         run = db.get(IngestionJobRun, job_run_id)
-        ingest_demo(
+        summary = ingest_demo(
             db,
             season=season,
             weekends=weekends,
             market_batches=market_batches,
         )
         if run is not None:
-            finish_job_run(db, run, status="completed", records_written=0)
+            finish_job_run(
+                db,
+                run,
+                status="completed",
+                records_written=summary.get("records_written", 0),
+            )
         db.commit()
     except Exception as exc:
         db.rollback()

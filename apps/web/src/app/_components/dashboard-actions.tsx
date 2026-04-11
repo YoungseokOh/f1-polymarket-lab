@@ -6,6 +6,7 @@ import type { IngestionJobRun } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Panel } from "@f1/ui";
 import { useRouter } from "next/navigation";
+import React, { startTransition, useEffect, useState } from "react";
 import {
   buildDashboardDemoIngestRequest,
   buildDashboardMarketSyncRequest,
@@ -24,6 +25,53 @@ export function DashboardActions({
   latestDemoIngestJob: IngestionJobRun | null;
 }) {
   const router = useRouter();
+  const [demoJob, setDemoJob] = useState(latestDemoIngestJob);
+
+  useEffect(() => {
+    setDemoJob(latestDemoIngestJob);
+  }, [latestDemoIngestJob]);
+
+  async function refreshLatestDemoIngestJob(runId?: string) {
+    const jobs = await sdk.ingestionJobs({ limit: 25 });
+    const nextJob =
+      jobs.find((job) => job.id === runId) ??
+      jobs.find((job) => job.jobName === "ingest-demo") ??
+      null;
+    setDemoJob(nextJob);
+    if (nextJob && nextJob.status !== "running") {
+      startTransition(() => {
+        router.refresh();
+      });
+    }
+    return nextJob;
+  }
+
+  useEffect(() => {
+    if (!demoJob || demoJob.status !== "running") {
+      return;
+    }
+
+    let cancelled = false;
+    let timer: number | null = null;
+
+    const poll = async () => {
+      try {
+        await refreshLatestDemoIngestJob(demoJob.id);
+      } finally {
+        if (!cancelled) {
+          timer = window.setTimeout(poll, 5000);
+        }
+      }
+    };
+
+    timer = window.setTimeout(poll, 5000);
+    return () => {
+      cancelled = true;
+      if (timer != null) {
+        window.clearTimeout(timer);
+      }
+    };
+  }, [demoJob, router]);
 
   return (
     <Panel title="Quick Actions" eyebrow="Pipeline Controls">
@@ -32,7 +80,9 @@ export function DashboardActions({
           label="Sync F1 Calendar"
           onAction={async () => {
             const res = await sdk.syncCalendar({ season: 2026 });
-            router.refresh();
+            startTransition(() => {
+              router.refresh();
+            });
             return res.message;
           }}
         />
@@ -43,7 +93,9 @@ export function DashboardActions({
             const res = await sdk.syncF1Markets(
               buildDashboardMarketSyncRequest(),
             );
-            router.refresh();
+            startTransition(() => {
+              router.refresh();
+            });
             return res.message;
           }}
         />
@@ -52,31 +104,47 @@ export function DashboardActions({
           variant="secondary"
           onAction={async () => {
             const res = await sdk.ingestDemo(buildDashboardDemoIngestRequest());
-            router.refresh();
+            const jobRunId =
+              res.details &&
+              typeof res.details === "object" &&
+              typeof res.details.job_run_id === "string"
+                ? res.details.job_run_id
+                : undefined;
+            await refreshLatestDemoIngestJob(jobRunId);
+            startTransition(() => {
+              router.refresh();
+            });
             return res.message;
           }}
         />
       </div>
-      {latestDemoIngestJob ? (
+      {demoJob ? (
         <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-white/10 bg-white/[0.03] px-4 py-3">
           <div className="min-w-0">
             <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#6b7280]">
               Latest Demo Ingest
             </p>
-            <p className={`mt-1 text-sm font-medium ${jobTone(latestDemoIngestJob.status)}`}>
-              {latestDemoIngestJob.status === "running"
+            <p className={`mt-1 text-sm font-medium ${jobTone(demoJob.status)}`}>
+              {demoJob.status === "running"
                 ? "Running"
-                : latestDemoIngestJob.status === "completed"
+                : demoJob.status === "completed"
                   ? "Completed"
                   : "Failed"}
             </p>
             <p className="mt-1 truncate text-xs text-[#9ca3af]">
-              Job {latestDemoIngestJob.id} started{" "}
-              {new Date(latestDemoIngestJob.startedAt).toLocaleTimeString("en-US", {
+              Job {demoJob.id} started{" "}
+              {new Date(demoJob.startedAt).toLocaleTimeString("en-US", {
                 hour: "2-digit",
                 minute: "2-digit",
                 hour12: false,
               })}
+            </p>
+            <p className="mt-1 text-xs text-[#9ca3af]">
+              {demoJob.status === "running"
+                ? "Refreshing automatically while this ingest is running."
+                : demoJob.recordsWritten != null
+                  ? `${demoJob.recordsWritten} records written`
+                  : "No row-count summary recorded."}
             </p>
           </div>
           <Link
