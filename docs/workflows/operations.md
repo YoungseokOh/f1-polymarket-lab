@@ -124,6 +124,18 @@ make api
 make web
 ```
 
+Keep the live path disabled until the manual go-live checklist is complete:
+
+```bash
+LIVE_TRADING_ENABLED=false
+LIVE_TRADING_READINESS_CONFIRMED=false
+LIVE_QUOTE_MAX_AGE_SEC=90
+```
+
+Flip `LIVE_TRADING_ENABLED=true` only when you want manual operator tickets to be creatable, and
+flip `LIVE_TRADING_READINESS_CONFIRMED=true` only after jurisdiction, account, and Miami rehearsal
+checks are complete. Setting `LIVE_TRADING_ENABLED=false` is also the emergency stop path.
+
 The API routes behind the cockpit are:
 
 ```text
@@ -137,10 +149,14 @@ POST /api/v1/actions/cancel-live-trade-ticket
 
 Miami v1 live-ticket creation will block when any of the following are true:
 
+- live operator tickets are disabled or the readiness flag is still off
 - the session's required promoted champion is missing
 - the selected snapshot or artifact version is incompatible
 - no live quote is available
+- the live quote is stale
 - the observed spread is wider than the configured maximum
+- the requested ticket size exceeds the configured conservative cap
+- the requested min edge or spread override is looser than the configured limits
 - the daily loss budget has already been consumed
 - the target session is outside the live trading window
 - another open live ticket already exists for the same market

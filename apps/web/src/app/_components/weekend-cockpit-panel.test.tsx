@@ -387,6 +387,24 @@ const baseReadiness: CurrentWeekendOperationsReadiness = {
       lastJobRun: null,
       lastReportPath: "/tmp/capture-live.json",
     },
+    {
+      key: "live_operator_ticket",
+      label: "Live operator tickets",
+      status: "ready",
+      message:
+        "Ready for manual operator tickets. Conservative limits are enforced at size <= 10.0, edge >= 0.050, spread <= 0.030, daily loss <= 100.00.",
+      blockers: [],
+      warnings: [],
+      meetingKey: 1281,
+      meetingName: "Japanese Grand Prix",
+      gpShortCode: "japan_fp1_fp2",
+      sessionCode: "FP2",
+      sessionKey: 11247,
+      actionableAfterUtc: null,
+      openf1CredentialsConfigured: true,
+      lastJobRun: null,
+      lastReportPath: null,
+    },
   ],
   blockers: [
     "Practice 2 live capture becomes available at 2026-03-27T06:00:00Z.",
@@ -900,7 +918,7 @@ describe("WeekendCockpitPanel", () => {
     });
 
     fireEvent.change(screen.getByRole("spinbutton", { name: "Shares" }), {
-      target: { value: "12" },
+      target: { value: "10" },
     });
     fireEvent.change(screen.getByRole("spinbutton", { name: "Min edge pts" }), {
       target: { value: "7" },
@@ -921,12 +939,93 @@ describe("WeekendCockpitPanel", () => {
         source_event_type: "best_bid_ask",
         min_edge: 0.07,
         max_spread: 0.03,
-        bet_size: 12,
+        bet_size: 10,
       });
     });
     await waitFor(() => {
       expect(screen.getByText("Created YES live ticket.")).toBeInTheDocument();
     });
+  });
+
+  it("blocks live ticket creation when the readiness gate is closed", async () => {
+    const liveStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      now: "2026-03-27T06:20:00Z",
+      focusStatus: "live",
+      steps: baseStatus.steps.map((step) =>
+        step.key === "discover_target_markets"
+          ? {
+              ...step,
+              status: "completed",
+              detail: "12 Practice 2 markets are already linked.",
+              count: 12,
+            }
+          : step,
+      ),
+    };
+    const blockedReadiness: CurrentWeekendOperationsReadiness = {
+      ...baseReadiness,
+      actions: baseReadiness.actions.map((action) =>
+        action.key === "live_operator_ticket"
+          ? {
+              ...action,
+              status: "blocked",
+              message:
+                "Live operator tickets require LIVE_TRADING_READINESS_CONFIRMED=true after jurisdiction, account, and Miami rehearsal checks are complete.",
+              blockers: [
+                "Live operator tickets require LIVE_TRADING_READINESS_CONFIRMED=true after jurisdiction, account, and Miami rehearsal checks are complete.",
+              ],
+            }
+          : action,
+      ),
+      blockers: [
+        ...baseReadiness.blockers,
+        "Live operator tickets require LIVE_TRADING_READINESS_CONFIRMED=true after jurisdiction, account, and Miami rehearsal checks are complete.",
+      ],
+    };
+
+    vi.mocked(sdk.captureLiveWeekend).mockResolvedValue(
+      buildLiveCaptureResponse("job-live-1", 14, 9, 31, [
+        {
+          marketId: "market-1",
+          tokenId: "token-1",
+          outcome: "Yes",
+          eventType: "best_bid_ask",
+          observedAtUtc: "2026-03-27T06:20:00Z",
+          price: 0.41,
+          bestBid: 0.4,
+          bestAsk: 0.42,
+          midpoint: 0.41,
+          spread: 0.02,
+          size: 12,
+          side: "buy",
+        },
+      ]),
+    );
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(liveStatus);
+
+    render(
+      <WeekendCockpitPanel
+        initialStatus={liveStatus}
+        initialReadiness={blockedReadiness}
+      />,
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: "Capture 20s live sample",
+      }),
+    );
+
+    await waitFor(() => {
+      expect(
+        screen.getAllByText(/LIVE_TRADING_READINESS_CONFIRMED=true/).length,
+      ).toBeGreaterThan(0);
+    });
+
+    expect(
+      screen.getByRole("button", { name: "Create ticket" }),
+    ).toBeDisabled();
   });
 
   it("repeats live capture until stopped", async () => {

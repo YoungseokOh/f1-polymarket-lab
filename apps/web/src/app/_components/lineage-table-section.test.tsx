@@ -66,4 +66,38 @@ describe("LineageTableSection", () => {
     expect(screen.getByText("Feature registry")).toBeInTheDocument();
     expect(screen.getByText("54")).toBeInTheDocument();
   });
+
+  it("shows a legacy fallback when older ingest-demo rows have no summary payload", () => {
+    render(
+      <LineageTableSection
+        freshness={[]}
+        jobs={[
+          {
+            id: "job-demo-legacy",
+            jobName: "ingest-demo",
+            source: "demo",
+            dataset: "demo_ingest",
+            status: "completed",
+            executeMode: "execute",
+            plannedInputs: {
+              season: 2026,
+            },
+            cursorAfter: null,
+            recordsWritten: 812,
+            errorMessage: null,
+            startedAt: "2026-04-10T13:02:00Z",
+            finishedAt: "2026-04-10T13:03:00Z",
+          },
+        ]}
+        cursorStates={[]}
+        qualityResults={[]}
+        mappings={[]}
+        mappedMarkets={0}
+      />,
+    );
+
+    expect(
+      screen.getByText("Detailed summary not recorded for this run."),
+    ).toBeInTheDocument();
+  });
 });

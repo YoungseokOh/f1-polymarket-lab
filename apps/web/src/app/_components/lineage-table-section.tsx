@@ -84,6 +84,14 @@ function demoIngestSummary(
   }, []);
 }
 
+function shouldShowLegacyDemoFallback(job: IngestionJobRun): boolean {
+  return (
+    job.jobName === "ingest-demo" &&
+    job.cursorAfter == null &&
+    !["pending", "planned", "running"].includes(job.status)
+  );
+}
+
 const freshnessColumns: Column<FreshnessRecord>[] = [
   {
     key: "source",
@@ -171,6 +179,11 @@ const jobColumns: Column<IngestionJobRun>[] = [
           ) : null}
           {cursorSummary ? (
             <p className="text-xs text-[#9ca3af]">Cursor {cursorSummary}</p>
+          ) : null}
+          {shouldShowLegacyDemoFallback(job) ? (
+            <p className="text-xs text-[#9ca3af]">
+              Detailed summary not recorded for this run.
+            </p>
           ) : null}
           {job.errorMessage ? (
             <p className="text-xs text-[#fca5a5]">{job.errorMessage}</p>

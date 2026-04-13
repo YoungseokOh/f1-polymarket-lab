@@ -724,6 +724,15 @@ export function WeekendCockpitPanel({
       selectedGpRef.current || statusRef.current?.selectedGpShortCode;
     if (!gpShortCode || row.priceSource !== "live") return;
     if (row.marketPrice == null) return;
+    if (liveTicketCreationBlocked) {
+      setLiveFeedback({
+        status: "error",
+        message:
+          liveTicketActionStatus?.message ??
+          "Live operator tickets are currently blocked.",
+      });
+      return;
+    }
 
     const shares = parsePositiveNumberInput(manualTradeShares);
     const minEdgePts = parsePositiveNumberInput(manualTradeMinEdgePts);
@@ -739,6 +748,34 @@ export function WeekendCockpitPanel({
       setLiveFeedback({
         status: "error",
         message: "Manual min edge must be zero or greater.",
+      });
+      return;
+    }
+    if (configuredLiveBetSize != null && shares > configuredLiveBetSize) {
+      setLiveFeedback({
+        status: "error",
+        message: `Shares cannot exceed the configured live cap of ${configuredLiveBetSize}.`,
+      });
+      return;
+    }
+    if (
+      configuredLiveMinEdge != null &&
+      minEdgePts / 100 < configuredLiveMinEdge
+    ) {
+      setLiveFeedback({
+        status: "error",
+        message: `Min edge cannot be below the configured floor of ${(configuredLiveMinEdge * 100).toFixed(1)} pts.`,
+      });
+      return;
+    }
+    if (
+      configuredLiveMaxSpread != null &&
+      maxSpreadCents != null &&
+      maxSpreadCents / 100 > configuredLiveMaxSpread
+    ) {
+      setLiveFeedback({
+        status: "error",
+        message: `Max spread cannot exceed the configured cap of ${(configuredLiveMaxSpread * 100).toFixed(1)}¢.`,
       });
       return;
     }
@@ -931,6 +968,15 @@ export function WeekendCockpitPanel({
     null;
   const liveCaptureActionStatus =
     operationStatuses.find((action) => action.key === "live_capture") ?? null;
+  const liveTicketActionStatus =
+    operationStatuses.find((action) => action.key === "live_operator_ticket") ??
+    null;
+  const liveTicketCreationBlocked =
+    liveTicketActionStatus?.status === "blocked";
+  const configuredLiveBetSize = selectedConfig.live_bet_size ?? null;
+  const configuredLiveMinEdge = selectedConfig.live_min_edge ?? null;
+  const configuredLiveMaxSpread = selectedConfig.live_max_spread ?? null;
+  const configuredLiveDailyLoss = selectedConfig.live_max_daily_loss ?? null;
 
   return (
     <Panel title="Weekend cockpit" eyebrow="Latest update">
@@ -1018,8 +1064,8 @@ export function WeekendCockpitPanel({
                   Ops calendar
                 </p>
                 <p className="mt-1 text-sm text-[#9ca3af]">
-                  Active meetings follow the effective calendar. Cancelled Grands Prix
-                  stay in history with their override source.
+                  Active meetings follow the effective calendar. Cancelled
+                  Grands Prix stay in history with their override source.
                 </p>
               </div>
               {status.sourceConflict && (
@@ -1034,7 +1080,8 @@ export function WeekendCockpitPanel({
                 </p>
                 <div className="space-y-2">
                   {status.calendarMeetings.map((meeting) => {
-                    const isSelected = meeting.meetingSlug === status.meetingSlug;
+                    const isSelected =
+                      meeting.meetingSlug === status.meetingSlug;
                     return (
                       <div
                         key={`${meeting.season}-${meeting.meetingSlug}`}
@@ -1085,7 +1132,8 @@ export function WeekendCockpitPanel({
                           {formatCalendarDateRange(meeting)}
                         </p>
                         <p className="mt-1 text-xs text-[#ffb4b1]">
-                          {meeting.sourceLabel ?? "Override"} {meeting.sourceUrl ? "·" : ""}
+                          {meeting.sourceLabel ?? "Override"}{" "}
+                          {meeting.sourceUrl ? "·" : ""}
                           {meeting.sourceUrl ? (
                             <>
                               {" "}
@@ -1431,14 +1479,36 @@ export function WeekendCockpitPanel({
                       </label>
                     </div>
                     <p className="mt-2 text-xs text-[#6b7280]">
-                      Empty max spread means no spread cap. `5` edge pts equals
-                      `0.05`, and `4` spread cents equals `0.04`.
+                      Empty max spread keeps the stage default cap. `5` edge pts
+                      equals `0.05`, and `4` spread cents equals `0.04`.
                     </p>
                     <p className="mt-1 text-xs text-[#9ca3af]">
                       {status.requiredStage
                         ? `Required stage: ${status.requiredStage}`
                         : "This stage can generate live tickets without a promoted model gate."}
                     </p>
+                    <p className="mt-1 text-xs text-[#9ca3af]">
+                      Conservative limits: size{" "}
+                      {configuredLiveBetSize != null
+                        ? `<= ${configuredLiveBetSize}`
+                        : "configured per stage"}
+                      , edge{" "}
+                      {configuredLiveMinEdge != null
+                        ? `>= ${(configuredLiveMinEdge * 100).toFixed(1)} pts`
+                        : "configured per stage"}
+                      ,{" "}
+                      {configuredLiveMaxSpread != null
+                        ? `spread <= ${(configuredLiveMaxSpread * 100).toFixed(1)}¢`
+                        : "spread cap off"}
+                      {configuredLiveDailyLoss != null
+                        ? `, daily loss <= $${configuredLiveDailyLoss.toFixed(2)}.`
+                        : "."}
+                    </p>
+                    {liveTicketCreationBlocked ? (
+                      <div className="mt-3 rounded-xl border border-[#f59e0b]/20 bg-[#f59e0b]/10 px-4 py-3 text-sm text-[#fcd34d]">
+                        {liveTicketActionStatus?.message}
+                      </div>
+                    ) : null}
                     {liveSignalBlockers.length > 0 && (
                       <div className="mt-3 rounded-xl border border-[#f59e0b]/20 bg-[#f59e0b]/10 px-4 py-3 text-sm text-[#fcd34d]">
                         {liveSignalBlockers.join(" ")}
@@ -1534,6 +1604,7 @@ export function WeekendCockpitPanel({
                                       void handleCreateLiveTicket(row);
                                     }}
                                     disabled={
+                                      liveTicketCreationBlocked ||
                                       manualTradeMarketId !== null ||
                                       row.priceSource !== "live" ||
                                       row.marketPrice == null

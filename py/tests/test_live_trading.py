@@ -14,6 +14,7 @@ from f1_polymarket_lab.storage.models import (
     LiveTradeTicket,
     PolymarketMarket,
 )
+from f1_polymarket_worker.gp_registry import resolve_gp_config
 from f1_polymarket_worker.live_trading import (
     create_live_trade_ticket,
     record_live_trade_fill,
@@ -28,7 +29,11 @@ def build_context(tmp_path: Path) -> tuple[Session, PipelineContext]:
     engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
     Base.metadata.create_all(engine)
     session = Session(engine)
-    settings = Settings(data_root=tmp_path)
+    settings = Settings(
+        data_root=tmp_path,
+        live_trading_enabled=True,
+        live_trading_readiness_confirmed=True,
+    )
     return session, PipelineContext(db=session, execute=True, settings=settings)
 
 
@@ -74,12 +79,25 @@ def seed_miami_live_fixture(session: Session) -> None:
     session.commit()
 
 
+def stub_miami_ops_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = resolve_gp_config("miami_fp1_sq")
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.get_ops_stage_config",
+        lambda *_args, **_kwargs: (None, config),
+    )
+
+
 def test_create_live_trade_ticket_persists_ticket(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, context = build_context(tmp_path)
     seed_miami_live_fixture(session)
+    stub_miami_ops_config(monkeypatch)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.utc_now",
+        lambda: datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+    )
     monkeypatch.setattr(
         "f1_polymarket_worker.live_trading.build_live_signal_board",
         lambda *_args, **_kwargs: {
@@ -204,6 +222,11 @@ def test_create_live_trade_ticket_blocks_duplicate_open_market(
 ) -> None:
     session, context = build_context(tmp_path)
     seed_miami_live_fixture(session)
+    stub_miami_ops_config(monkeypatch)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.utc_now",
+        lambda: datetime(2026, 5, 2, 20, 20, tzinfo=timezone.utc),
+    )
     session.add(
         LiveTradeTicket(
             id="ticket-open",
@@ -279,5 +302,183 @@ def test_create_live_trade_ticket_blocks_duplicate_open_market(
         summary = summarize_live_trading(context, gp_slug="miami_fp1_sq")
         assert summary.ticket_count == 1
         assert summary.open_ticket_count == 1
+    finally:
+        session.close()
+
+
+def test_create_live_trade_ticket_blocks_when_live_trading_disabled(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = create_engine("sqlite+pysqlite:///:memory:", future=True)
+    Base.metadata.create_all(engine)
+    session = Session(engine)
+    settings = Settings(data_root=tmp_path)
+    context = PipelineContext(db=session, execute=True, settings=settings)
+    seed_miami_live_fixture(session)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.build_live_signal_board",
+        lambda *_args, **_kwargs: {
+            "gp_short_code": "miami_fp1_sq",
+            "required_stage": "sq_pole_live_v1",
+            "active_model_run_id": "champion-sq",
+            "model_run_id": "scored-sq",
+            "snapshot_id": "snapshot-sq",
+            "blockers": [],
+            "rows": [
+                {
+                    "market_id": "market:miami:sq",
+                    "token_id": "token:yes",
+                    "question": "Will Oscar Piastri win Sprint Qualifying pole?",
+                    "session_code": "SQ",
+                    "promotion_stage": "sq_pole_live_v1",
+                    "model_run_id": "scored-sq",
+                    "snapshot_id": "snapshot-sq",
+                    "model_prob": 0.65,
+                    "market_price": 0.41,
+                    "edge": 0.24,
+                    "spread": 0.02,
+                    "signal_action": "buy_yes",
+                    "side_label": "YES",
+                    "recommended_size": 10.0,
+                    "max_spread": 0.03,
+                    "observed_at_utc": "2026-05-02T20:15:00+00:00",
+                    "event_type": "best_bid_ask",
+                }
+            ],
+        },
+    )
+
+    try:
+        with pytest.raises(ValueError, match="Live operator tickets are disabled"):
+            create_live_trade_ticket(
+                context,
+                gp_short_code="miami_fp1_sq",
+                market_id="market:miami:sq",
+                observed_market_price=0.41,
+                observed_spread=0.02,
+                observed_at_utc=datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+            )
+    finally:
+        session.close()
+
+
+def test_create_live_trade_ticket_rejects_stale_quote(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_miami_live_fixture(session)
+    stub_miami_ops_config(monkeypatch)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.utc_now",
+        lambda: datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.build_live_signal_board",
+        lambda *_args, **_kwargs: {
+            "gp_short_code": "miami_fp1_sq",
+            "required_stage": "sq_pole_live_v1",
+            "active_model_run_id": "champion-sq",
+            "model_run_id": "scored-sq",
+            "snapshot_id": "snapshot-sq",
+            "blockers": [],
+            "rows": [
+                {
+                    "market_id": "market:miami:sq",
+                    "token_id": "token:yes",
+                    "question": "Will Oscar Piastri win Sprint Qualifying pole?",
+                    "session_code": "SQ",
+                    "promotion_stage": "sq_pole_live_v1",
+                    "model_run_id": "scored-sq",
+                    "snapshot_id": "snapshot-sq",
+                    "model_prob": 0.65,
+                    "market_price": 0.41,
+                    "edge": 0.24,
+                    "spread": 0.02,
+                    "signal_action": "buy_yes",
+                    "side_label": "YES",
+                    "recommended_size": 10.0,
+                    "max_spread": 0.03,
+                    "observed_at_utc": "2026-05-02T20:13:00+00:00",
+                    "event_type": "best_bid_ask",
+                }
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.utc_now",
+        lambda: datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+    )
+
+    try:
+        with pytest.raises(ValueError, match="Live quote is stale"):
+            create_live_trade_ticket(
+                context,
+                gp_short_code="miami_fp1_sq",
+                market_id="market:miami:sq",
+                observed_market_price=0.41,
+                observed_spread=0.02,
+                observed_at_utc=datetime(2026, 5, 2, 20, 13, tzinfo=timezone.utc),
+            )
+    finally:
+        session.close()
+
+
+def test_create_live_trade_ticket_rejects_requested_size_above_configured_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_miami_live_fixture(session)
+    stub_miami_ops_config(monkeypatch)
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.utc_now",
+        lambda: datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.live_trading.build_live_signal_board",
+        lambda *_args, **_kwargs: {
+            "gp_short_code": "miami_fp1_sq",
+            "required_stage": "sq_pole_live_v1",
+            "active_model_run_id": "champion-sq",
+            "model_run_id": "scored-sq",
+            "snapshot_id": "snapshot-sq",
+            "blockers": [],
+            "rows": [
+                {
+                    "market_id": "market:miami:sq",
+                    "token_id": "token:yes",
+                    "question": "Will Oscar Piastri win Sprint Qualifying pole?",
+                    "session_code": "SQ",
+                    "promotion_stage": "sq_pole_live_v1",
+                    "model_run_id": "scored-sq",
+                    "snapshot_id": "snapshot-sq",
+                    "model_prob": 0.65,
+                    "market_price": 0.41,
+                    "edge": 0.24,
+                    "spread": 0.02,
+                    "signal_action": "buy_yes",
+                    "side_label": "YES",
+                    "recommended_size": 10.0,
+                    "max_spread": 0.03,
+                    "observed_at_utc": "2026-05-02T20:15:00+00:00",
+                    "event_type": "best_bid_ask",
+                }
+            ],
+        },
+    )
+
+    try:
+        with pytest.raises(ValueError, match="exceeds the configured max"):
+            create_live_trade_ticket(
+                context,
+                gp_short_code="miami_fp1_sq",
+                market_id="market:miami:sq",
+                observed_market_price=0.41,
+                observed_spread=0.02,
+                observed_at_utc=datetime(2026, 5, 2, 20, 15, tzinfo=timezone.utc),
+                bet_size=12.0,
+            )
     finally:
         session.close()

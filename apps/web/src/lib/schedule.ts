@@ -9,7 +9,9 @@ export function selectScheduleMeetings(meetings: F1Meeting[]): {
   }
 
   const season = Math.max(...meetings.map((meeting) => meeting.season));
-  const seasonMeetings = meetings.filter((meeting) => meeting.season === season);
+  const seasonMeetings = meetings.filter(
+    (meeting) => meeting.season === season,
+  );
   const datedMeetings = seasonMeetings.filter(
     (meeting) => meeting.startDateUtc || meeting.endDateUtc,
   );

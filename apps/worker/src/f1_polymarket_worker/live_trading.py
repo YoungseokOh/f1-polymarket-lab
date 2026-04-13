@@ -409,6 +409,19 @@ def summarize_live_trading(
     )
 
 
+def _require_live_ticket_gate(ctx: PipelineContext) -> None:
+    if not ctx.settings.live_trading_enabled:
+        raise ValueError(
+            "Live operator tickets are disabled. Set LIVE_TRADING_ENABLED=true after "
+            "your manual go-live checklist is complete."
+        )
+    if not ctx.settings.live_trading_readiness_confirmed:
+        raise ValueError(
+            "Live operator tickets require LIVE_TRADING_READINESS_CONFIRMED=true "
+            "after jurisdiction, account, and Miami rehearsal checks are complete."
+        )
+
+
 def create_live_trade_ticket(
     ctx: PipelineContext,
     *,
@@ -422,11 +435,13 @@ def create_live_trade_ticket(
     min_edge: float | None = None,
     max_spread: float | None = None,
 ) -> dict[str, Any]:
-    observed_now = _ensure_utc(observed_at_utc or utc_now())
+    request_now = _ensure_utc(utc_now())
+    observed_now = _ensure_utc(observed_at_utc or request_now)
+    _require_live_ticket_gate(ctx)
     _, config = get_ops_stage_config(
         ctx.db,
         short_code=gp_short_code,
-        now=observed_now,
+        now=request_now,
     )
     meeting = _meeting_for_config(ctx, config=config)
     if meeting is None:
@@ -436,7 +451,7 @@ def create_live_trade_ticket(
         meeting_id=meeting.id,
         session_code=config.target_session_code,
     )
-    now = observed_now
+    now = request_now
     if not _session_is_live(target_session, now=now):
         raise ValueError(
             f"{config.target_session_code} session is outside the live execution window."
@@ -466,9 +481,37 @@ def create_live_trade_ticket(
     if market_price is None:
         raise ValueError("Live quote is unavailable for this market.")
     spread = observed_spread if observed_spread is not None else row["spread"]
+    quote_age_seconds = max(0.0, (now - observed_now).total_seconds())
+    if observed_now > now + timedelta(seconds=5):
+        raise ValueError("Live quote timestamp is in the future. Capture a fresh live sample.")
+    if quote_age_seconds > ctx.settings.live_quote_max_age_sec:
+        raise ValueError(
+            "Live quote is stale. Capture a fresh live sample before creating a ticket."
+        )
+
+    if min_edge is not None and min_edge < config.live_min_edge:
+        raise ValueError(
+            f"Requested min edge {min_edge:.3f} is below the configured floor "
+            f"{config.live_min_edge:.3f}."
+        )
+    if max_spread is not None and config.live_max_spread is not None:
+        if max_spread > config.live_max_spread:
+            raise ValueError(
+                f"Requested max spread {max_spread:.3f} exceeds the configured cap "
+                f"{config.live_max_spread:.3f}."
+            )
+
     resolved_min_edge = config.live_min_edge if min_edge is None else min_edge
     resolved_size = config.live_bet_size if bet_size is None else bet_size
     resolved_max_spread = config.live_max_spread if max_spread is None else max_spread
+
+    if resolved_size <= 0:
+        raise ValueError("Live ticket size must be positive.")
+    if resolved_size > config.live_bet_size:
+        raise ValueError(
+            f"Requested live ticket size {resolved_size:.2f} exceeds the configured max "
+            f"{config.live_bet_size:.2f}."
+        )
 
     if resolved_max_spread is not None:
         if spread is None:
@@ -545,6 +588,7 @@ def create_live_trade_ticket(
             "daily_committed_budget": committed_budget,
             "daily_incremental_budget": incremental_budget,
             "target_session_code": config.target_session_code,
+            "quote_age_seconds": quote_age_seconds,
         },
         expires_at=now + timedelta(minutes=config.live_ticket_ttl_min),
         created_at=now,

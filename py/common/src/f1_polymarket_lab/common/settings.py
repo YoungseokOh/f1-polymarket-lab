@@ -23,6 +23,9 @@ class Settings(BaseSettings):
     openf1_password: str | None = None
     openf1_max_requests_per_minute: int = 24
     openf1_max_requests_per_second: int = 2
+    live_trading_enabled: bool = False
+    live_trading_readiness_confirmed: bool = False
+    live_quote_max_age_sec: int = 90
     next_public_api_base_url: str = "http://127.0.0.1:8000"
 
     # Optional override – set DATABASE_URL_OVERRIDE=sqlite+pysqlite:///./data/lab.db

@@ -354,11 +354,7 @@ export default async function PaperTradingPage() {
       null as DriverAffinityReport | null,
       "Driver affinity",
     ),
-    loadResource(
-      () => sdk.weekendCockpitStatus(),
-      null,
-      "Weekend cockpit",
-    ),
+    loadResource(() => sdk.weekendCockpitStatus(), null, "Weekend cockpit"),
     loadResource(
       () => sdk.currentWeekendReadiness(),
       null as CurrentWeekendOperationsReadiness | null,
@@ -460,11 +456,7 @@ export default async function PaperTradingPage() {
   const refreshTargetsByGpShortCode = Object.fromEntries(
     (cockpitState.data?.availableConfigs ?? []).map((config) => [
       config.short_code,
-      meetingRefreshTargetForConfig(
-        config,
-        meetings,
-        f1SessionsState.data,
-      ),
+      meetingRefreshTargetForConfig(config, meetings, f1SessionsState.data),
     ]),
   );
 

@@ -55,6 +55,8 @@ describe("selectScheduleMeetings", () => {
     ]);
 
     expect(result.season).toBe(2026);
-    expect(result.meetings.map((meeting) => meeting.id)).toEqual(["meeting:1282"]);
+    expect(result.meetings.map((meeting) => meeting.id)).toEqual([
+      "meeting:1282",
+    ]);
   });
 });

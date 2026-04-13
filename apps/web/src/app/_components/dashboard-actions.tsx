@@ -6,7 +6,7 @@ import type { IngestionJobRun } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Panel } from "@f1/ui";
 import { useRouter } from "next/navigation";
-import React, { startTransition, useEffect, useState } from "react";
+import React, { startTransition, useEffect, useRef, useState } from "react";
 import {
   buildDashboardDemoIngestRequest,
   buildDashboardMarketSyncRequest,
@@ -19,6 +19,17 @@ function jobTone(status: string) {
   return "text-[#f59e0b]";
 }
 
+function selectLatestDemoIngestJob(
+  jobs: IngestionJobRun[],
+  runId?: string,
+): IngestionJobRun | null {
+  return (
+    jobs.find((job) => job.id === runId) ??
+    jobs.find((job) => job.jobName === "ingest-demo") ??
+    null
+  );
+}
+
 export function DashboardActions({
   latestDemoIngestJob,
 }: {
@@ -26,17 +37,29 @@ export function DashboardActions({
 }) {
   const router = useRouter();
   const [demoJob, setDemoJob] = useState(latestDemoIngestJob);
+  const pollLatestDemoIngestJobRef = useRef<
+    ((runId?: string) => Promise<IngestionJobRun | null>) | null
+  >(null);
 
   useEffect(() => {
     setDemoJob(latestDemoIngestJob);
   }, [latestDemoIngestJob]);
 
+  pollLatestDemoIngestJobRef.current = async (runId?: string) => {
+    const jobs = await sdk.ingestionJobs({ limit: 25 });
+    const nextJob = selectLatestDemoIngestJob(jobs, runId);
+    setDemoJob(nextJob);
+    if (nextJob && nextJob.status !== "running") {
+      startTransition(() => {
+        router.refresh();
+      });
+    }
+    return nextJob;
+  };
+
   async function refreshLatestDemoIngestJob(runId?: string) {
     const jobs = await sdk.ingestionJobs({ limit: 25 });
-    const nextJob =
-      jobs.find((job) => job.id === runId) ??
-      jobs.find((job) => job.jobName === "ingest-demo") ??
-      null;
+    const nextJob = selectLatestDemoIngestJob(jobs, runId);
     setDemoJob(nextJob);
     if (nextJob && nextJob.status !== "running") {
       startTransition(() => {
@@ -46,8 +69,10 @@ export function DashboardActions({
     return nextJob;
   }
 
+  const runningDemoJobId = demoJob?.status === "running" ? demoJob.id : null;
+
   useEffect(() => {
-    if (!demoJob || demoJob.status !== "running") {
+    if (!runningDemoJobId) {
       return;
     }
 
@@ -55,10 +80,15 @@ export function DashboardActions({
     let timer: number | null = null;
 
     const poll = async () => {
+      let shouldContinue = true;
       try {
-        await refreshLatestDemoIngestJob(demoJob.id);
+        const nextJob =
+          await pollLatestDemoIngestJobRef.current?.(runningDemoJobId);
+        shouldContinue = nextJob?.status === "running";
+      } catch {
+        shouldContinue = true;
       } finally {
-        if (!cancelled) {
+        if (!cancelled && shouldContinue) {
           timer = window.setTimeout(poll, 5000);
         }
       }
@@ -71,7 +101,7 @@ export function DashboardActions({
         window.clearTimeout(timer);
       }
     };
-  }, [demoJob, router]);
+  }, [runningDemoJobId]);
 
   return (
     <Panel title="Quick Actions" eyebrow="Pipeline Controls">
@@ -124,7 +154,9 @@ export function DashboardActions({
             <p className="text-[10px] font-semibold uppercase tracking-[0.24em] text-[#6b7280]">
               Latest Demo Ingest
             </p>
-            <p className={`mt-1 text-sm font-medium ${jobTone(demoJob.status)}`}>
+            <p
+              className={`mt-1 text-sm font-medium ${jobTone(demoJob.status)}`}
+            >
               {demoJob.status === "running"
                 ? "Running"
                 : demoJob.status === "completed"

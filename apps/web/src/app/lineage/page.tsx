@@ -7,9 +7,12 @@ import {
   describeQualityDataset,
 } from "../../lib/display";
 import { collectResourceErrors, loadResource } from "../../lib/resource-state";
+import { LineageAutoRefresh } from "../_components/lineage-auto-refresh";
 import { LineageTableSection } from "../_components/lineage-table-section";
 
 export const revalidate = 0;
+
+const ACTIVE_JOB_STATUSES = new Set(["planned", "pending", "running"]);
 
 export default async function LineagePage() {
   const [
@@ -74,6 +77,7 @@ export default async function LineagePage() {
     ...optionalFailingChecks.map(describeQualityAlert),
     ...failedJobMessages,
   ];
+  const hasActiveJobs = jobs.some((job) => ACTIVE_JOB_STATUSES.has(job.status));
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -86,6 +90,7 @@ export default async function LineagePage() {
           ran, which quality checks need follow-up, and how F1 entities map onto
           Polymarket markets.
         </p>
+        <LineageAutoRefresh hasActiveJobs={hasActiveJobs} />
       </div>
 
       {attentionMessages.length > 0 ? (

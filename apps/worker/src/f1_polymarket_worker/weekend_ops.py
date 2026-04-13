@@ -1453,6 +1453,127 @@ def _live_capture_action_status(
     }
 
 
+def _live_operator_ticket_action_status(
+    ctx: PipelineContext,
+    *,
+    config: GPConfig,
+    meeting: F1Meeting | None,
+    target_session: F1Session | None,
+    now: Any,
+) -> dict[str, Any]:
+    blockers: list[str] = []
+    warnings: list[str] = []
+    actionable_after_utc = None
+    market_count = 0
+    token_count = 0
+
+    if target_session is None:
+        status = "blocked"
+        message = "Live operator tickets cannot start because the target session is unavailable."
+        blockers.append(message)
+    elif target_session.date_start_utc is None or target_session.date_end_utc is None:
+        status = "blocked"
+        message = "Live operator ticket timing is unavailable for the target session."
+        blockers.append(message)
+    elif not ctx.settings.live_trading_enabled:
+        status = "blocked"
+        message = (
+            "Live operator tickets are disabled. Enable LIVE_TRADING_ENABLED only when "
+            "you want to allow manual live recommendations."
+        )
+        blockers.append(message)
+    elif not ctx.settings.live_trading_readiness_confirmed:
+        status = "blocked"
+        message = (
+            "Live operator tickets require LIVE_TRADING_READINESS_CONFIRMED=true after "
+            "jurisdiction, account, and Miami rehearsal checks are complete."
+        )
+        blockers.append(message)
+    else:
+        live_market_ids = _derive_live_market_ids(
+            ctx,
+            session=target_session,
+            requested_market_ids=None,
+        )
+        market_count = len(live_market_ids)
+        token_count = (
+            int(
+                ctx.db.scalar(
+                    select(func.count())
+                    .select_from(PolymarketToken)
+                    .where(PolymarketToken.market_id.in_(live_market_ids))
+                )
+                or 0
+            )
+            if live_market_ids
+            else 0
+        )
+        if not _session_is_live(target_session, now=now):
+            status = "blocked"
+            if _session_has_started(target_session, now=now):
+                message = (
+                    f"{target_session.session_name} ended at "
+                    f"{_ensure_utc(target_session.date_end_utc).isoformat()}."
+                )
+            else:
+                actionable_after_utc = _ensure_utc(target_session.date_start_utc)
+                message = (
+                    f"{target_session.session_name} operator tickets become available at "
+                    f"{actionable_after_utc.isoformat()}."
+                )
+            blockers.append(message)
+        elif market_count == 0:
+            status = "blocked"
+            message = (
+                f"No linked {target_session.session_code or 'target'} markets are available yet "
+                "for operator tickets."
+            )
+            blockers.append(message)
+        elif token_count == 0:
+            status = "blocked"
+            message = "Linked live markets do not have Polymarket tokens yet."
+            blockers.append(message)
+        else:
+            status = "ready"
+            spread_label = (
+                "spread cap off"
+                if config.live_max_spread is None
+                else f"spread <= {config.live_max_spread:.3f}"
+            )
+            message = (
+                "Ready for manual operator tickets. Conservative limits are enforced at "
+                f"size <= {config.live_bet_size:.1f}, edge >= {config.live_min_edge:.3f}, "
+                f"{spread_label}, daily loss <= {config.live_max_daily_loss:.2f}."
+            )
+            if not ctx.settings.openf1_username or not ctx.settings.openf1_password:
+                warnings.append(
+                    "OpenF1 credentials are missing, so cockpit users must rely on an external "
+                    "fresh quote source."
+                )
+
+    return {
+        "key": "live_operator_ticket",
+        "label": "Live operator tickets",
+        "status": status,
+        "message": message,
+        "blockers": blockers,
+        "warnings": warnings,
+        "meeting_key": None if meeting is None else meeting.meeting_key,
+        "meeting_name": None if meeting is None else meeting.meeting_name,
+        "gp_short_code": config.short_code,
+        "session_code": None if target_session is None else target_session.session_code,
+        "session_key": None if target_session is None else target_session.session_key,
+        "actionable_after_utc": actionable_after_utc,
+        "openf1_credentials_configured": bool(
+            ctx.settings.openf1_username and ctx.settings.openf1_password
+        ),
+        "linked_market_count": market_count,
+        "token_count": token_count,
+        "last_job_run": None,
+        "last_report_path": None,
+    }
+
+
 def get_current_weekend_operations_readiness(
     ctx: PipelineContext,
     *,
@@ -1494,10 +1615,18 @@ def get_current_weekend_operations_readiness(
         target_session=cockpit_status["target_session"],
         now=now,
     )
+    live_operator_ticket_status = _live_operator_ticket_action_status(
+        ctx,
+        config=config,
+        meeting=meeting,
+        target_session=cockpit_status["target_session"],
+        now=now,
+    )
     actions = [
         weekend_cockpit_status,
         driver_affinity_status,
         live_capture_status,
+        live_operator_ticket_status,
     ]
     blockers = [action["message"] for action in actions if action["status"] == "blocked"]
     warnings = [warning for action in actions for warning in action.get("warnings", [])]
