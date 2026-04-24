@@ -19,7 +19,12 @@ function statusVariant(
   if (status === "ok" || status === "completed" || status === "pass") {
     return "ok";
   }
-  if (status === "pending" || status === "running" || status === "planned") {
+  if (
+    status === "pending" ||
+    status === "queued" ||
+    status === "running" ||
+    status === "planned"
+  ) {
     return "pending";
   }
   if (status === "idle") {
@@ -88,7 +93,7 @@ function shouldShowLegacyDemoFallback(job: IngestionJobRun): boolean {
   return (
     job.jobName === "ingest-demo" &&
     job.cursorAfter == null &&
-    !["pending", "planned", "running"].includes(job.status)
+    !["pending", "planned", "queued", "running"].includes(job.status)
   );
 }
 

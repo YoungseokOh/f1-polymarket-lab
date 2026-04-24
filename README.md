@@ -47,8 +47,19 @@ make ingest-demo DEMO_WEEKENDS=2 DEMO_MARKET_BATCHES=3
 - **API:** FastAPI with typed Pydantic schemas
 - **Dashboard:** Next.js with TypeScript SDK and shared UI components
 
-There is no queue-backed background worker in the current slice. Collection and hydration run through
-explicit CLI commands.
+`make worker` starts the DB-backed worker loop. It claims queued rows from
+`ingestion_job_runs`, applies retry/backoff, recovers stale worker locks, and currently dispatches
+`ingest-demo`, `sync-f1-calendar`, `sync-f1-markets`, `run-backtest`, `backfill-backtests`,
+`run-paper-trade`, `run-weekend-cockpit`, `refresh-latest-session`, `refresh-driver-affinity`,
+`capture-live-weekend`, and `dq-run`. Queue one explicitly with:
+
+```bash
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli queue-job sync-f1-calendar --season 2026
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli queue-ingest-demo
+```
+
+Collection, hydration, and live operator workflows still also support explicit CLI execution for
+operator-controlled runs.
 
 ## Ops calendar authority
 
@@ -135,6 +146,10 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli promote
   --model-run-id <MODEL_RUN_ID> \
   --stage multitask_qr \
   --execute
+# or let the registry choose the highest-ranked eligible candidate for the stage
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli promote-best-model-run \
+  --stage multitask_qr \
+  --execute
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli score-multitask-snapshot \
   --snapshot-id <SNAPSHOT_ID> \
   --stage multitask_qr \
@@ -196,7 +211,7 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-m
   --execute
 ```
 
-Run the experimental autoresearch scaffold:
+Run the manifest-based autoresearch loop:
 
 ```bash
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-multitask-autoresearch \
@@ -204,8 +219,9 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-mul
   --iterations 20
 ```
 
-`run-multitask-autoresearch` is currently a mock-scored experiment loop. It does not yet run the
-real training or backtest stack.
+`run-multitask-autoresearch` loads the multitask snapshot manifest, evaluates candidates with
+walk-forward splits, and can persist the best `ModelRun`/`ModelPrediction` rows with
+`--persist-best`.
 
 ## Worker package layout
 

@@ -653,6 +653,7 @@ dependencies = [
     { name = "f1-polymarket-features" },
     { name = "f1-polymarket-models" },
     { name = "f1-polymarket-storage" },
+    { name = "polars" },
 ]
 
 [package.optional-dependencies]
@@ -667,6 +668,7 @@ requires-dist = [
     { name = "f1-polymarket-models", editable = "py/models" },
     { name = "f1-polymarket-storage", editable = "py/storage" },
     { name = "mlflow", marker = "extra == 'tracking'", specifier = ">=2.20.3" },
+    { name = "polars", specifier = ">=1.0" },
 ]
 provides-extras = ["tracking"]
 
@@ -677,12 +679,14 @@ source = { editable = "py/features" }
 dependencies = [
     { name = "f1-polymarket-common" },
     { name = "f1-polymarket-storage" },
+    { name = "polars" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "f1-polymarket-common", editable = "py/common" },
     { name = "f1-polymarket-storage", editable = "py/storage" },
+    { name = "polars", specifier = ">=1.0" },
 ]
 
 [[package]]
@@ -748,6 +752,7 @@ version = "0.1.0"
 source = { editable = "py/models" }
 dependencies = [
     { name = "f1-polymarket-common" },
+    { name = "lightgbm" },
     { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version < '3.11' and platform_machine != 'x86_64') or (python_full_version < '3.11' and sys_platform != 'darwin')" },
     { name = "numpy", version = "2.3.5", source = { registry = "https://pypi.org/simple" }, marker = "(python_full_version >= '3.11' and platform_machine != 'x86_64') or (python_full_version >= '3.11' and sys_platform != 'darwin')" },
@@ -762,6 +767,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "f1-polymarket-common", editable = "py/common" },
+    { name = "lightgbm", specifier = ">=4.6.0" },
     { name = "numpy", marker = "platform_machine != 'x86_64' or sys_platform != 'darwin'", specifier = ">=1.26" },
     { name = "numpy", marker = "platform_machine == 'x86_64' and sys_platform == 'darwin'", specifier = ">=1.26,<2" },
     { name = "polars", specifier = ">=1.0" },
@@ -799,9 +805,12 @@ source = { editable = "apps/worker" }
 dependencies = [
     { name = "f1-polymarket-common" },
     { name = "f1-polymarket-connectors" },
+    { name = "f1-polymarket-experiments" },
     { name = "f1-polymarket-features" },
+    { name = "f1-polymarket-models" },
     { name = "f1-polymarket-storage" },
     { name = "mlflow" },
+    { name = "polars" },
     { name = "typer" },
 ]
 
@@ -809,9 +818,12 @@ dependencies = [
 requires-dist = [
     { name = "f1-polymarket-common", editable = "py/common" },
     { name = "f1-polymarket-connectors", editable = "py/connectors" },
+    { name = "f1-polymarket-experiments", editable = "py/experiments" },
     { name = "f1-polymarket-features", editable = "py/features" },
+    { name = "f1-polymarket-models", editable = "py/models" },
     { name = "f1-polymarket-storage", editable = "py/storage" },
     { name = "mlflow", specifier = ">=2.20.3" },
+    { name = "polars", specifier = ">=1.0" },
     { name = "typer", specifier = ">=0.15.2" },
 ]
 

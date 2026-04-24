@@ -107,11 +107,11 @@ def _legacy_meeting_slug(first_session: dict[str, Any], meeting_key: int, season
             country_name.lower(),
             f"{country_name} Grand Prix",
         )
-        return slugify(fallback_name)
+        return str(slugify(fallback_name))
     location = str(first_session.get("location") or "").strip()
     if location:
-        return slugify(f"{location} Grand Prix")
-    return slugify(f"{season}-meeting-{meeting_key}")
+        return str(slugify(f"{location} Grand Prix"))
+    return str(slugify(f"{season}-meeting-{meeting_key}"))
 
 
 def _delete_sessions_and_children(ctx: PipelineContext, session_ids: list[str]) -> None:

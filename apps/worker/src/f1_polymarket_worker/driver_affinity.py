@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from f1_polymarket_lab.common import utc_now
 from f1_polymarket_lab.features.driver_profile import (
@@ -47,6 +47,11 @@ def _ensure_utc(value: datetime | str | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _iso_utc(value: datetime | str | None) -> str | None:
+    normalized = _ensure_utc(value)
+    return None if normalized is None else normalized.isoformat()
 
 
 def _meeting_sort_key(meeting: F1Meeting, *, now: datetime) -> tuple[int, float]:
@@ -151,21 +156,15 @@ def _meeting_payload(meeting: F1Meeting) -> dict[str, Any]:
         "circuit_short_name": meeting.circuit_short_name,
         "country_name": meeting.country_name,
         "location": meeting.location,
-        "start_date_utc": (
-            None
-            if meeting.start_date_utc is None
-            else _ensure_utc(meeting.start_date_utc).isoformat()
-        ),
-        "end_date_utc": (
-            None if meeting.end_date_utc is None else _ensure_utc(meeting.end_date_utc).isoformat()
-        ),
+        "start_date_utc": _iso_utc(meeting.start_date_utc),
+        "end_date_utc": _iso_utc(meeting.end_date_utc),
     }
 
 
 def _load_report(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
-    return json.loads(path.read_text(encoding="utf-8"))
+    return cast(dict[str, Any], json.loads(path.read_text(encoding="utf-8")))
 
 
 def _write_report(path: Path, report: dict[str, Any]) -> None:
@@ -349,10 +348,8 @@ def _build_affinity_entries(
                 "contributing_session_count": profile.get("n_sessions", 0),
                 "contributing_session_codes": profile.get("session_codes", []),
                 "latest_contributing_session_code": profile.get("latest_session_code"),
-                "latest_contributing_session_end_utc": (
-                    None
-                    if profile.get("latest_session_end_utc") is None
-                    else _ensure_utc(profile["latest_session_end_utc"]).isoformat()
+                "latest_contributing_session_end_utc": _iso_utc(
+                    profile.get("latest_session_end_utc")
                 ),
             }
         )
@@ -543,7 +540,7 @@ def build_driver_affinity_report(
         else latest_ended.session_code,
         "latest_ended_relevant_session_end_utc": None
         if latest_ended is None or latest_ended.date_end_utc is None
-        else _ensure_utc(latest_ended.date_end_utc).isoformat(),
+        else _iso_utc(latest_ended.date_end_utc),
         "entry_count": current_segment["entry_count"],
         "entries": current_segment["entries"],
     }
@@ -571,7 +568,7 @@ def augment_driver_affinity_report(
     latest_ended_end_utc = (
         None
         if latest_ended is None or latest_ended.date_end_utc is None
-        else _ensure_utc(latest_ended.date_end_utc).isoformat()
+        else _iso_utc(latest_ended.date_end_utc)
     )
     source_max_session_end_utc = report.get("source_max_session_end_utc")
     is_fresh = latest_ended_end_utc == source_max_session_end_utc
@@ -683,7 +680,7 @@ def get_driver_affinity_refresh_status(
     latest_ended_end_utc = (
         None
         if latest_ended is None or latest_ended.date_end_utc is None
-        else _ensure_utc(latest_ended.date_end_utc).isoformat()
+        else _iso_utc(latest_ended.date_end_utc)
     )
     missing_sessions = _missing_affinity_sessions(ctx, sessions=sessions, now=reference_now)
     existing_report = _load_report(
@@ -795,7 +792,7 @@ def refresh_driver_affinity(
     latest_ended_end_utc = (
         None
         if latest_ended is None or latest_ended.date_end_utc is None
-        else _ensure_utc(latest_ended.date_end_utc).isoformat()
+        else _iso_utc(latest_ended.date_end_utc)
     )
     path = _report_path(root=ctx.settings.data_root, season=season, meeting_key=meeting.meeting_key)
     existing_report = _load_report(path)
@@ -896,7 +893,7 @@ def refresh_driver_affinity(
                 "before refreshing driver affinity."
             ),
         )
-        augmented = (
+        augmented_report = (
             None
             if existing_report is None
             else augment_driver_affinity_report(
@@ -916,14 +913,16 @@ def refresh_driver_affinity(
             ),
             "season": season,
             "meeting_key": meeting.meeting_key,
-            "computed_at_utc": None if augmented is None else augmented.get("computed_at_utc"),
+            "computed_at_utc": None
+            if augmented_report is None
+            else augmented_report.get("computed_at_utc"),
             "source_max_session_end_utc": latest_ended_end_utc,
             "hydrated_session_keys": [],
             "job_run_id": run.id,
             "report_path": None,
             "preflight_summary": preflight_summary,
             "warnings": list(preflight_summary.get("warnings") or []),
-            "report": augmented,
+            "report": augmented_report,
         }
         result["report_path"] = write_operation_report(
             root=ctx.settings.data_root,

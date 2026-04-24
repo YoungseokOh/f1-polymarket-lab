@@ -12,7 +12,12 @@ import { LineageTableSection } from "../_components/lineage-table-section";
 
 export const revalidate = 0;
 
-const ACTIVE_JOB_STATUSES = new Set(["planned", "pending", "running"]);
+const ACTIVE_JOB_STATUSES = new Set([
+  "planned",
+  "pending",
+  "queued",
+  "running",
+]);
 
 export default async function LineagePage() {
   const [

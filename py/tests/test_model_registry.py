@@ -14,6 +14,8 @@ from f1_polymarket_lab.storage.models import (
 )
 from f1_polymarket_worker.model_registry import (
     MULTITASK_PROMOTION_STAGE,
+    eligible_promotion_candidates,
+    promote_best_model_run,
     promote_model_run,
     score_promoted_multitask_snapshot,
 )
@@ -126,6 +128,62 @@ def test_promote_model_run_rejects_failed_gate(tmp_path: Path) -> None:
                 model_run_id="run-fail",
                 stage=MULTITASK_PROMOTION_STAGE,
             )
+    finally:
+        session.close()
+
+
+def test_promote_best_model_run_selects_highest_eligible_candidate(tmp_path: Path) -> None:
+    session = build_session()
+    try:
+        artifact_a = tmp_path / "run-a"
+        artifact_b = tmp_path / "run-b"
+        artifact_c = tmp_path / "run-c"
+        artifact_a.mkdir(parents=True)
+        artifact_b.mkdir(parents=True)
+        artifact_c.mkdir(parents=True)
+        base_metrics = {
+            "roi_pct": 8.0,
+            "bet_count": 24,
+            "ece": 0.04,
+            "family_pnl_share_max": 0.49,
+        }
+        session.add_all(
+            [
+                ModelRun(
+                    id="run-a",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    metrics_json={**base_metrics, "total_pnl": 7.0},
+                    artifact_uri=str(artifact_a),
+                ),
+                ModelRun(
+                    id="run-b",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    metrics_json={**base_metrics, "total_pnl": 12.0},
+                    artifact_uri=str(artifact_b),
+                ),
+                ModelRun(
+                    id="run-c",
+                    stage=MULTITASK_PROMOTION_STAGE,
+                    model_family="torch_multitask",
+                    model_name="shared_encoder_multitask_v2",
+                    metrics_json={**base_metrics, "total_pnl": 30.0, "bet_count": 4},
+                    artifact_uri=str(artifact_c),
+                ),
+            ]
+        )
+        session.commit()
+
+        candidates = eligible_promotion_candidates(session, stage=MULTITASK_PROMOTION_STAGE)
+        promotion = promote_best_model_run(session, stage=MULTITASK_PROMOTION_STAGE)
+        session.commit()
+
+        assert [candidate[0].id for candidate in candidates] == ["run-b", "run-a"]
+        assert promotion.model_run_id == "run-b"
+        assert promotion.status == "active"
     finally:
         session.close()
 

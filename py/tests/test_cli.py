@@ -6,12 +6,16 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
-import typer
 from f1_polymarket_lab.common.settings import Settings
-from f1_polymarket_worker import cli
+from f1_polymarket_lab.storage.db import db_session
+from f1_polymarket_lab.storage.migrations import ensure_database_schema
+from f1_polymarket_lab.storage.models import IngestionJobRun
+from f1_polymarket_worker import cli, job_queue
+from f1_polymarket_worker.lineage import ensure_job_definition
 from f1_polymarket_worker.pipeline import PipelineContext
 
 
@@ -85,7 +89,7 @@ def test_set_f1_calendar_override_command_routes_payload(
         ops_slug = "miami"
         source_url = "https://example.com"
 
-    def fake_set_calendar_override(session, **kwargs):
+    def fake_set_calendar_override(session: object, **kwargs: object) -> Override:
         captured.update(kwargs)
         return Override()
 
@@ -131,7 +135,7 @@ def test_clear_f1_calendar_override_command_routes_payload(
         meeting_slug = "miami-grand-prix"
         is_active = False
 
-    def fake_clear_calendar_override(session, **kwargs):
+    def fake_clear_calendar_override(session: object, **kwargs: object) -> Override:
         captured.update(kwargs)
         return Override()
 
@@ -152,11 +156,70 @@ def test_clear_f1_calendar_override_command_routes_payload(
     }
 
 
-def test_worker_command_fails_fast() -> None:
-    with pytest.raises(typer.Exit) as exc_info:
-        cli.worker()
+def test_worker_command_processes_queued_ingest_demo(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = f"sqlite+pysqlite:///{tmp_path / 'worker.db'}"
+    ensure_database_schema(database_url)
+    monkeypatch.setattr(
+        cli,
+        "get_settings",
+        lambda: Settings(database_url_override=database_url),
+    )
 
-    assert exc_info.value.exit_code == 2
+    def fake_ingest_demo(
+        _session: object,
+        _settings: object,
+        inputs: dict[str, object],
+    ) -> dict[str, int]:
+        assert inputs["season"] == 2026
+        assert inputs["weekends"] == 1
+        assert inputs["market_batches"] == 2
+        return {"records_written": 7}
+
+    monkeypatch.setitem(
+        job_queue.QUEUE_JOB_SPECS,
+        "ingest-demo",
+        replace(job_queue.QUEUE_JOB_SPECS["ingest-demo"], handler=fake_ingest_demo),
+    )
+
+    with db_session(database_url) as session:
+        definition = ensure_job_definition(
+            session,
+            job_name="ingest-demo",
+            source="demo",
+            dataset="demo_ingest",
+            description="Seed a lightweight demo ingestion run for the dashboard.",
+            schedule_hint="manual",
+        )
+        run = IngestionJobRun(
+            job_definition_id=definition.id,
+            job_name=definition.job_name,
+            source=definition.source,
+            dataset=definition.dataset,
+            status="queued",
+            execute_mode="queued",
+            planned_inputs={"season": 2026, "weekends": 1, "market_batches": 2},
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    cli.worker(
+        once=True,
+        poll_interval=0.1,
+        max_jobs=1,
+        job_name=None,
+        stale_after_seconds=7200,
+    )
+
+    with db_session(database_url) as session:
+        stored = session.get(IngestionJobRun, run_id)
+        assert stored is not None
+        assert stored.status == "completed"
+        assert stored.records_written == 7
+        assert stored.cursor_after == {"records_written": 7}
 
 
 def test_bootstrap_db_creates_lineage_tables(tmp_path: Path) -> None:
@@ -196,4 +259,4 @@ def test_bootstrap_db_creates_lineage_tables(tmp_path: Path) -> None:
     )
     assert cur.fetchone() == ("ingestion_job_runs",)
     cur.execute("SELECT version_num FROM alembic_version")
-    assert cur.fetchone() == ("20260408_0013",)
+    assert cur.fetchone() == ("20260425_0014",)

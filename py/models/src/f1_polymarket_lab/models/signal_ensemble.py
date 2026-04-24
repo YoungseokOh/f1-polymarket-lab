@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 import polars as pl
@@ -263,8 +263,8 @@ def _coerce_datetime(value: Any) -> datetime:
         try:
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError:
-            return utc_now()
-    return utc_now()
+            return cast(datetime, utc_now())
+    return cast(datetime, utc_now())
 
 
 def _market_anchor(row: dict[str, Any]) -> float:
@@ -329,14 +329,11 @@ def _zscore_map(rows: list[dict[str, Any]], feature_name: str) -> dict[str, floa
             )
             for row in rows
         }
-    return {
-        str(row["row_id"]): (
-            None
-            if _coerce_float(row.get(feature_name)) is None
-            else (_coerce_float(row.get(feature_name)) - mean) / std
-        )
-        for row in rows
-    }
+    scores: dict[str, float | None] = {}
+    for row in rows:
+        value = _coerce_float(row.get(feature_name))
+        scores[str(row["row_id"])] = None if value is None else (value - mean) / std
+    return scores
 
 
 def _event_softmax_probabilities(
@@ -1351,7 +1348,7 @@ def _score_one_row(
             if trade_count is not None
             else 1.0
         )
-        depth = trade_count
+        depth = trade_count or 0.0
     size_fraction = (
         min(config.kelly_cap, kelly_fraction_raw)
         * disagreement_penalty

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import typer
 from f1_polymarket_lab.common import get_settings
@@ -111,6 +113,29 @@ def ingest_demo_command(season: int = 2024, weekends: int = 2, market_batches: i
     with db_session(settings.database_url) as session:
         ingest_demo(session, season=season, weekends=weekends, market_batches=market_batches)
     typer.echo("Demo ingestion complete.")
+
+
+@app.command("queue-ingest-demo")
+def queue_ingest_demo_command(
+    season: int = 2024,
+    weekends: int = 2,
+    market_batches: int = 3,
+) -> None:
+    from f1_polymarket_worker.job_queue import enqueue_job
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        run = enqueue_job(
+            session,
+            job_name="ingest-demo",
+            planned_inputs={
+                "season": season,
+                "weekends": weekends,
+                "market_batches": market_batches,
+            },
+        )
+        job_run_id = run.id
+    typer.echo({"status": "queued", "job_run_id": job_run_id})
 
 
 @app.command("sync-f1-calendar")
@@ -1288,6 +1313,47 @@ def promote_model_run_command(
         typer.echo(f"Promoted model_run_id={promotion.model_run_id} for stage={promotion.stage}")
 
 
+@app.command("promote-best-model-run")
+def promote_best_model_run_command(
+    stage: str = typer.Option("multitask_qr", "--stage"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_worker.model_registry import (
+        eligible_promotion_candidates,
+        promote_best_model_run,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        candidates = eligible_promotion_candidates(session, stage=stage)
+        if not candidates:
+            typer.echo(f"No eligible promotion candidates found for stage={stage}")
+            raise typer.Exit(1)
+
+        model_run, decision = candidates[0]
+        if not execute:
+            typer.echo(
+                {
+                    "status": "planned",
+                    "stage": stage,
+                    "model_run_id": model_run.id,
+                    "metrics": decision.actuals,
+                    "candidate_count": len(candidates),
+                }
+            )
+            return
+
+        promotion = promote_best_model_run(session, stage=stage)
+        typer.echo(
+            {
+                "status": "promoted",
+                "stage": promotion.stage,
+                "model_run_id": promotion.model_run_id,
+                "promotion_id": promotion.id,
+            }
+        )
+
+
 @app.command("score-multitask-snapshot")
 def score_multitask_snapshot_command(
     snapshot_id: str = typer.Option(..., "--snapshot-id"),
@@ -1433,7 +1499,7 @@ def run_multitask_autoresearch_command(
 ) -> None:
     """Run manifest-based multitask autoresearch with hybrid ranking."""
     import json
-    from datetime import UTC, datetime
+    from datetime import datetime, timezone
     from pathlib import Path
 
     from f1_polymarket_lab.common import stable_uuid
@@ -1449,7 +1515,7 @@ def run_multitask_autoresearch_command(
     from f1_polymarket_lab.storage.repository import upsert_records
 
     manifest_path = Path(manifest)
-    run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     tracker = ExperimentTracker(storage_dir=Path(output_dir) / run_id)
 
     history = run_autoresearch_loop(
@@ -1483,7 +1549,7 @@ def run_multitask_autoresearch_command(
         splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
         checkpoint_order = {"FP1": 1, "FP2": 2, "FP3": 3, "Q": 4}
 
-        def load_frames(paths: list[str]):
+        def load_frames(paths: list[str]) -> Any:
             import polars as pl_module
 
             frames = []
@@ -2224,12 +2290,162 @@ def build_multitask_qr_snapshots_command(
 
 
 @app.command("worker", hidden=True)
-def worker() -> None:
-    typer.echo(
-        "No background queue worker is implemented. Use explicit CLI ingestion commands instead.",
-        err=True,
+def worker(
+    once: bool = typer.Option(False, "--once", help="Poll once and exit."),
+    poll_interval: float = typer.Option(5.0, "--poll-interval", min=0.1),
+    max_jobs: int | None = typer.Option(None, "--max-jobs", min=1),
+    job_name: list[str] | None = typer.Option(
+        None,
+        "--job-name",
+        help="Restrict the worker to one or more queued job names.",
+    ),
+    stale_after_seconds: int = typer.Option(
+        7200,
+        "--stale-after-seconds",
+        min=0,
+        help="Recover queued jobs whose worker lock is older than this many seconds.",
+    ),
+) -> None:
+    settings = get_settings()
+    processed = 0
+    job_names = set(job_name or [])
+    while True:
+        result = _run_worker_once(
+            settings,
+            job_names=job_names or None,
+            stale_after_seconds=stale_after_seconds,
+        )
+        if result["status"] != "idle":
+            typer.echo(result)
+            processed += 1
+        elif once:
+            typer.echo({"status": "idle", "processed": processed})
+
+        if once or (max_jobs is not None and processed >= max_jobs):
+            return
+
+        time.sleep(poll_interval)
+
+
+@app.command("queue-job")
+def queue_job_command(
+    job_name: str = typer.Argument(..., help="Queued job name."),
+    season: int | None = typer.Option(None, "--season"),
+    weekends: int | None = typer.Option(None, "--weekends"),
+    market_batches: int | None = typer.Option(None, "--market-batches"),
+    max_pages: int | None = typer.Option(None, "--max-pages"),
+    batch_size: int | None = typer.Option(None, "--batch-size"),
+    search_fallback: bool | None = typer.Option(None, "--search-fallback/--no-search-fallback"),
+    start_year: int | None = typer.Option(None, "--start-year"),
+    end_year: int | None = typer.Option(None, "--end-year"),
+    gp_short_code: str | None = typer.Option(None, "--gp-short-code"),
+    snapshot_id: str | None = typer.Option(None, "--snapshot-id"),
+    baseline: str | None = typer.Option(None, "--baseline"),
+    min_edge: float | None = typer.Option(None, "--min-edge"),
+    bet_size: float | None = typer.Option(None, "--bet-size"),
+    rebuild_missing: bool | None = typer.Option(None, "--rebuild-missing/--stored-only"),
+    discover_max_pages: int | None = typer.Option(None, "--discover-max-pages"),
+    meeting_id: str | None = typer.Option(None, "--meeting-id"),
+    meeting_key: int | None = typer.Option(None, "--meeting-key"),
+    force: bool | None = typer.Option(None, "--force/--no-force"),
+    hydrate_market_history: bool | None = typer.Option(
+        None,
+        "--hydrate-market-history/--skip-market-history",
+    ),
+    market_history_fidelity: int | None = typer.Option(None, "--market-history-fidelity"),
+    sync_calendar: bool | None = typer.Option(None, "--sync-calendar/--skip-calendar-sync"),
+    hydrate_f1_session_data: bool | None = typer.Option(
+        None,
+        "--hydrate-f1-session-data/--skip-f1-session-data",
+    ),
+    include_extended_f1_data: bool | None = typer.Option(
+        None,
+        "--include-extended-f1-data/--skip-extended-f1-data",
+    ),
+    include_heavy_f1_data: bool | None = typer.Option(
+        None,
+        "--include-heavy-f1-data/--skip-heavy-f1-data",
+    ),
+    refresh_artifacts: bool | None = typer.Option(None, "--refresh-artifacts/--skip-artifacts"),
+    session_key: int | None = typer.Option(None, "--session-key"),
+    market_ids: list[str] | None = typer.Option(None, "--market-id"),
+    capture_seconds: int | None = typer.Option(None, "--capture-seconds"),
+    start_buffer_min: int | None = typer.Option(None, "--start-buffer-min"),
+    stop_buffer_min: int | None = typer.Option(None, "--stop-buffer-min"),
+    message_limit: int | None = typer.Option(None, "--message-limit"),
+    max_attempts: int | None = typer.Option(None, "--max-attempts", min=1),
+) -> None:
+    from f1_polymarket_worker.job_queue import enqueue_job
+
+    planned_inputs = {
+        key: value
+        for key, value in {
+            "season": season,
+            "weekends": weekends,
+            "market_batches": market_batches,
+            "max_pages": max_pages,
+            "batch_size": batch_size,
+            "search_fallback": search_fallback,
+            "start_year": start_year,
+            "end_year": end_year,
+            "gp_short_code": gp_short_code,
+            "snapshot_id": snapshot_id,
+            "baseline": baseline,
+            "min_edge": min_edge,
+            "bet_size": bet_size,
+            "rebuild_missing": rebuild_missing,
+            "discover_max_pages": discover_max_pages,
+            "meeting_id": meeting_id,
+            "meeting_key": meeting_key,
+            "force": force,
+            "hydrate_market_history": hydrate_market_history,
+            "market_history_fidelity": market_history_fidelity,
+            "sync_calendar": sync_calendar,
+            "hydrate_f1_session_data": hydrate_f1_session_data,
+            "include_extended_f1_data": include_extended_f1_data,
+            "include_heavy_f1_data": include_heavy_f1_data,
+            "refresh_artifacts": refresh_artifacts,
+            "session_key": session_key,
+            "market_ids": market_ids,
+            "capture_seconds": capture_seconds,
+            "start_buffer_min": start_buffer_min,
+            "stop_buffer_min": stop_buffer_min,
+            "message_limit": message_limit,
+        }.items()
+        if value is not None
+    }
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        run = enqueue_job(
+            session,
+            job_name=job_name,
+            planned_inputs=planned_inputs,
+            max_attempts=max_attempts,
+        )
+        typer.echo(
+            {
+                "status": run.status,
+                "job_run_id": run.id,
+                "job_name": run.job_name,
+                "planned_inputs": run.planned_inputs,
+                "max_attempts": run.max_attempts,
+            }
+        )
+
+
+def _run_worker_once(
+    settings: Any,
+    *,
+    job_names: set[str] | None = None,
+    stale_after_seconds: int = 7200,
+) -> dict[str, Any]:
+    from f1_polymarket_worker.job_queue import run_worker_once
+
+    return run_worker_once(
+        settings,
+        job_names=job_names,
+        stale_after_seconds=stale_after_seconds,
     )
-    raise typer.Exit(code=2)
 
 
 if __name__ == "__main__":

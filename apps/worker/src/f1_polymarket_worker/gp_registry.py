@@ -980,6 +980,7 @@ def _pre_race_pace_signals(
     target_session_code: str,
 ) -> list[float]:
     """Weighted pre-event signal for Sprint or Race outright markets."""
+    feature_weights: tuple[tuple[str, float], ...]
     if target_session_code == "S":
         feature_weights = (
             ("fp1", 0.8),

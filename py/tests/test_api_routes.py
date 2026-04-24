@@ -4,11 +4,11 @@ from collections.abc import Generator
 from datetime import datetime, timezone
 from pathlib import Path
 
-from f1_polymarket_api.api.v1 import action_routes
 from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.main import app
 from f1_polymarket_lab.storage.db import Base
 from f1_polymarket_lab.storage.models import (
+    DataQualityResult,
     EntityMappingF1ToPolymarket,
     F1CalendarOverride,
     F1Meeting,
@@ -519,6 +519,54 @@ def test_mappings_endpoint_filters_by_confidence_and_session(tmp_path: Path) -> 
     assert [row["id"] for row in payload] == ["mapping-high"]
 
 
+def test_quality_results_defaults_to_latest_result_per_dataset(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'api-test.sqlite'}", future=True)
+        with Session(engine) as session:
+            session.add_all(
+                [
+                    DataQualityResult(
+                        id="dq-old-a",
+                        dataset="source_fetch_log",
+                        status="fail",
+                        metrics_json={"freshness_hours": 300},
+                        observed_at=datetime(2026, 3, 27, 1, 0, tzinfo=timezone.utc),
+                    ),
+                    DataQualityResult(
+                        id="dq-new-a",
+                        dataset="source_fetch_log",
+                        status="pass",
+                        metrics_json={"freshness_hours": 1},
+                        observed_at=datetime(2026, 3, 27, 2, 0, tzinfo=timezone.utc),
+                    ),
+                    DataQualityResult(
+                        id="dq-new-b",
+                        dataset="polymarket_ws_message_manifest",
+                        status="warning",
+                        metrics_json={"row_count": 0},
+                        observed_at=datetime(2026, 3, 27, 3, 0, tzinfo=timezone.utc),
+                    ),
+                ]
+            )
+            session.commit()
+
+        latest_response = client.get("/api/v1/quality/results", params={"limit": 10})
+        history_response = client.get(
+            "/api/v1/quality/results",
+            params={"limit": 10, "latest_per_dataset": False},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert latest_response.status_code == 200
+    latest_payload = latest_response.json()
+    assert [row["id"] for row in latest_payload] == ["dq-new-b", "dq-new-a"]
+
+    assert history_response.status_code == 200
+    history_payload = history_response.json()
+    assert [row["id"] for row in history_payload] == ["dq-new-b", "dq-new-a", "dq-old-a"]
+
+
 def test_model_runs_endpoint_includes_registry_and_promotion_fields(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         response = client.get("/api/v1/model-runs")
@@ -929,201 +977,127 @@ def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
 
 def test_backfill_backtests_endpoint_serializes_worker_result(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        "f1_polymarket_worker.backtest.backfill_backtests",
-        lambda *args, **kwargs: {
-            "status": "completed",
-            "gp_short_code": "japan_fp3",
-            "processed": [
-                {
-                    "gp_short_code": "japan_fp3",
-                    "snapshot_id": "snapshot-1",
-                    "bet_count": 1,
-                    "total_pnl": 9.6,
-                }
-            ],
-            "skipped": [],
-            "processed_count": 1,
-            "skipped_count": 0,
-        },
-    )
-
     with build_test_client(tmp_path) as client:
         response = client.post(
             "/api/v1/actions/backfill-backtests",
             json={"gp_short_code": "japan_fp3"},
         )
+        jobs_response = client.get("/api/v1/lineage/jobs")
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "backfill-backtests"
-    assert payload["details"]["processed_count"] == 1
-    assert "Settled 1 snapshot" in payload["message"]
+    assert payload["status"] == "queued"
+    assert payload["job_run_id"] == payload["details"]["job_run_id"]
+    assert "Backtest backfill queued" in payload["message"]
+    jobs = jobs_response.json()
+    assert jobs[0]["job_name"] == "backfill-backtests"
+    assert jobs[0]["status"] == "queued"
+    assert jobs[0]["planned_inputs"]["gp_short_code"] == "japan_fp3"
 
 
 def test_run_backtest_endpoint_accepts_dynamic_ops_stage_code(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    calls: dict[str, object] = {}
-
-    def fake_build_snapshot(*args, **kwargs):
-        config = kwargs.get("config") or args[1]
-        calls["gp_short_code"] = config.short_code
-        return {"snapshot_id": "snapshot-1"}
-
-    monkeypatch.setattr(
-        "f1_polymarket_worker.gp_registry.build_snapshot",
-        fake_build_snapshot,
-    )
-    monkeypatch.setattr(
-        "f1_polymarket_worker.gp_registry.run_baseline",
-        lambda *args, **kwargs: None,
-    )
-    monkeypatch.setattr(
-        "f1_polymarket_worker.backtest.settle_single_gp",
-        lambda *args, **kwargs: {
-            "backtest": {
-                "backtest_run_id": "bt-miami",
-                "metrics": {"bet_count": 2, "total_pnl": 3.5, "roi_pct": 0.175},
-            }
-        },
-    )
-
     with build_test_client(tmp_path) as client:
         response = client.post(
             "/api/v1/actions/run-backtest",
             json={"gp_short_code": "miami_fp1_q"},
         )
+        jobs_response = client.get("/api/v1/lineage/jobs")
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "run-backtest"
-    assert calls["gp_short_code"] == "miami_fp1_q"
+    assert payload["status"] == "queued"
     assert "miami_fp1_q" in payload["message"]
+    jobs = jobs_response.json()
+    assert jobs[0]["job_name"] == "run-backtest"
+    assert jobs[0]["planned_inputs"]["gp_short_code"] == "miami_fp1_q"
 
 
-def test_run_backtest_endpoint_returns_409_for_missing_polymarket_mappings(
+def test_run_backtest_endpoint_returns_404_for_unknown_ops_stage(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    monkeypatch.setattr(
-        "f1_polymarket_worker.gp_registry.build_snapshot",
-        lambda *args, **kwargs: {"snapshot_id": "snapshot-1"},
-    )
-    monkeypatch.setattr(
-        "f1_polymarket_worker.gp_registry.run_baseline",
-        lambda *args, **kwargs: None,
-    )
-
-    def fail_settlement(*args, **kwargs):
-        raise ValueError("No Polymarket mappings found for SQ session")
-
-    monkeypatch.setattr(
-        "f1_polymarket_worker.backtest.settle_single_gp",
-        fail_settlement,
-    )
-
     with build_test_client(tmp_path) as client:
         response = client.post(
             "/api/v1/actions/run-backtest",
-            json={"gp_short_code": "china"},
+            json={"gp_short_code": "unknown-stage"},
         )
 
     app.dependency_overrides.clear()
 
-    assert response.status_code == 409
-    assert response.json()["detail"] == "No Polymarket mappings found for SQ session"
+    assert response.status_code == 404
+    assert "unknown-stage" in response.json()["detail"]
 
 
-def test_run_paper_trade_endpoint_accepts_dynamic_ops_stage_code(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: dict[str, object] = {}
-
-    def fake_run_gp_paper_trade_pipeline(*args, **kwargs):
-        config = kwargs.get("config") or args[1]
-        calls["gp_short_code"] = config.short_code
-        return {"trades_executed": 2, "total_pnl": 1.25}
-
-    monkeypatch.setattr(
-        "f1_polymarket_worker.weekend_ops.run_gp_paper_trade_pipeline",
-        fake_run_gp_paper_trade_pipeline,
-    )
-
+def test_run_paper_trade_endpoint_accepts_dynamic_ops_stage_code(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         response = client.post(
             "/api/v1/actions/run-paper-trade",
             json={"gp_short_code": "miami_fp1_q"},
         )
+        jobs_response = client.get("/api/v1/lineage/jobs")
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "run-paper-trade"
-    assert calls["gp_short_code"] == "miami_fp1_q"
+    assert payload["status"] == "queued"
+    assert payload["job_run_id"] == payload["details"]["job_run_id"]
     assert "Miami Grand Prix" in payload["message"]
+    jobs = jobs_response.json()
+    assert jobs[0]["id"] == payload["job_run_id"]
+    assert jobs[0]["job_name"] == "run-paper-trade"
+    assert jobs[0]["planned_inputs"]["gp_short_code"] == "miami_fp1_q"
 
 
-def test_ingest_demo_endpoint_starts_background_job(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    calls: dict[str, object] = {}
-
-    def fake_start(session_maker, **kwargs):
-        calls["session_maker"] = session_maker
-        calls.update(kwargs)
-        return "job-demo-1"
-
-    monkeypatch.setattr(
-        "f1_polymarket_api.api.v1.action_routes._start_ingest_demo_background",
-        fake_start,
-    )
-
+def test_ingest_demo_endpoint_queues_worker_job(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
         response = client.post("/api/v1/actions/ingest-demo", json={})
+        jobs_response = client.get("/api/v1/lineage/jobs")
 
     app.dependency_overrides.clear()
 
     assert response.status_code == 200
     payload = response.json()
     assert payload["action"] == "ingest-demo"
+    assert payload["status"] == "queued"
+    assert payload["job_run_id"] == payload["details"]["job_run_id"]
     assert payload["details"]["queued"] is True
-    assert payload["details"]["job_run_id"] == "job-demo-1"
-    assert calls["season"] == 2026
-    assert calls["weekends"] == 1
-    assert calls["market_batches"] == 1
+    assert payload["details"]["planned_inputs"] == {
+        "season": 2026,
+        "weekends": 1,
+        "market_batches": 1,
+    }
+    jobs = jobs_response.json()
+    assert jobs[0]["id"] == payload["job_run_id"]
+    assert jobs[0]["status"] == "queued"
+    assert jobs[0]["attempt_count"] == 0
+    assert jobs[0]["max_attempts"] == 3
 
 
-def test_ingest_demo_endpoint_returns_409_when_job_is_already_running(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    monkeypatch.setattr(
-        "f1_polymarket_api.api.v1.action_routes._start_ingest_demo_background",
-        lambda *args, **kwargs: (_ for _ in ()).throw(
-            action_routes._ActionBusyError(
-                "Another write action is already in progress or the database is temporarily busy. "
-                "Wait for it to finish, then retry."
-            )
-        ),
-    )
-
+def test_ingest_demo_endpoint_allows_multiple_queued_jobs(tmp_path: Path) -> None:
     with build_test_client(tmp_path) as client:
-        response = client.post("/api/v1/actions/ingest-demo", json={})
+        first = client.post("/api/v1/actions/ingest-demo", json={})
+        second = client.post("/api/v1/actions/ingest-demo", json={})
+        jobs_response = client.get("/api/v1/lineage/jobs")
 
     app.dependency_overrides.clear()
 
-    assert response.status_code == 409
+    assert first.status_code == 200
+    assert second.status_code == 200
+    queued_demo_jobs = [
+        job for job in jobs_response.json() if job["job_name"] == "ingest-demo"
+    ]
+    assert len(queued_demo_jobs) == 2
+    assert all(job["status"] == "queued" for job in queued_demo_jobs)
 
 
 def test_refresh_latest_session_endpoint_serializes_worker_result(

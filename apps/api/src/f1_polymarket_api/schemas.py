@@ -111,6 +111,12 @@ class IngestionJobRunResponse(BaseModel):
     cursor_after: dict[str, object] | None = None
     records_written: int | None
     error_message: str | None = None
+    queued_at: datetime | None = None
+    available_at: datetime | None = None
+    attempt_count: int = 0
+    max_attempts: int = 1
+    locked_by: str | None = None
+    locked_at: datetime | None = None
     started_at: datetime
     finished_at: datetime | None
 
@@ -365,6 +371,7 @@ class ActionStatusResponse(BaseModel):
     action: str
     status: str
     message: str
+    job_run_id: str | None = None
     details: dict[str, object] | None = None
 
 

@@ -75,6 +75,10 @@ export type ListOptions = {
   limit?: number;
 };
 
+export type QualityResultOptions = ListOptions & {
+  latestPerDataset?: boolean;
+};
+
 export type MeetingListOptions = ListOptions & {
   season?: number;
 };
@@ -206,6 +210,12 @@ type IngestionJobRunApi = {
   cursor_after: Record<string, unknown> | null;
   records_written: number | null;
   error_message: string | null;
+  queued_at: string | null;
+  available_at: string | null;
+  attempt_count: number;
+  max_attempts: number;
+  locked_by: string | null;
+  locked_at: string | null;
   started_at: string;
   finished_at: string | null;
 };
@@ -317,6 +327,12 @@ function mapIngestionJobRun(record: IngestionJobRunApi): IngestionJobRun {
     cursorAfter: record.cursor_after,
     recordsWritten: record.records_written,
     errorMessage: record.error_message,
+    queuedAt: record.queued_at,
+    availableAt: record.available_at,
+    attemptCount: record.attempt_count,
+    maxAttempts: record.max_attempts,
+    lockedBy: record.locked_by,
+    lockedAt: record.locked_at,
     startedAt: record.started_at,
     finishedAt: record.finished_at,
   };
@@ -464,10 +480,11 @@ export const sdk = {
         limit: options?.limit,
       })
     ).map(mapCursorState),
-  qualityResults: async (options?: ListOptions) =>
+  qualityResults: async (options?: QualityResultOptions) =>
     (
       await apiGet<DataQualityResultApi[]>("/api/v1/quality/results", {
         limit: options?.limit,
+        latest_per_dataset: options?.latestPerDataset,
       })
     ).map(mapDataQualityResult),
   meetings: async (options?: MeetingListOptions) =>

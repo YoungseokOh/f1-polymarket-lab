@@ -16,6 +16,7 @@ from f1_polymarket_lab.storage.repository import upsert_records
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+mlflow: Any
 try:
     import mlflow
 except ImportError as exc:  # pragma: no cover - import availability is environment-specific
@@ -192,7 +193,7 @@ def log_run_to_mlflow(
         )
         if artifact_dir.exists():
             mlflow.log_artifacts(str(artifact_dir), artifact_path="artifacts")
-        return run.info.run_id
+        return str(run.info.run_id)
 
 
 def get_active_promotion(session: Session, *, stage: str) -> ModelRunPromotion | None:
@@ -230,6 +231,53 @@ def promotion_state_by_model_run_id(
         if existing is None or row.promoted_at >= existing.promoted_at:
             state[row.model_run_id] = row
     return state
+
+
+def _promotion_candidate_sort_key(model_run: ModelRun) -> tuple[float, float, float, float, str]:
+    metrics = model_run.metrics_json or {}
+    return (
+        _coerce_float(metrics.get("total_pnl"), 0.0),
+        _coerce_float(metrics.get("roi_pct"), 0.0),
+        -_coerce_float(metrics.get("ece"), 1.0),
+        _coerce_float(metrics.get("bet_count"), 0.0),
+        model_run.created_at.isoformat(),
+    )
+
+
+def eligible_promotion_candidates(
+    session: Session,
+    *,
+    stage: str,
+) -> list[tuple[ModelRun, PromotionDecision]]:
+    rows = session.scalars(
+        select(ModelRun)
+        .where(
+            ModelRun.stage == stage,
+            ModelRun.artifact_uri.is_not(None),
+        )
+        .order_by(ModelRun.created_at.desc())
+    ).all()
+    candidates: list[tuple[ModelRun, PromotionDecision]] = []
+    for row in rows:
+        decision = evaluate_promotion_gate(row.metrics_json)
+        if decision.eligible:
+            candidates.append((row, decision))
+    return sorted(
+        candidates,
+        key=lambda candidate: _promotion_candidate_sort_key(candidate[0]),
+        reverse=True,
+    )
+
+
+def promote_best_model_run(
+    session: Session,
+    *,
+    stage: str,
+) -> ModelRunPromotion:
+    candidates = eligible_promotion_candidates(session, stage=stage)
+    if not candidates:
+        raise ValueError(f"No eligible promotion candidates found for stage={stage}")
+    return promote_model_run(session, model_run_id=candidates[0][0].id, stage=stage)
 
 
 def promote_model_run(

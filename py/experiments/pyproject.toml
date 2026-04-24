@@ -10,7 +10,8 @@ dependencies = [
   "f1-polymarket-common",
   "f1-polymarket-features",
   "f1-polymarket-models",
-  "f1-polymarket-storage"
+  "f1-polymarket-storage",
+  "polars>=1.0"
 ]
 
 [tool.uv.sources]

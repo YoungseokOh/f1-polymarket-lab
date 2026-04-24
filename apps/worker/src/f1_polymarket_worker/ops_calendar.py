@@ -185,7 +185,7 @@ def derive_meeting_slug(
         _legacy_meeting_name(season=season, meeting_key=meeting_key),
     ):
         if candidate:
-            return slugify(str(candidate))
+            return str(slugify(str(candidate)))
 
     country_name = str(first_session.get("country_name") or "").strip()
     if country_name:
@@ -193,12 +193,12 @@ def derive_meeting_slug(
             country_name.lower(),
             f"{country_name} Grand Prix",
         )
-        return slugify(fallback_name)
+        return str(slugify(fallback_name))
 
     location = str(first_session.get("location") or "").strip()
     if location:
-        return slugify(f"{location} Grand Prix")
-    return slugify(f"{season}-meeting-{meeting_key}")
+        return str(slugify(f"{location} Grand Prix"))
+    return str(slugify(f"{season}-meeting-{meeting_key}"))
 
 
 def set_calendar_override(
@@ -468,7 +468,11 @@ def get_ops_stage_config(
     now: datetime | None = None,
 ) -> tuple[EffectiveOpsMeeting, GPConfig]:
     requested = slugify(short_code).replace("-", "_")
-    seasons = [resolve_ops_season(session, now=now)]
+    seasons: list[int] = []
+    try:
+        seasons.append(resolve_ops_season(session, now=now))
+    except ValueError:
+        pass
     seasons.extend(
         season
         for season in session.scalars(
@@ -489,6 +493,9 @@ def get_ops_stage_config(
                     f"GP stage '{short_code}' is cancelled by calendar override."
                 )
             return meeting, config
+    legacy_config = _legacy_config_for_short_code(requested)
+    if legacy_config is not None:
+        return _legacy_meeting_for_config(session, legacy_config), legacy_config
     raise KeyError(f"Unknown GP short_code: {short_code!r}")
 
 
@@ -523,6 +530,50 @@ def _legacy_meeting_name(*, season: int, meeting_key: int) -> str | None:
     return None
 
 
+def _legacy_config_for_short_code(short_code: str) -> GPConfig | None:
+    for config in GP_REGISTRY:
+        if config.short_code == short_code:
+            return config
+    return None
+
+
+def _legacy_meeting_for_config(session: Session, config: GPConfig) -> EffectiveOpsMeeting:
+    for meeting in resolve_effective_ops_calendar(
+        session,
+        season=config.season,
+        include_cancelled=True,
+    ):
+        if meeting.meeting_key == config.meeting_key:
+            if meeting.status == CALENDAR_STATUS_CANCELLED:
+                raise ValueError(
+                    f"GP stage '{config.short_code}' is cancelled by calendar override."
+                )
+            return meeting
+
+    meeting_slug = slugify(config.name)
+    ops_slug = config.short_code.split("_", 1)[0]
+    return EffectiveOpsMeeting(
+        id=f"meeting:legacy:{config.season}:{config.meeting_key}",
+        meeting_key=config.meeting_key,
+        season=config.season,
+        round_number=None,
+        meeting_name=config.name,
+        meeting_slug=meeting_slug,
+        ops_slug=ops_slug,
+        event_format=None,
+        country_name=None,
+        location=None,
+        start_date_utc=None,
+        end_date_utc=None,
+        status=CALENDAR_STATUS_SCHEDULED,
+        source_conflict=False,
+        source_label="legacy GP registry",
+        source_url=None,
+        note="Synthesized from legacy GP registry because calendar rows are not loaded.",
+        override_active=False,
+    )
+
+
 def _legacy_ops_slug_for_meeting(
     *,
     season: int,
@@ -532,7 +583,11 @@ def _legacy_ops_slug_for_meeting(
     short_codes = [
         config.short_code
         for config in GP_REGISTRY
-        if config.season == season and config.meeting_key == meeting_key
+        if (
+            config.season == season
+            and config.meeting_key == meeting_key
+            and slugify(config.name) == fallback_slug
+        )
     ]
     if not short_codes:
         return fallback_slug

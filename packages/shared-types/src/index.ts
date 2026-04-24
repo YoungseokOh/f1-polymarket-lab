@@ -51,6 +51,12 @@ export interface IngestionJobRun {
   cursorAfter: Record<string, unknown> | null;
   recordsWritten: number | null;
   errorMessage: string | null;
+  queuedAt: string | null;
+  availableAt: string | null;
+  attemptCount: number;
+  maxAttempts: number;
+  lockedBy: string | null;
+  lockedAt: string | null;
   startedAt: string;
   finishedAt: string | null;
 }
@@ -334,6 +340,7 @@ export interface ActionStatusResponse {
   action: string;
   status: string;
   message: string;
+  job_run_id?: string | null;
   details?: Record<string, unknown> | null;
 }
 

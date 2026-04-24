@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import time
 from collections import Counter, defaultdict
+from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -2056,7 +2057,7 @@ def _paper_trade_position_pnl(
             if outcome_yes
             else -position.quantity * position.entry_price
         )
-    return pnl - (position.quantity * fee_rate)
+    return float(pnl - (position.quantity * fee_rate))
 
 
 def _refresh_paper_trade_session_summary(
@@ -2099,7 +2100,7 @@ def settle_paper_trade_sessions_for_completed_session(
     completed_session: F1Session,
     meeting: F1Meeting | None,
 ) -> dict[str, Any]:
-    settlement_summary = {
+    settlement_summary: dict[str, Any] = {
         "settled_session_ids": [],
         "settled_gp_slugs": [],
         "settled_positions": 0,
@@ -3221,10 +3222,12 @@ def run_weekend_cockpit(
                 completed_session=source_session,
                 meeting=status["meeting"],
             )
-            unresolved_positions = int(settlement_result["unresolved_positions"])
+            settled_session_ids = cast(list[str], settlement_result["settled_session_ids"])
+            settled_positions = int(cast(Any, settlement_result["settled_positions"]))
+            unresolved_positions = int(cast(Any, settlement_result["unresolved_positions"]))
             settlement_detail = (
-                f"Settled {settlement_result['settled_positions']} prior tickets across "
-                f"{len(settlement_result['settled_session_ids'])} runs."
+                f"Settled {settled_positions} prior tickets across "
+                f"{len(settled_session_ids)} runs."
             )
             if unresolved_positions:
                 settlement_detail += (
@@ -3239,7 +3242,7 @@ def run_weekend_cockpit(
                     detail=settlement_detail,
                     session_code=source_session.session_code,
                     session_key=source_session.session_key,
-                    count=int(settlement_result["settled_positions"]),
+                    count=settled_positions,
                 )
             )
             status = get_weekend_cockpit_status(ctx, gp_short_code=config.short_code)
@@ -3595,7 +3598,7 @@ def refresh_latest_session_for_meeting(
             "session_name": refreshed_session.session_name,
             "date_end_utc": refreshed_session.date_end_utc,
         },
-        "f1_records_written": int(hydrate_result.get("records_written", 0) or 0),
+        "f1_records_written": int(cast(Any, hydrate_result).get("records_written", 0) or 0),
         "markets_discovered": int(discover_result.get("markets", 0) or 0),
         "mappings_written": len(linked_market_ids_after - linked_market_ids_before),
         "markets_hydrated": markets_hydrated,
@@ -3725,7 +3728,7 @@ def _pick_live_payload_value(
     return None
 
 
-def _preferred_live_token_ids(tokens: list[PolymarketToken]) -> dict[str, str]:
+def _preferred_live_token_ids(tokens: Sequence[PolymarketToken]) -> dict[str, str]:
     preferred: dict[str, PolymarketToken] = {}
     for token in tokens:
         outcome = (token.outcome or "").strip().lower()
@@ -3942,19 +3945,41 @@ def capture_live_weekend(
         },
     )
     if session is not None and meeting is not None:
-        target_config = _selected_config_for_operations(
-            ctx,
-            meeting_key=meeting.meeting_key,
-            season=meeting.season,
-            now=_ensure_utc(utc_now()),
-        )
-        preflight_summary = _live_capture_action_status(
-            ctx,
-            config=target_config,
-            meeting=meeting,
-            target_session=session,
-            now=_ensure_utc(utc_now()),
-        )
+        try:
+            target_config = _selected_config_for_operations(
+                ctx,
+                meeting_key=meeting.meeting_key,
+                season=meeting.season,
+                now=_ensure_utc(utc_now()),
+            )
+        except (KeyError, ValueError) as exc:
+            preflight_summary = {
+                "key": "live_capture",
+                "label": "Live capture",
+                "status": "ready",
+                "message": f"Live capture preflight skipped: {exc}",
+                "blockers": [],
+                "warnings": [str(exc)],
+                "meeting_key": meeting_key_value,
+                "meeting_name": meeting.meeting_name,
+                "gp_short_code": None,
+                "session_code": session.session_code,
+                "session_key": session_key,
+                "actionable_after_utc": None,
+                "openf1_credentials_configured": bool(
+                    ctx.settings.openf1_username and ctx.settings.openf1_password
+                ),
+                "last_job_run": None,
+                "last_report_path": None,
+            }
+        else:
+            preflight_summary = _live_capture_action_status(
+                ctx,
+                config=target_config,
+                meeting=meeting,
+                target_session=session,
+                now=_ensure_utc(utc_now()),
+            )
     else:
         preflight_summary = {
             "key": "live_capture",

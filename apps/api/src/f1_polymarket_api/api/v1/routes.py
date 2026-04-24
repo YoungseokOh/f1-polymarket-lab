@@ -411,11 +411,31 @@ def cursor_states(
 @router.get("/quality/results", response_model=list[DataQualityResultResponse])
 def quality_results(
     limit: int = Query(DEFAULT_LIMIT, ge=1, le=MAX_LIMIT),
+    latest_per_dataset: bool = Query(True),
     db: Session = Depends(get_db_session),
 ) -> list[DataQualityResultResponse]:
-    records = db.scalars(
-        select(DataQualityResult).order_by(DataQualityResult.observed_at.desc()).limit(limit)
-    ).all()
+    stmt = select(DataQualityResult).order_by(DataQualityResult.observed_at.desc())
+    if latest_per_dataset:
+        records: list[DataQualityResult] = []
+        seen_datasets: set[str] = set()
+        offset = 0
+        batch_size = max(limit, 50)
+        while len(records) < limit:
+            batch = db.scalars(stmt.offset(offset).limit(batch_size)).all()
+            if not batch:
+                break
+            for record in batch:
+                if record.dataset in seen_datasets:
+                    continue
+                seen_datasets.add(record.dataset)
+                records.append(record)
+                if len(records) >= limit:
+                    break
+            if len(batch) < batch_size:
+                break
+            offset += batch_size
+    else:
+        records = list(db.scalars(stmt.limit(limit)).all())
     return [DataQualityResultResponse.model_validate(record) for record in records]
 
 
@@ -754,7 +774,7 @@ def gp_registry(
         (meeting.meeting_key, meeting.season): meeting for meeting, _ in registry_entries
     }
 
-    def sort_key(gp) -> tuple[bool, bool, int, int, int, int]:
+    def sort_key(gp: Any) -> tuple[bool, bool, int, int, int, int]:
         session_id = session_id_by_target.get(
             (gp.meeting_key, gp.season, gp.target_session_code)
         )

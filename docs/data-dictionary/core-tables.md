@@ -11,6 +11,8 @@ Current schema baseline includes the required canonical table families:
 - ingestion:
   - `source_fetch_log`
   - `ingestion_job_definitions`, `ingestion_job_runs`
+  - `ingestion_job_runs` includes queued-job controls: `queued_at`, `available_at`,
+    `attempt_count`, `max_attempts`, `locked_by`, and `locked_at`
   - `source_cursor_state`
   - `bronze_object_manifest`, `schema_registry`
   - `data_quality_checks`, `data_quality_results`

@@ -189,7 +189,7 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-m
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli train-multitask-walk-forward \
   --manifest data/feature_snapshots/multitask/<SEASON>/manifest.json --execute
 
-# Experimental scaffold with mock scoring only
+# Manifest-based candidate search with walk-forward evaluation
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-multitask-autoresearch \
   --output-dir data/experiments/autoresearch/multitask_qr --iterations 20
 ```
@@ -200,13 +200,28 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-mul
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli dq-run
 ```
 
+Checks marked with warning severity record `warning` rather than `fail` when optional datasets such
+as live websocket manifests are absent. Error-severity checks still fail the result.
+
 ## Dev Commands
 
 ```bash
 make api       # FastAPI on :8000
 make web       # Next.js on :3000
+make worker    # DB-backed queued job worker
 make lint      # ruff + biome
 make test      # pytest + vitest
 make typecheck # mypy + tsc
 make format    # ruff format + biome format
 ```
+
+Queued API actions and `queue-job` commands write `ingestion_job_runs` rows with `status=queued`.
+The worker records attempt counts, locks the claimed row, retries with backoff when configured, and
+marks stale worker locks recoverable after the configured timeout. Use lineage to follow queued,
+running, completed, and failed jobs.
+
+The generic queue dispatcher covers ingestion, calendar and market syncs, backtests, paper trading,
+weekend cockpit refreshes, latest-session refreshes, driver-affinity report refreshes, live weekend
+capture, and data-quality checks. Live ticket create/fill/cancel routes intentionally stay
+synchronous because the operator must receive an immediate write result before taking the next
+manual trading step.
