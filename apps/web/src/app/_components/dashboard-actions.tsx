@@ -19,6 +19,10 @@ function jobTone(status: string) {
   return "text-[#f59e0b]";
 }
 
+function isActiveJob(status: string) {
+  return status === "queued" || status === "running";
+}
+
 function selectLatestDemoIngestJob(
   jobs: IngestionJobRun[],
   runId?: string,
@@ -49,7 +53,7 @@ export function DashboardActions({
     const jobs = await sdk.ingestionJobs({ limit: 25 });
     const nextJob = selectLatestDemoIngestJob(jobs, runId);
     setDemoJob(nextJob);
-    if (nextJob && nextJob.status !== "running") {
+    if (nextJob && !isActiveJob(nextJob.status)) {
       startTransition(() => {
         router.refresh();
       });
@@ -61,7 +65,7 @@ export function DashboardActions({
     const jobs = await sdk.ingestionJobs({ limit: 25 });
     const nextJob = selectLatestDemoIngestJob(jobs, runId);
     setDemoJob(nextJob);
-    if (nextJob && nextJob.status !== "running") {
+    if (nextJob && !isActiveJob(nextJob.status)) {
       startTransition(() => {
         router.refresh();
       });
@@ -69,10 +73,11 @@ export function DashboardActions({
     return nextJob;
   }
 
-  const runningDemoJobId = demoJob?.status === "running" ? demoJob.id : null;
+  const activeDemoJobId =
+    demoJob && isActiveJob(demoJob.status) ? demoJob.id : null;
 
   useEffect(() => {
-    if (!runningDemoJobId) {
+    if (!activeDemoJobId) {
       return;
     }
 
@@ -83,8 +88,8 @@ export function DashboardActions({
       let shouldContinue = true;
       try {
         const nextJob =
-          await pollLatestDemoIngestJobRef.current?.(runningDemoJobId);
-        shouldContinue = nextJob?.status === "running";
+          await pollLatestDemoIngestJobRef.current?.(activeDemoJobId);
+        shouldContinue = nextJob ? isActiveJob(nextJob.status) : true;
       } catch {
         shouldContinue = true;
       } finally {
@@ -101,7 +106,7 @@ export function DashboardActions({
         window.clearTimeout(timer);
       }
     };
-  }, [runningDemoJobId]);
+  }, [activeDemoJobId]);
 
   return (
     <Panel title="Quick Actions" eyebrow="Pipeline Controls">
@@ -135,11 +140,13 @@ export function DashboardActions({
           onAction={async () => {
             const res = await sdk.ingestDemo(buildDashboardDemoIngestRequest());
             const jobRunId =
-              res.details &&
-              typeof res.details === "object" &&
-              typeof res.details.job_run_id === "string"
-                ? res.details.job_run_id
-                : undefined;
+              typeof res.job_run_id === "string"
+                ? res.job_run_id
+                : res.details &&
+                    typeof res.details === "object" &&
+                    typeof res.details.job_run_id === "string"
+                  ? res.details.job_run_id
+                  : undefined;
             await refreshLatestDemoIngestJob(jobRunId);
             startTransition(() => {
               router.refresh();
@@ -157,11 +164,13 @@ export function DashboardActions({
             <p
               className={`mt-1 text-sm font-medium ${jobTone(demoJob.status)}`}
             >
-              {demoJob.status === "running"
-                ? "Running"
-                : demoJob.status === "completed"
-                  ? "Completed"
-                  : "Failed"}
+              {demoJob.status === "queued"
+                ? "Queued"
+                : demoJob.status === "running"
+                  ? "Running"
+                  : demoJob.status === "completed"
+                    ? "Completed"
+                    : "Failed"}
             </p>
             <p className="mt-1 truncate text-xs text-[#9ca3af]">
               Job {demoJob.id} started{" "}
@@ -172,8 +181,8 @@ export function DashboardActions({
               })}
             </p>
             <p className="mt-1 text-xs text-[#9ca3af]">
-              {demoJob.status === "running"
-                ? "Refreshing automatically while this ingest is running."
+              {isActiveJob(demoJob.status)
+                ? "Refreshing automatically while this ingest is active."
                 : demoJob.recordsWritten != null
                   ? `${demoJob.recordsWritten} records written`
                   : "No row-count summary recorded."}

@@ -4,6 +4,16 @@ import os
 import uuid
 from collections.abc import Generator
 
+# macOS test runs import both Intel OpenMP and LLVM OpenMP through modeling
+# dependencies. Keeping the pools single-threaded prevents interpreter shutdown
+# from hanging while OpenMP runtimes reap worker threads.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "1")
+os.environ.setdefault("POLARS_MAX_THREADS", "1")
+
 import pytest
 from f1_polymarket_lab.storage.db import build_engine
 from f1_polymarket_lab.storage.migrations import upgrade_database

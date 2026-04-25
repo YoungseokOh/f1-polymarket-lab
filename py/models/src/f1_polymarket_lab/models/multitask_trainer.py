@@ -462,7 +462,7 @@ def train_multitask_split(
                 head_weights=cfg.head_weights,
             )
             optimizer.zero_grad()
-            total_loss.backward()
+            total_loss.backward()  # type: ignore[no-untyped-call]
             optimizer.step()
 
         if not use_validation:

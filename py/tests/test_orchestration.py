@@ -21,6 +21,7 @@ from f1_polymarket_lab.storage.models import (
     F1SessionResult,
     F1TelemetryIndex,
     FeatureSnapshot,
+    IngestionJobRun,
     MappingCandidate,
     MarketTaxonomyLabel,
     ModelRun,
@@ -1816,6 +1817,52 @@ def test_run_data_quality_checks_accepts_naive_sqlite_fetch_timestamps(tmp_path:
         assert freshness_result is not None
         assert freshness_result.status == "pass"
         assert freshness_result.metrics_json == {"freshness_hours": pytest.approx(0.0, abs=0.01)}
+    finally:
+        session.close()
+
+
+def test_data_quality_treats_ws_manifest_as_optional_until_live_capture_runs(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        result = run_data_quality_checks(context)
+        session.commit()
+        ws_result = session.get(
+            DataQualityResult,
+            f"dq-result:{result['job_run_id']}:polymarket_ws_manifest",
+        )
+        assert ws_result is not None
+        assert ws_result.status == "pass"
+        assert ws_result.metrics_json == {
+            "row_count": 0,
+            "completed_capture_jobs": 0,
+            "expected": False,
+        }
+
+        session.add(
+            IngestionJobRun(
+                id="capture-job",
+                job_name="capture-live-weekend",
+                source="hybrid",
+                dataset="live_weekend",
+                status="completed",
+                execute_mode="execute",
+            )
+        )
+        result = run_data_quality_checks(context)
+        session.commit()
+        ws_result = session.get(
+            DataQualityResult,
+            f"dq-result:{result['job_run_id']}:polymarket_ws_manifest",
+        )
+        assert ws_result is not None
+        assert ws_result.status == "warning"
+        assert ws_result.metrics_json == {
+            "row_count": 0,
+            "completed_capture_jobs": 1,
+            "expected": True,
+        }
     finally:
         session.close()
 

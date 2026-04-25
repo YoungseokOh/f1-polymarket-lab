@@ -115,6 +115,12 @@ describe("sdk", () => {
             cursor_after: { synced_at: "2026-03-28T01:01:00Z" },
             records_written: 22,
             error_message: null,
+            queued_at: "2026-03-28T00:59:30Z",
+            available_at: "2026-03-28T00:59:30Z",
+            attempt_count: 1,
+            max_attempts: 3,
+            locked_by: null,
+            locked_at: null,
             started_at: "2026-03-28T01:00:00Z",
             finished_at: "2026-03-28T01:01:00Z",
           },
@@ -150,7 +156,7 @@ describe("sdk", () => {
     const [jobs, cursors, qualityResults] = await Promise.all([
       sdk.ingestionJobs({ limit: 5 }),
       sdk.cursorStates({ limit: 10 }),
-      sdk.qualityResults({ limit: 10 }),
+      sdk.qualityResults({ limit: 10, latestPerDataset: false }),
     ]);
 
     expect(fetchMock).toHaveBeenNthCalledWith(
@@ -169,7 +175,7 @@ describe("sdk", () => {
     );
     expect(fetchMock).toHaveBeenNthCalledWith(
       3,
-      "http://127.0.0.1:8000/api/v1/quality/results?limit=10",
+      "http://127.0.0.1:8000/api/v1/quality/results?limit=10&latest_per_dataset=false",
       expect.objectContaining({
         cache: "no-store",
       }),
@@ -182,6 +188,9 @@ describe("sdk", () => {
         cursorAfter: { synced_at: "2026-03-28T01:01:00Z" },
         recordsWritten: 22,
         errorMessage: null,
+        queuedAt: "2026-03-28T00:59:30Z",
+        attemptCount: 1,
+        maxAttempts: 3,
       }),
     );
     expect(cursors[0]).toEqual(

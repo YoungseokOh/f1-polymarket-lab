@@ -5,6 +5,7 @@ Same interface as ``xgb_trainer`` but backed by LightGBM.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -73,7 +74,9 @@ def train_one_split_lgbm(
         eval_mask = np.array([g == last_group for g in train_groups])
         dtrain = lgb.Dataset(X_train[~eval_mask], label=y_train[~eval_mask])
         deval = lgb.Dataset(X_train[eval_mask], label=y_train[eval_mask], reference=dtrain)
-        callbacks = [lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)]
+        callbacks: list[Callable[..., Any]] = [
+            lgb.early_stopping(cfg.early_stopping_rounds, verbose=False)
+        ]
         valid_sets = [dtrain, deval]
         valid_names = ["train", "eval"]
     else:
@@ -91,7 +94,7 @@ def train_one_split_lgbm(
         callbacks=callbacks,
     )
 
-    raw_probs = booster.predict(X_test).astype(np.float64)
+    raw_probs = np.asarray(booster.predict(X_test), dtype=np.float64)
 
     if cfg.calibrate and len(X_train) >= cfg.min_train_rows:
         from sklearn.isotonic import IsotonicRegression

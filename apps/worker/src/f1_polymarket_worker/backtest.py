@@ -2,7 +2,7 @@
 
 Turns paper-edge quicktest results into executable-price PnL calculations by:
   1. Collecting resolution outcomes from closed markets
-  2. Re-pricing entries at bid/ask (with midpoint fallback)
+  2. Re-pricing entries at observed bid/ask quotes
   3. Settling positions against actual outcomes
   4. Recording BacktestOrder / BacktestPosition / BacktestResult rows
 """
@@ -250,28 +250,22 @@ def collect_resolutions(
 
 def _get_executable_entry_price(
     row: dict[str, Any],
-) -> tuple[float, float]:
+) -> tuple[float | None, float | None]:
     """Return (entry_price, slippage) using best_ask when available.
 
-    Falls back to midpoint (entry_yes_price) when bid/ask is missing.
     For YES buy orders, the executable price is the best_ask.
+    Rows without an observed positive best_ask are skipped by the backtest instead
+    of being promoted into executable PnL from midpoint-only data.
     """
     best_ask = row.get("entry_best_ask")
-    midpoint = float(row["entry_yes_price"])
 
     if best_ask is not None and float(best_ask) > 0:
         ask = float(best_ask)
+        midpoint = float(row.get("entry_yes_price") or ask)
         slippage = ask - midpoint
         return ask, max(slippage, 0.0)
 
-    # Fallback: estimate spread from market data, use midpoint + half spread
-    spread = row.get("entry_spread")
-    if spread is not None and float(spread) > 0:
-        estimated_ask = midpoint + float(spread) / 2
-        return estimated_ask, float(spread) / 2
-
-    # Pure midpoint fallback
-    return midpoint, 0.0
+    return None, None
 
 
 def _resolve_market_outcome(
@@ -411,10 +405,15 @@ def settle_backtest(
     settled_rows: list[dict[str, Any]] = []
     skipped_unresolved: int = 0
     skipped_tiny_price: int = 0
+    skipped_no_executable_price: int = 0
 
     for row in enriched_rows:
         prob = float(row[probability_key])
         entry_price, slippage = _get_executable_entry_price(row)
+
+        if entry_price is None or slippage is None:
+            skipped_no_executable_price += 1
+            continue
 
         if entry_price < 0.005:
             skipped_tiny_price += 1
@@ -557,6 +556,7 @@ def settle_backtest(
         "settled_rows": settled_rows,
         "skipped_unresolved": skipped_unresolved,
         "skipped_tiny_price": skipped_tiny_price,
+        "skipped_no_executable_price": skipped_no_executable_price,
     }
 
 
@@ -865,7 +865,7 @@ def render_backtest_report(
             "",
             "## Notes",
             "",
-            "- Entry prices use best_ask when available, midpoint + spread/2 fallback.",
+            "- Entry prices use observed best_ask quotes; midpoint-only rows are skipped.",
             "- Position sizing: flat bet per qualifying signal above min_edge threshold.",
             "- This is a paper backtest — no actual orders were submitted.",
             f"- Generated at: {utc_now().isoformat()}",

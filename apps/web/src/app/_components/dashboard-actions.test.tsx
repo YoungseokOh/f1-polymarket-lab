@@ -33,6 +33,30 @@ vi.mock("@f1/ts-sdk", () => ({
   },
 }));
 
+function buildJob(overrides: Partial<IngestionJobRun>): IngestionJobRun {
+  return {
+    id: "job-demo",
+    jobName: "ingest-demo",
+    source: "demo",
+    dataset: "demo_ingest",
+    status: "completed",
+    executeMode: "queued",
+    plannedInputs: null,
+    cursorAfter: null,
+    recordsWritten: null,
+    errorMessage: null,
+    queuedAt: "2026-04-11T10:00:00Z",
+    availableAt: "2026-04-11T10:00:00Z",
+    attemptCount: 0,
+    maxAttempts: 3,
+    lockedBy: null,
+    lockedAt: null,
+    startedAt: "2026-04-11T10:00:00Z",
+    finishedAt: null,
+    ...overrides,
+  };
+}
+
 describe("DashboardActions", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -43,20 +67,12 @@ describe("DashboardActions", () => {
   it("renders the latest demo ingest summary", () => {
     render(
       <DashboardActions
-        latestDemoIngestJob={{
+        latestDemoIngestJob={buildJob({
           id: "job-demo-1",
-          jobName: "ingest-demo",
-          source: "demo",
-          dataset: "demo_ingest",
           status: "completed",
-          executeMode: "execute",
-          plannedInputs: null,
-          cursorAfter: null,
           recordsWritten: 321,
-          errorMessage: null,
-          startedAt: "2026-04-11T10:00:00Z",
           finishedAt: "2026-04-11T10:02:00Z",
-        }}
+        })}
       />,
     );
 
@@ -68,46 +84,28 @@ describe("DashboardActions", () => {
   it("polls a running demo ingest until it completes", async () => {
     vi.useFakeTimers();
     vi.mocked(sdk.ingestionJobs).mockResolvedValue([
-      {
+      buildJob({
         id: "job-demo-2",
-        jobName: "ingest-demo",
-        source: "demo",
-        dataset: "demo_ingest",
         status: "completed",
-        executeMode: "execute",
-        plannedInputs: null,
-        cursorAfter: null,
         recordsWritten: 456,
-        errorMessage: null,
         startedAt: "2026-04-11T10:05:00Z",
         finishedAt: "2026-04-11T10:06:00Z",
-      } satisfies IngestionJobRun,
+      }),
     ]);
 
     render(
       <DashboardActions
-        latestDemoIngestJob={{
+        latestDemoIngestJob={buildJob({
           id: "job-demo-2",
-          jobName: "ingest-demo",
-          source: "demo",
-          dataset: "demo_ingest",
           status: "running",
-          executeMode: "execute",
-          plannedInputs: null,
-          cursorAfter: null,
-          recordsWritten: null,
-          errorMessage: null,
           startedAt: "2026-04-11T10:05:00Z",
-          finishedAt: null,
-        }}
+        })}
       />,
     );
 
     expect(screen.getByText("Running")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "Refreshing automatically while this ingest is running.",
-      ),
+      screen.getByText("Refreshing automatically while this ingest is active."),
     ).toBeInTheDocument();
 
     await act(async () => {
@@ -123,25 +121,17 @@ describe("DashboardActions", () => {
   it("updates the status card immediately after starting a demo ingest", async () => {
     vi.mocked(sdk.ingestDemo).mockResolvedValue({
       action: "ingest-demo",
-      status: "ok",
-      message: "Demo ingestion started.",
+      status: "queued",
+      message: "Demo ingestion queued.",
+      job_run_id: "job-demo-3",
       details: { job_run_id: "job-demo-3" },
     });
     vi.mocked(sdk.ingestionJobs).mockResolvedValue([
-      {
+      buildJob({
         id: "job-demo-3",
-        jobName: "ingest-demo",
-        source: "demo",
-        dataset: "demo_ingest",
-        status: "running",
-        executeMode: "execute",
-        plannedInputs: null,
-        cursorAfter: null,
-        recordsWritten: null,
-        errorMessage: null,
+        status: "queued",
         startedAt: "2026-04-11T10:10:00Z",
-        finishedAt: null,
-      } satisfies IngestionJobRun,
+      }),
     ]);
     vi.mocked(sdk.syncCalendar).mockResolvedValue({
       action: "sync-calendar",
@@ -161,7 +151,7 @@ describe("DashboardActions", () => {
     fireEvent.click(screen.getByRole("button", { name: "Ingest Demo Data" }));
 
     await waitFor(() => {
-      expect(screen.getByText("Running")).toBeInTheDocument();
+      expect(screen.getByText("Queued")).toBeInTheDocument();
     });
     expect(sdk.ingestDemo).toHaveBeenCalled();
     expect(sdk.ingestionJobs).toHaveBeenCalledWith({ limit: 25 });

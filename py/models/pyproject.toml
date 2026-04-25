@@ -8,6 +8,7 @@ version = "0.1.0"
 requires-python = ">=3.10,<3.13"
 dependencies = [
   "f1-polymarket-common",
+  "lightgbm>=4.6.0",
   "xgboost>=2.1.4",
   "scikit-learn>=1.6.1",
   "numpy>=1.26; sys_platform != 'darwin' or platform_machine != 'x86_64'",

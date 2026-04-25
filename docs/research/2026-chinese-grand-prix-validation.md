@@ -47,7 +47,7 @@ These checks support a first-pass research workflow that joins:
 
 ## Gaps And Cautions
 - The validator artifact shows `orderbook_snapshots=0` and `open_interest=0` for the representative probes. This subset is still usable for outcome, price-path, and trade-flow analysis, but not for depth-of-book research.
-- Global DQ still records `polymarket_ws_message_manifest` as failing because live websocket capture is outside this smoke validation scope.
+- Global DQ records `polymarket_ws_message_manifest` as a warning when live websocket capture is outside this smoke validation scope.
 - A real taxonomy edge case was found after the validator run: race winner questions could be misclassified as `driver_podium` when the market description mentioned the podium ceremony. The parser has since been fixed in code and covered by tests, but the saved validator artifact above predates that refresh.
 
 ## Interpretation

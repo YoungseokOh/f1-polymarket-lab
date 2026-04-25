@@ -76,41 +76,41 @@ class TestGetExecutableEntryPrice:
         assert price == 0.22
         assert slippage == pytest.approx(0.02)
 
-    def test_uses_spread_fallback_when_no_ask(self) -> None:
+    def test_skips_spread_only_rows_when_no_ask(self) -> None:
         row = {
             "entry_yes_price": 0.20, "entry_best_ask": None,
             "entry_best_bid": None, "entry_spread": 0.06,
         }
         price, slippage = _get_executable_entry_price(row)
-        assert price == pytest.approx(0.23)
-        assert slippage == pytest.approx(0.03)
+        assert price is None
+        assert slippage is None
 
-    def test_uses_midpoint_fallback_when_nothing(self) -> None:
+    def test_skips_midpoint_only_rows_when_no_ask(self) -> None:
         row = {
             "entry_yes_price": 0.20, "entry_best_ask": None,
             "entry_best_bid": None, "entry_spread": None,
         }
         price, slippage = _get_executable_entry_price(row)
-        assert price == 0.20
-        assert slippage == 0.0
+        assert price is None
+        assert slippage is None
 
-    def test_zero_ask_falls_through(self) -> None:
+    def test_zero_ask_is_not_executable(self) -> None:
         row = {
             "entry_yes_price": 0.15, "entry_best_ask": 0.0,
             "entry_best_bid": 0.0, "entry_spread": None,
         }
         price, slippage = _get_executable_entry_price(row)
-        assert price == 0.15
-        assert slippage == 0.0
+        assert price is None
+        assert slippage is None
 
-    def test_zero_spread_falls_through(self) -> None:
+    def test_zero_spread_without_ask_is_not_executable(self) -> None:
         row = {
             "entry_yes_price": 0.10, "entry_best_ask": None,
             "entry_best_bid": None, "entry_spread": 0.0,
         }
         price, slippage = _get_executable_entry_price(row)
-        assert price == 0.10
-        assert slippage == 0.0
+        assert price is None
+        assert slippage is None
 
 
 # ---------------------------------------------------------------------------

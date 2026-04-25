@@ -239,13 +239,14 @@ def _resolve_live_scored_run(
         entry_offset_min=config.entry_offset_min,
         fidelity=config.fidelity,
     )
-    snapshot_id = snap_result.get("snapshot_id")
-    if not snapshot_id:
+    raw_snapshot_id = snap_result.get("snapshot_id")
+    if not raw_snapshot_id:
         raise ValueError(f"Snapshot build failed: {snap_result}")
+    snapshot_id = str(raw_snapshot_id)
     baseline_result = run_baseline(
         ctx,
         config,
-        snapshot_id=str(snapshot_id),
+        snapshot_id=snapshot_id,
         min_edge=config.live_min_edge,
     )
     model_run_ids = baseline_result.get("model_runs", [])
@@ -255,10 +256,10 @@ def _resolve_live_scored_run(
         baseline=None if active is None else active.model_name,
     )
     return {
-        "snapshot_id": str(snapshot_id),
+        "snapshot_id": snapshot_id,
         "model_run_id": model_run_id,
         "required_stage": required_stage,
-        "active_model_run_id": active.id,
+        "active_model_run_id": None if active is None else active.id,
     }
 
 
@@ -451,6 +452,8 @@ def create_live_trade_ticket(
         meeting_id=meeting.id,
         session_code=config.target_session_code,
     )
+    if target_session is None:
+        raise ValueError(f"{config.target_session_code} session is not loaded")
     now = request_now
     if not _session_is_live(target_session, now=now):
         raise ValueError(

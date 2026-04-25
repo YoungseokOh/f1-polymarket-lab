@@ -30,7 +30,10 @@ def build_engine(database_url: str) -> Engine:
     if database_url.startswith("sqlite"):
 
         @event.listens_for(engine, "connect")
-        def _configure_sqlite_connection(dbapi_connection, _connection_record) -> None:
+        def _configure_sqlite_connection(
+            dbapi_connection: Any,
+            _connection_record: Any,
+        ) -> None:
             cursor = dbapi_connection.cursor()
             try:
                 cursor.execute("PRAGMA foreign_keys = ON")

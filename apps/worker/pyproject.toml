@@ -9,16 +9,21 @@ requires-python = ">=3.10,<3.13"
 dependencies = [
   "f1-polymarket-common",
   "f1-polymarket-connectors",
+  "f1-polymarket-experiments",
   "f1-polymarket-features",
+  "f1-polymarket-models",
   "f1-polymarket-storage",
   "mlflow>=2.20.3",
+  "polars>=1.0",
   "typer>=0.15.2"
 ]
 
 [tool.uv.sources]
 f1-polymarket-common = { workspace = true }
 f1-polymarket-connectors = { workspace = true }
+f1-polymarket-experiments = { workspace = true }
 f1-polymarket-features = { workspace = true }
+f1-polymarket-models = { workspace = true }
 f1-polymarket-storage = { workspace = true }
 
 [tool.setuptools.package-dir]

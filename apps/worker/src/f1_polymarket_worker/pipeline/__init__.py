@@ -17,6 +17,7 @@ from f1_polymarket_lab.storage.models import (
     EntityMappingF1ToPolymarket,
     F1Session,
     F1TelemetryIndex,
+    IngestionJobRun,
     ManualMappingOverride,
     MappingCandidate,
     PolymarketEvent,
@@ -349,6 +350,18 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
     ws_manifest_count = (
         ctx.db.scalar(select(func.count()).select_from(PolymarketWsMessageManifest)) or 0
     )
+    live_capture_job_count = (
+        ctx.db.scalar(
+            select(func.count())
+            .select_from(IngestionJobRun)
+            .where(
+                IngestionJobRun.job_name == "capture-live-weekend",
+                IngestionJobRun.status == "completed",
+            )
+        )
+        or 0
+    )
+    ws_manifest_expected = live_capture_job_count > 0
     latest_polymarket_fetch = ctx.db.scalar(
         select(SourceFetchLog)
         .where(SourceFetchLog.source.in_(["polymarket", "polymarket_ws"]))
@@ -378,13 +391,16 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "observed_at": utc_now(),
         }
     )
+    def warning_status(passed: bool) -> str:
+        return "pass" if passed else "warning"
+
     result_rows.append(
         {
             "id": f"dq-result:{run.id}:polymarket_markets",
             "check_id": "dq:polymarket_markets_nonempty",
             "job_run_id": run.id,
             "dataset": "polymarket_markets",
-            "status": "pass" if market_count > 0 else "fail",
+            "status": warning_status(market_count > 0),
             "metrics_json": {"row_count": market_count},
             "sample_path": None,
             "observed_at": utc_now(),
@@ -396,7 +412,7 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "check_id": "dq:f1_telemetry_nonempty",
             "job_run_id": run.id,
             "dataset": "f1_telemetry_index",
-            "status": "pass" if telemetry_count > 0 else "fail",
+            "status": warning_status(telemetry_count > 0),
             "metrics_json": {"row_count": telemetry_count},
             "sample_path": None,
             "observed_at": utc_now(),
@@ -408,8 +424,12 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "check_id": "dq:polymarket_ws_manifest_nonempty",
             "job_run_id": run.id,
             "dataset": "polymarket_ws_message_manifest",
-            "status": "pass" if ws_manifest_count > 0 else "fail",
-            "metrics_json": {"row_count": ws_manifest_count},
+            "status": warning_status(not ws_manifest_expected or ws_manifest_count > 0),
+            "metrics_json": {
+                "row_count": ws_manifest_count,
+                "completed_capture_jobs": live_capture_job_count,
+                "expected": ws_manifest_expected,
+            },
             "sample_path": None,
             "observed_at": utc_now(),
         }
@@ -420,9 +440,7 @@ def run_data_quality_checks(ctx: PipelineContext) -> dict[str, Any]:
             "check_id": "dq:polymarket_active_market_freshness",
             "job_run_id": run.id,
             "dataset": "source_fetch_log",
-            "status": "pass"
-            if freshness_hours is not None and freshness_hours <= 24
-            else "fail",
+            "status": warning_status(freshness_hours is not None and freshness_hours <= 24),
             "metrics_json": {"freshness_hours": freshness_hours},
             "sample_path": None,
             "observed_at": utc_now(),

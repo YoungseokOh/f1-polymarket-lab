@@ -27,14 +27,13 @@ web:
 	pnpm --filter @f1/web dev
 
 worker:
-	@echo "No background worker is implemented. Use one-shot commands such as make sync-f1-calendar or make sync-polymarket-f1-catalog."
-	@false
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli worker
 
 dev:
 	pnpm dev
 
 db-upgrade:
-	uv run alembic upgrade head
+	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli bootstrap-db
 
 ingest-demo:
 	uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli ingest-demo --season $(DEMO_SEASON) --weekends $(DEMO_WEEKENDS) --market-batches $(DEMO_MARKET_BATCHES)

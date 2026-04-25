@@ -70,6 +70,8 @@ def start_job_run(
         execute_mode="execute" if execute else "plan",
         planned_inputs=planned_inputs,
         cursor_before=cursor_before,
+        attempt_count=1 if execute else 0,
+        max_attempts=1,
     )
     db.add(run)
     db.flush()
@@ -89,6 +91,8 @@ def finish_job_run(
     run.cursor_after = cursor_after
     run.records_written = records_written
     run.error_message = error_message
+    run.locked_by = None
+    run.locked_at = None
     run.finished_at = utc_now()
     db.flush()
     return run

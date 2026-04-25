@@ -1,17 +1,19 @@
 from __future__ import annotations
 
 import logging
-import threading
-from typing import NoReturn
+from typing import Any, NoReturn, cast
 
-from f1_polymarket_api.dependencies import _get_session_maker, get_db_session
+from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
     BackfillBacktestsRequest,
     CancelLiveTradeTicketRequest,
     CancelLiveTradeTicketResponse,
+    CaptureLiveWeekendCountResponse,
+    CaptureLiveWeekendMarketQuoteResponse,
     CaptureLiveWeekendRequest,
     CaptureLiveWeekendResponse,
+    CaptureLiveWeekendSummaryResponse,
     ClearCalendarOverrideRequest,
     CreateLiveTradeTicketRequest,
     CreateLiveTradeTicketResponse,
@@ -32,131 +34,13 @@ from f1_polymarket_api.schemas import (
     SyncCalendarRequest,
     SyncF1MarketsRequest,
 )
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
 from sqlalchemy.orm import Session
 
 action_router = APIRouter(prefix="/api/v1", tags=["actions"])
 
 log = logging.getLogger(__name__)
-_INGEST_DEMO_LOCK = threading.Lock()
-
-
-class _ActionBusyError(RuntimeError):
-    pass
-
-
-def _run_ingest_demo_background(
-    session_maker,
-    *,
-    job_run_id: str,
-    season: int,
-    weekends: int,
-    market_batches: int,
-) -> None:
-    from f1_polymarket_lab.storage.models import IngestionJobRun
-    from f1_polymarket_worker.demo_ingest import ingest_demo
-    from f1_polymarket_worker.lineage import finish_job_run
-
-    db = session_maker()
-    try:
-        run = db.get(IngestionJobRun, job_run_id)
-        summary = ingest_demo(
-            db,
-            season=season,
-            weekends=weekends,
-            market_batches=market_batches,
-        )
-        if run is not None:
-            finish_job_run(
-                db,
-                run,
-                status="completed",
-                cursor_after=summary,
-                records_written=summary.get("records_written", 0),
-            )
-        db.commit()
-    except Exception as exc:
-        db.rollback()
-        try:
-            run = db.get(IngestionJobRun, job_run_id)
-            if run is not None:
-                finish_job_run(
-                    db,
-                    run,
-                    status="failed",
-                    records_written=0,
-                    error_message=str(exc),
-                )
-                db.commit()
-        except Exception:
-            db.rollback()
-            log.exception("ingest-demo background job status update failed")
-        log.exception("ingest-demo background job failed")
-    finally:
-        db.close()
-        _INGEST_DEMO_LOCK.release()
-
-
-def _start_ingest_demo_background(
-    session_maker,
-    *,
-    season: int,
-    weekends: int,
-    market_batches: int,
-) -> str:
-    from f1_polymarket_worker.lineage import ensure_job_definition, start_job_run
-
-    if not _INGEST_DEMO_LOCK.acquire(blocking=False):
-        raise _ActionBusyError(_WRITE_CONFLICT_DETAIL)
-
-    db = session_maker()
-    try:
-        definition = ensure_job_definition(
-            db,
-            job_name="ingest-demo",
-            source="demo",
-            dataset="demo_ingest",
-            description="Seed a lightweight demo ingestion run for the dashboard.",
-            schedule_hint="manual",
-        )
-        run = start_job_run(
-            db,
-            definition=definition,
-            execute=True,
-            planned_inputs={
-                "season": season,
-                "weekends": weekends,
-                "market_batches": market_batches,
-            },
-        )
-        db.commit()
-        job_run_id = run.id
-    except Exception:
-        db.rollback()
-        _INGEST_DEMO_LOCK.release()
-        raise
-    finally:
-        db.close()
-
-    thread = threading.Thread(
-        target=_run_ingest_demo_background,
-        kwargs={
-            "session_maker": session_maker,
-            "job_run_id": job_run_id,
-            "season": season,
-            "weekends": weekends,
-            "market_batches": market_batches,
-        },
-        daemon=True,
-        name="ingest-demo-background",
-    )
-    try:
-        thread.start()
-        return job_run_id
-    except Exception:
-        _INGEST_DEMO_LOCK.release()
-        raise
 
 _WRITE_CONFLICT_DETAIL = (
     "Another write action is already in progress or the database is temporarily busy. "
@@ -222,39 +106,62 @@ def _raise_action_error(
     raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+def _queue_action_response(
+    db: Session,
+    *,
+    action: str,
+    job_name: str,
+    planned_inputs: dict[str, object],
+    message: str,
+    max_attempts: int | None = None,
+) -> ActionStatusResponse:
+    from f1_polymarket_worker.job_queue import enqueue_job
+
+    run = enqueue_job(
+        db,
+        job_name=job_name,
+        planned_inputs=dict(planned_inputs),
+        max_attempts=max_attempts,
+    )
+    db.commit()
+    return ActionStatusResponse(
+        action=action,
+        status="queued",
+        message=message,
+        job_run_id=run.id,
+        details={
+            "queued": True,
+            "job_run_id": run.id,
+            "job_name": run.job_name,
+            "planned_inputs": run.planned_inputs or {},
+            "max_attempts": run.max_attempts,
+        },
+    )
+
+
 @action_router.post("/actions/ingest-demo", response_model=ActionStatusResponse)
 def action_ingest_demo(
     body: IngestDemoRequest,
-    request: Request,
+    db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
     try:
-        job_run_id = _start_ingest_demo_background(
-            _get_session_maker(request),
-            season=body.season,
-            weekends=body.weekends,
-            market_batches=body.market_batches,
-        )
-        return ActionStatusResponse(
+        return _queue_action_response(
+            db,
             action="ingest-demo",
-            status="ok",
-            message=(
-                "Demo ingestion started "
-                f"(season={body.season}, weekends={body.weekends}, "
-                f"market_batches={body.market_batches}, job_run_id={job_run_id})."
-            ),
-            details={
-                "queued": True,
-                "job_run_id": job_run_id,
+            job_name="ingest-demo",
+            planned_inputs={
                 "season": body.season,
                 "weekends": body.weekends,
                 "market_batches": body.market_batches,
             },
+            message=(
+                "Demo ingestion queued "
+                f"(season={body.season}, weekends={body.weekends}, "
+                f"market_batches={body.market_batches})."
+            ),
         )
-    except _ActionBusyError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
-        log.exception("ingest-demo failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        _raise_action_error(db, exc=exc, log_message="ingest-demo queue failed")
 
 
 @action_router.post("/actions/sync-calendar", response_model=ActionStatusResponse)
@@ -262,20 +169,16 @@ def action_sync_calendar(
     body: SyncCalendarRequest,
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
-    from f1_polymarket_worker.pipeline import PipelineContext, sync_f1_calendar
-
     try:
-        ctx = PipelineContext(db=db, execute=True)
-        result = sync_f1_calendar(ctx, season=body.season)
-        db.commit()
-        return ActionStatusResponse(
+        return _queue_action_response(
+            db,
             action="sync-calendar",
-            status="ok",
-            message=f"Calendar sync complete for season {body.season}.",
-            details={"result": str(result)},
+            job_name="sync-f1-calendar",
+            planned_inputs={"season": body.season},
+            message=f"Calendar sync queued for season {body.season}.",
         )
     except Exception as exc:
-        _raise_action_error(db, exc=exc, log_message="sync-calendar failed")
+        _raise_action_error(db, exc=exc, log_message="sync-calendar queue failed")
 
 
 @action_router.post("/actions/set-calendar-override", response_model=ActionStatusResponse)
@@ -368,66 +271,30 @@ def action_run_backtest(
     body: RunBacktestRequest,
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
-    from f1_polymarket_worker.backtest import settle_single_gp
-    from f1_polymarket_worker.gp_registry import (
-        build_snapshot,
-        resolve_gp_config,
-        run_baseline,
-    )
-    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.gp_registry import resolve_gp_config
 
     try:
         config = resolve_gp_config(body.gp_short_code, db=db)
-        ctx = PipelineContext(db=db, execute=True)
-
-        # 1. Build feature snapshot
-        snap_result = build_snapshot(ctx, config)
-        snapshot_id = snap_result.get("snapshot_id")
-        if not snapshot_id:
-            return ActionStatusResponse(
-                action="run-backtest",
-                status="error",
-                message="Snapshot build returned no snapshot_id.",
-                details={"snap_result": {k: str(v) for k, v in snap_result.items()}},
-            )
-
-        # 2. Run baseline models
-        run_baseline(
-            ctx, config, snapshot_id=snapshot_id, min_edge=body.min_edge
-        )
-
-        # 3. Collect resolutions & settle backtest
-        settle_result = settle_single_gp(
-            ctx,
-            meeting_key=config.meeting_key,
-            season=config.season,
-            snapshot_id=snapshot_id,
-            min_edge=body.min_edge,
-            bet_size=body.bet_size,
-        )
-
-        metrics = settle_result.get("backtest", {}).get("metrics", {})
-        db.commit()
-        return ActionStatusResponse(
+        return _queue_action_response(
+            db,
             action="run-backtest",
-            status="ok",
-            message=(
-                f"Backtest complete for {config.name} ({config.short_code}). "
-                f"Bets: {metrics.get('bet_count', 0)}, "
-                f"PnL: ${metrics.get('total_pnl', 0):.2f}"
-            ),
-            details={
-                "snapshot_id": snapshot_id,
-                "bet_count": metrics.get("bet_count", 0),
-                "total_pnl": metrics.get("total_pnl", 0),
-                "roi_pct": metrics.get("roi_pct", 0),
+            job_name="run-backtest",
+            planned_inputs={
+                "gp_short_code": body.gp_short_code,
+                "min_edge": body.min_edge,
+                "bet_size": body.bet_size,
             },
+            message=(
+                f"Backtest queued for {config.name} ({config.short_code}). "
+                "Track the job in lineage."
+            ),
+            max_attempts=1,
         )
     except Exception as exc:
         _raise_action_error(
             db,
             exc=exc,
-            log_message="run-backtest failed",
+            log_message="run-backtest queue failed",
             key_error_status=404,
             value_error_status=409,
         )
@@ -438,38 +305,26 @@ def action_backfill_backtests(
     body: BackfillBacktestsRequest,
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
-    from f1_polymarket_worker.backtest import backfill_backtests
-    from f1_polymarket_worker.pipeline import PipelineContext
-
     try:
-        ctx = PipelineContext(db=db, execute=True)
-        result = backfill_backtests(
-            ctx,
-            gp_short_code=body.gp_short_code,
-            min_edge=body.min_edge,
-            bet_size=body.bet_size,
-            rebuild_missing=body.rebuild_missing,
-        )
-        db.commit()
-        processed = result.get("processed", [])
-        skipped = result.get("skipped", [])
-        total_pnl = sum(float(item.get("total_pnl", 0.0) or 0.0) for item in processed)
         scope = f" for {body.gp_short_code}" if body.gp_short_code else ""
-        return ActionStatusResponse(
+        return _queue_action_response(
+            db,
             action="backfill-backtests",
-            status="ok",
-            message=(
-                f"Backfill complete{scope}. "
-                f"Settled {len(processed)} snapshot(s), skipped {len(skipped)}. "
-                f"PnL: ${total_pnl:.2f}"
-            ),
-            details=result,
+            job_name="backfill-backtests",
+            planned_inputs={
+                "gp_short_code": body.gp_short_code,
+                "min_edge": body.min_edge,
+                "bet_size": body.bet_size,
+                "rebuild_missing": body.rebuild_missing,
+            },
+            message=f"Backtest backfill queued{scope}. Track the job in lineage.",
+            max_attempts=1,
         )
     except Exception as exc:
         _raise_action_error(
             db,
             exc=exc,
-            log_message="backfill-backtests failed",
+            log_message="backfill-backtests queue failed",
             key_error_status=404,
             value_error_status=409,
         )
@@ -480,31 +335,21 @@ def action_sync_f1_markets(
     body: SyncF1MarketsRequest,
     db: Session = Depends(get_db_session),
 ) -> ActionStatusResponse:
-    from f1_polymarket_worker.orchestration import sync_polymarket_f1_catalog
-    from f1_polymarket_worker.pipeline import PipelineContext
-
     try:
-        ctx = PipelineContext(db=db, execute=True)
-        result = sync_polymarket_f1_catalog(
-            ctx,
-            max_pages=body.max_pages,
-            search_fallback=body.search_fallback,
-            start_year=body.start_year,
-            end_year=body.end_year,
-        )
-        db.commit()
-        return ActionStatusResponse(
+        return _queue_action_response(
+            db,
             action="sync-f1-markets",
-            status="ok",
-            message=(
-                f"F1 market sync complete. "
-                f"Events: {result.get('events', 0)}, "
-                f"Markets: {result.get('markets', 0)}"
-            ),
-            details=result,
+            job_name="sync-f1-markets",
+            planned_inputs={
+                "max_pages": body.max_pages,
+                "search_fallback": body.search_fallback,
+                "start_year": body.start_year,
+                "end_year": body.end_year,
+            },
+            message="F1 market sync queued. Track the job in lineage.",
         )
     except Exception as exc:
-        _raise_action_error(db, exc=exc, log_message="sync-f1-markets failed")
+        _raise_action_error(db, exc=exc, log_message="sync-f1-markets queue failed")
 
 
 @action_router.post(
@@ -567,7 +412,8 @@ def action_capture_live_weekend(
             capture_seconds=body.capture_seconds,
         )
         db.commit()
-        summary = result.get("summary") or {}
+        summary_raw = result.get("summary") or {}
+        summary = cast(dict[str, Any], summary_raw if isinstance(summary_raw, dict) else {})
         return CaptureLiveWeekendResponse(
             action="capture-live-weekend",
             status="ok",
@@ -591,68 +437,68 @@ def action_capture_live_weekend(
             ),
             preflight_summary=result.get("preflight_summary"),
             warnings=[str(item) for item in result.get("warnings", [])],
-            summary={
-                "openf1_topics": [
-                    {
-                        "key": str(item.get("key") or "unknown"),
-                        "count": int(item.get("count", 0) or 0),
-                    }
+            summary=CaptureLiveWeekendSummaryResponse(
+                openf1_topics=[
+                    CaptureLiveWeekendCountResponse(
+                        key=str(item.get("key") or "unknown"),
+                        count=int(item.get("count", 0) or 0),
+                    )
                     for item in summary.get("openf1_topics", [])
                 ],
-                "polymarket_event_types": [
-                    {
-                        "key": str(item.get("key") or "unknown"),
-                        "count": int(item.get("count", 0) or 0),
-                    }
+                polymarket_event_types=[
+                    CaptureLiveWeekendCountResponse(
+                        key=str(item.get("key") or "unknown"),
+                        count=int(item.get("count", 0) or 0),
+                    )
                     for item in summary.get("polymarket_event_types", [])
                 ],
-                "observed_market_count": int(summary.get("observed_market_count", 0) or 0),
-                "observed_token_count": int(summary.get("observed_token_count", 0) or 0),
-                "market_quotes": [
-                    {
-                        "market_id": str(item.get("market_id") or ""),
-                        "token_id": (
+                observed_market_count=int(summary.get("observed_market_count", 0) or 0),
+                observed_token_count=int(summary.get("observed_token_count", 0) or 0),
+                market_quotes=[
+                    CaptureLiveWeekendMarketQuoteResponse(
+                        market_id=str(item.get("market_id") or ""),
+                        token_id=(
                             str(item.get("token_id"))
                             if item.get("token_id") is not None
                             else None
                         ),
-                        "outcome": (
+                        outcome=(
                             str(item.get("outcome"))
                             if item.get("outcome") is not None
                             else None
                         ),
-                        "event_type": str(item.get("event_type") or "unknown"),
-                        "observed_at_utc": item.get("observed_at_utc"),
-                        "price": (
+                        event_type=str(item.get("event_type") or "unknown"),
+                        observed_at_utc=item.get("observed_at_utc"),
+                        price=(
                             float(item["price"]) if item.get("price") is not None else None
                         ),
-                        "best_bid": (
+                        best_bid=(
                             float(item["best_bid"])
                             if item.get("best_bid") is not None
                             else None
                         ),
-                        "best_ask": (
+                        best_ask=(
                             float(item["best_ask"])
                             if item.get("best_ask") is not None
                             else None
                         ),
-                        "midpoint": (
+                        midpoint=(
                             float(item["midpoint"])
                             if item.get("midpoint") is not None
                             else None
                         ),
-                        "spread": (
+                        spread=(
                             float(item["spread"])
                             if item.get("spread") is not None
                             else None
                         ),
-                        "size": float(item["size"]) if item.get("size") is not None else None,
-                        "side": str(item.get("side")) if item.get("side") is not None else None,
-                    }
+                        size=float(item["size"]) if item.get("size") is not None else None,
+                        side=str(item.get("side")) if item.get("side") is not None else None,
+                    )
                     for item in summary.get("market_quotes", [])
                     if item.get("market_id") is not None
                 ],
-            },
+            ),
         )
     except Exception as exc:
         _raise_action_error(
@@ -816,33 +662,24 @@ def action_run_paper_trade(
 ) -> ActionStatusResponse:
     """Run the full paper trading pipeline for a GP."""
     from f1_polymarket_worker.gp_registry import resolve_gp_config
-    from f1_polymarket_worker.pipeline import PipelineContext
-    from f1_polymarket_worker.weekend_ops import run_gp_paper_trade_pipeline
 
     try:
         config = resolve_gp_config(body.gp_short_code, db=db)
-        ctx = PipelineContext(db=db, execute=True)
-        result = run_gp_paper_trade_pipeline(
-            ctx,
-            config=config,
-            snapshot_id=body.snapshot_id,
-            baseline=body.baseline,
-            min_edge=body.min_edge,
-            bet_size=body.bet_size,
-        )
-        db.commit()
-
-        return ActionStatusResponse(
+        planned_inputs: dict[str, object] = {
+            "gp_short_code": config.short_code,
+            "baseline": body.baseline,
+            "min_edge": body.min_edge,
+            "bet_size": body.bet_size,
+        }
+        if body.snapshot_id is not None:
+            planned_inputs["snapshot_id"] = body.snapshot_id
+        return _queue_action_response(
+            db,
             action="run-paper-trade",
-            status="ok",
-            message=(
-                f"Paper trade complete for {config.name}. "
-                f"Trades: {result['trades_executed']}, "
-                f"PnL: ${result['total_pnl']:.2f}"
-            ),
-            details={
-                **result,
-            },
+            job_name="run-paper-trade",
+            planned_inputs=planned_inputs,
+            message=f"Paper trade queued for {config.name}. Track the job in lineage.",
+            max_attempts=1,
         )
     except Exception as exc:
         _raise_action_error(
