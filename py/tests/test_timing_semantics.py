@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
-from f1_polymarket_lab.common import parse_gap_value, parse_result_time_value
+from f1_polymarket_lab.common import (
+    parse_gap_value,
+    parse_result_time_value,
+    timestamp_date_variants,
+)
 from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.storage.db import Base
 from f1_polymarket_lab.storage.models import F1Interval, F1Meeting, F1Session, F1SessionResult
@@ -47,6 +52,18 @@ def test_parse_result_time_value_infers_session_kind() -> None:
     practice = parse_result_time_value(88.321, session_code="FP2")
     assert practice.kind == "best_lap"
     assert practice.seconds == pytest.approx(88.321)
+
+
+def test_timestamp_date_variants_include_utc_and_declared_local_dates() -> None:
+    variants = timestamp_date_variants(
+        datetime.fromisoformat("2026-05-02T05:30:00+09:00"),
+        gmt_offset="+09:00:00",
+    )
+
+    assert variants == (
+        datetime(2026, 5, 2).date(),
+        datetime(2026, 5, 1, tzinfo=timezone.utc).date(),
+    )
 
 
 def test_hydrate_f1_session_stores_timing_semantics(

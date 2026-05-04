@@ -50,7 +50,9 @@ from f1_polymarket_worker.pipeline import (
     run_data_quality_checks,
 )
 from f1_polymarket_worker.weekend_ops import (
+    _timeline_session_codes_for_meeting,
     execute_manual_live_paper_trade,
+    execute_manual_paper_trade_run,
     get_weekend_cockpit_status,
     refresh_latest_session_for_meeting,
     run_weekend_cockpit,
@@ -2906,6 +2908,99 @@ def test_execute_manual_live_paper_trade_persists_manual_session(tmp_path: Path)
         session.close()
 
 
+def test_execute_manual_paper_trade_run_persists_user_picks(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    markets = [
+        PolymarketMarket(
+            id="market-manual-batch-yes",
+            question="Will George Russell top Practice 2?",
+            slug="market-manual-batch-yes",
+            condition_id="condition-manual-batch-yes",
+            taxonomy="driver_fastest_lap_practice",
+            target_session_code="FP2",
+            active=True,
+            closed=False,
+        ),
+        PolymarketMarket(
+            id="market-manual-batch-no",
+            question="Will Lando Norris top Practice 2?",
+            slug="market-manual-batch-no",
+            condition_id="condition-manual-batch-no",
+            taxonomy="driver_fastest_lap_practice",
+            target_session_code="FP2",
+            active=True,
+            closed=False,
+        ),
+    ]
+    session.add_all(markets)
+    session.commit()
+
+    try:
+        result = execute_manual_paper_trade_run(
+            context,
+            gp_short_code="japan_fp1_fp2",
+            bet_size=7.0,
+            observed_at_utc=datetime(2026, 3, 27, 6, 25, tzinfo=timezone.utc),
+            picks=[
+                {
+                    "market_id": "market-manual-batch-yes",
+                    "token_id": "token-yes",
+                    "model_run_id": "model-run-live",
+                    "snapshot_id": "snapshot-live",
+                    "side_label": "YES",
+                    "model_pick_side": "YES",
+                    "model_prob": 0.62,
+                    "market_price": 0.41,
+                },
+                {
+                    "market_id": "market-manual-batch-no",
+                    "token_id": "token-no",
+                    "model_run_id": "model-run-live",
+                    "snapshot_id": "snapshot-live",
+                    "side_label": "NO",
+                    "model_pick_side": "YES",
+                    "model_prob": 0.58,
+                    "market_price": 0.36,
+                },
+            ],
+        )
+        session.commit()
+
+        assert result["status"] == "ok"
+        assert result["pick_count"] == 2
+        paper_session = session.get(PaperTradeSession, result["pt_session_id"])
+        assert paper_session is not None
+        assert paper_session.gp_slug == "japan_fp1_fp2"
+        assert paper_session.config_json is not None
+        assert paper_session.config_json["manual_trade"] is True
+        assert paper_session.config_json["manual_trade_batch"] is True
+        assert paper_session.config_json["manual_pick_count"] == 2
+        assert paper_session.summary_json is not None
+        assert paper_session.summary_json["trades_executed"] == 2
+        assert paper_session.log_path is not None
+        assert Path(paper_session.log_path).exists()
+
+        positions = session.scalars(
+            select(PaperTradePosition)
+            .where(PaperTradePosition.session_id == paper_session.id)
+            .order_by(PaperTradePosition.market_id)
+        ).all()
+        assert [position.side for position in positions] == ["buy_no", "buy_yes"]
+        no_position = positions[0]
+        yes_position = positions[1]
+        assert no_position.market_id == "market-manual-batch-no"
+        assert no_position.entry_price == pytest.approx(0.64)
+        assert no_position.edge == pytest.approx(-0.22)
+        assert no_position.quantity == 7.0
+        assert yes_position.market_id == "market-manual-batch-yes"
+        assert yes_position.entry_price == 0.41
+        assert yes_position.edge == pytest.approx(0.21)
+    finally:
+        session.close()
+
+
 def test_execute_manual_live_paper_trade_skips_when_spread_exceeds_max(
     tmp_path: Path,
 ) -> None:
@@ -2980,7 +3075,7 @@ def test_get_weekend_cockpit_status_marks_finished_stage_settlement_ready(
         assert status["required_stage"] == "multitask_qr"
         assert status["active_model_run_id"] == "champion-run"
         assert status["model_blockers"] == []
-        assert status["primary_action_cta"] == "Update to latest"
+        assert status["primary_action_cta"] == "Prepare paper run"
     finally:
         session.close()
 
@@ -3014,6 +3109,102 @@ def test_get_weekend_cockpit_status_reports_model_blockers_without_promotion(
         assert status["blockers"][-1] == status["model_blockers"][0]
     finally:
         session.close()
+
+
+def test_run_weekend_cockpit_prepares_markets_before_model_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.utc_now",
+        lambda: datetime(2026, 3, 28, 8, 0, tzinfo=timezone.utc),
+    )
+    session, context = build_context(tmp_path)
+    try:
+        seed_japan_q_race_cockpit_fixture(
+            session,
+            tmp_path,
+            include_q_results=True,
+            include_promoted_model=False,
+        )
+
+        def fake_discover(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            race_event = PolymarketEvent(
+                id="event-race-missing-model",
+                slug="f1-japanese-grand-prix-winner-2026-03-29",
+                title="Japanese Grand Prix: Race Winner",
+                active=True,
+                closed=False,
+            )
+            race_market = PolymarketMarket(
+                id="market-race-missing-model",
+                event_id=race_event.id,
+                question="Who will win the Japanese Grand Prix?",
+                slug="who-will-win-the-japanese-grand-prix",
+                taxonomy="race_winner",
+                target_session_code="R",
+                condition_id="condition-race-missing-model",
+                active=True,
+                closed=False,
+            )
+            context.db.add_all(
+                [
+                    race_event,
+                    race_market,
+                    EntityMappingF1ToPolymarket(
+                        id="mapping-race-missing-model",
+                        f1_session_id="session:11253",
+                        polymarket_market_id=race_market.id,
+                        mapping_type="race_winner",
+                        confidence=0.92,
+                    ),
+                ]
+            )
+            return {"auto_mappings": 1}
+
+        def fail_run_pipeline(*args: Any, **kwargs: Any) -> dict[str, Any]:
+            raise AssertionError("paper trading should wait for model promotion")
+
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.discover_session_polymarket",
+            fake_discover,
+        )
+        monkeypatch.setattr(
+            "f1_polymarket_worker.weekend_ops.run_gp_paper_trade_pipeline",
+            fail_run_pipeline,
+        )
+
+        result = run_weekend_cockpit(context, gp_short_code="japan_q_race")
+        session.commit()
+
+        assert result["status"] == "blocked"
+        assert result["pt_session_id"] is None
+        assert "Paper trading still needs a promoted model" in result["message"]
+        assert [step["key"] for step in result["executed_steps"]] == [
+            "sync_calendar",
+            "hydrate_source_session",
+            "settle_finished_stage",
+            "discover_target_markets",
+        ]
+        assert result["executed_steps"][-1]["status"] == "completed"
+        assert result["warnings"] == [
+            "A promoted multitask_qr champion is required before paper trading can run."
+        ]
+    finally:
+        session.close()
+
+
+def test_timeline_session_codes_prefers_sprint_sequence_for_sprint_sessions() -> None:
+    assert _timeline_session_codes_for_meeting(
+        "conventional",
+        {
+            "FP1": object(),
+            "SQ": object(),
+            "S": object(),
+            "Q": object(),
+            "R": object(),
+        },
+    ) == ("FP1", "SQ", "S", "Q", "R")
 
 
 def test_refresh_latest_session_for_meeting_targets_latest_ended_q_and_hydrates_markets(

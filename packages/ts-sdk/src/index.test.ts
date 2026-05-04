@@ -338,6 +338,7 @@ describe("sdk", () => {
         },
         focus_status: "upcoming",
         timeline_completed_codes: [],
+        timeline_session_codes: ["FP1", "FP2", "FP3", "Q", "R"],
         timeline_active_code: "Q",
         source_session: null,
         target_session: {
@@ -439,6 +440,7 @@ describe("sdk", () => {
           }),
         ],
         focusStatus: "upcoming",
+        timelineSessionCodes: ["FP1", "FP2", "FP3", "Q", "R"],
         timelineActiveCode: "Q",
         primaryActionTitle: "Prepare Qualifying markets",
         primaryActionCta: "Find Qualifying markets",
@@ -916,6 +918,208 @@ describe("sdk", () => {
       sourceMaxSessionEndUtc: "2026-03-27T07:00:00Z",
       hydratedSessionKeys: [],
       report: null,
+    });
+  });
+
+  it("posts best model promotion requests and maps response fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "promote-best-model-run",
+        status: "ok",
+        message: "Promoted best model run for stage sq_pole_live_v1.",
+        stage: "sq_pole_live_v1",
+        promotion_id: "promotion-sq-1",
+        model_run_id: "model-run-9",
+        candidate_count: 3,
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await sdk.promoteBestModelRun({
+      stage: "sq_pole_live_v1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/promote-best-model-run",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ stage: "sq_pole_live_v1" }),
+      }),
+    );
+    expect(response).toEqual({
+      action: "promote-best-model-run",
+      status: "ok",
+      message: "Promoted best model run for stage sq_pole_live_v1.",
+      stage: "sq_pole_live_v1",
+      promotionId: "promotion-sq-1",
+      modelRunId: "model-run-9",
+      candidateCount: 3,
+    });
+  });
+
+  it("posts specific model promotion requests and maps response fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "promote-model-run",
+        status: "ok",
+        message: "Model run model-run-9 promoted for stage sq_pole_live_v1.",
+        stage: "sq_pole_live_v1",
+        promotion_id: "promotion-sq-1",
+        model_run_id: "model-run-9",
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await sdk.promoteModelRun({
+      model_run_id: "model-run-9",
+      stage: "sq_pole_live_v1",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/promote-model-run",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          model_run_id: "model-run-9",
+          stage: "sq_pole_live_v1",
+        }),
+      }),
+    );
+    expect(response).toEqual({
+      action: "promote-model-run",
+      status: "ok",
+      message: "Model run model-run-9 promoted for stage sq_pole_live_v1.",
+      stage: "sq_pole_live_v1",
+      promotionId: "promotion-sq-1",
+      modelRunId: "model-run-9",
+    });
+  });
+
+  it("posts multitask snapshot build requests and maps response fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "build-multitask-snapshots",
+        status: "completed",
+        message: "Built 12 model snapshots for 3 GP(s).",
+        stage: "multitask_qr",
+        season: 2026,
+        through_meeting_key: 1284,
+        meeting_keys: [1281, 1282, 1284],
+        completed_meetings: [{ meeting_key: 1284, snapshot_count: 4 }],
+        snapshot_ids: ["snapshot-1"],
+        snapshot_count: 12,
+        row_count: 84,
+        manifest_path: "/tmp/manifest.json",
+        job_run_ids: ["job-1"],
+        warnings: ["meeting_key=1283: no rows"],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await sdk.buildMultitaskSnapshots({
+      season: 2026,
+      through_meeting_key: 1284,
+      stage: "multitask_qr",
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/build-multitask-snapshots",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          season: 2026,
+          through_meeting_key: 1284,
+          stage: "multitask_qr",
+        }),
+      }),
+    );
+    expect(response).toEqual({
+      action: "build-multitask-snapshots",
+      status: "completed",
+      message: "Built 12 model snapshots for 3 GP(s).",
+      stage: "multitask_qr",
+      season: 2026,
+      throughMeetingKey: 1284,
+      meetingKeys: [1281, 1282, 1284],
+      completedMeetings: [{ meeting_key: 1284, snapshot_count: 4 }],
+      snapshotIds: ["snapshot-1"],
+      snapshotCount: 12,
+      rowCount: 84,
+      manifestPath: "/tmp/manifest.json",
+      jobRunIds: ["job-1"],
+      warnings: ["meeting_key=1283: no rows"],
+    });
+  });
+
+  it("posts multitask training requests and maps response fields", async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        action: "train-multitask-model",
+        status: "completed",
+        message: "Created 1 model run(s) for multitask_qr.",
+        stage: "multitask_qr",
+        season: 2026,
+        manifest_path: "/tmp/manifest.json",
+        meeting_keys: [1281, 1282, 1284],
+        split_count: 1,
+        model_run_ids: ["model-run-1"],
+        model_run_count: 1,
+        runs: [
+          {
+            model_run_id: "model-run-1",
+            test_meeting_key: 1284,
+            train_meeting_keys: [1281, 1282],
+            prediction_count: 28,
+            metrics: { roi_pct: 0.12 },
+          },
+        ],
+        skipped: [],
+      }),
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await sdk.trainMultitaskModel({
+      season: 2026,
+      stage: "multitask_qr",
+      min_train_gps: 2,
+    });
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://127.0.0.1:8000/api/v1/actions/train-multitask-model",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          season: 2026,
+          stage: "multitask_qr",
+          min_train_gps: 2,
+        }),
+      }),
+    );
+    expect(response).toEqual({
+      action: "train-multitask-model",
+      status: "completed",
+      message: "Created 1 model run(s) for multitask_qr.",
+      stage: "multitask_qr",
+      season: 2026,
+      manifestPath: "/tmp/manifest.json",
+      meetingKeys: [1281, 1282, 1284],
+      splitCount: 1,
+      modelRunIds: ["model-run-1"],
+      modelRunCount: 1,
+      runs: [
+        {
+          modelRunId: "model-run-1",
+          testMeetingKey: 1284,
+          trainMeetingKeys: [1281, 1282],
+          predictionCount: 28,
+          metrics: { roi_pct: 0.12 },
+        },
+      ],
+      skipped: [],
     });
   });
 });

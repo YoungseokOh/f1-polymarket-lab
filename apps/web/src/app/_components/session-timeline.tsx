@@ -1,33 +1,42 @@
 import React from "react";
 
-const stages = [
-  { code: "FP1", label: "FP1" },
-  { code: "FP2", label: "FP2" },
-  { code: "FP3", label: "FP3" },
-  { code: "Q", label: "QUALI" },
-  { code: "R", label: "RACE" },
-] as const;
+const stageLabels: Record<string, string> = {
+  FP1: "FP1",
+  FP2: "FP2",
+  FP3: "FP3",
+  SQ: "SQ",
+  S: "S",
+  Q: "QUALI",
+  R: "RACE",
+};
+
+const DEFAULT_SESSION_TIMELINE = ["FP1", "FP2", "FP3", "Q", "R"] as const;
 
 type SessionTimelineProps = {
   completedCodes: string[];
   activeCode?: string | null;
+  sessionCodes?: readonly string[];
 };
 
 export function SessionTimeline({
   completedCodes,
   activeCode,
+  sessionCodes = DEFAULT_SESSION_TIMELINE,
 }: SessionTimelineProps) {
   return (
     <div className="flex items-center gap-1">
-      {stages.map((stage, i) => {
-        const isCompleted = completedCodes.includes(stage.code);
-        const isActive = activeCode === stage.code;
+      {sessionCodes.map((sessionCode, index) => {
+        const isCompleted = completedCodes.includes(sessionCode);
+        const isActive = activeCode === sessionCode;
+        const label = stageLabels[sessionCode] ?? sessionCode;
 
         return (
-          <div key={stage.code} className="flex items-center">
-            {i > 0 && (
+          <div key={sessionCode} className="flex items-center">
+            {index > 0 && (
               <div
-                className={`mx-0.5 h-[2px] w-4 ${isCompleted ? "bg-race-green" : "bg-white/10"}`}
+                className={`mx-0.5 h-[2px] w-4 ${
+                  isCompleted ? "bg-race-green" : "bg-white/10"
+                }`}
               />
             )}
             <div
@@ -39,7 +48,7 @@ export function SessionTimeline({
                     : "bg-white/[0.04] text-[#6b7280]"
               }`}
             >
-              {stage.label}
+              {label}
             </div>
           </div>
         );

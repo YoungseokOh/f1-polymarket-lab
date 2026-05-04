@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from dataclasses import dataclass
 from datetime import timedelta
@@ -49,6 +50,7 @@ TAXONOMIES_BY_TARGET = {
     "Q": ("driver_pole_position", "constructor_pole_position"),
     "R": ("race_winner", "head_to_head_session"),
 }
+log = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,18 +86,27 @@ def build_multitask_checkpoint_rows(
     window = _checkpoint_window(checkpoint)
     rows: list[dict[str, Any]] = []
     for target_session_code in ("Q", "R"):
-        rows.extend(
-            _build_market_family_rows(
-                ctx,
-                meeting_key=meeting_key,
-                season=season,
-                target_session_code=target_session_code,
-                checkpoint=window,
-                drivers=drivers,
-                driver_map=driver_map,
-                entry_offset_min=entry_offset_min,
+        try:
+            rows.extend(
+                _build_market_family_rows(
+                    ctx,
+                    meeting_key=meeting_key,
+                    season=season,
+                    target_session_code=target_session_code,
+                    checkpoint=window,
+                    drivers=drivers,
+                    driver_map=driver_map,
+                    entry_offset_min=entry_offset_min,
+                )
             )
-        )
+        except (KeyError, ValueError) as exc:
+            log.info(
+                "Skipping multitask target rows for meeting_key=%s target=%s checkpoint=%s: %s",
+                meeting_key,
+                target_session_code,
+                checkpoint,
+                exc,
+            )
 
     if not rows:
         return []
@@ -190,7 +201,36 @@ def build_multitask_feature_snapshots(
 
     upsert_records(ctx.db, FeatureSnapshot, snapshot_records)
     manifest_path = root / "manifest.json"
-    manifest_path.write_text(json.dumps({"snapshots": manifest_rows}, indent=2), encoding="utf-8")
+    existing_rows: list[dict[str, Any]] = []
+    if manifest_path.exists():
+        existing_payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        existing_rows = [
+            row for row in existing_payload.get("snapshots", []) if isinstance(row, dict)
+        ]
+    rows_by_key = {
+        (
+            int(row.get("season", season)),
+            int(row.get("meeting_key", meeting_key)),
+            str(row.get("checkpoint")),
+        ): row
+        for row in existing_rows
+        if row.get("meeting_key") is not None and row.get("checkpoint") is not None
+    }
+    for row in manifest_rows:
+        rows_by_key[(season, meeting_key, str(row["checkpoint"]))] = row
+    checkpoint_rank = {checkpoint: index for index, checkpoint in enumerate(CHECKPOINTS)}
+    merged_rows = sorted(
+        rows_by_key.values(),
+        key=lambda row: (
+            int(row.get("season", 0)),
+            int(row.get("meeting_key", 0)),
+            checkpoint_rank.get(str(row.get("checkpoint")), 99),
+        ),
+    )
+    manifest_path.write_text(
+        json.dumps({"snapshots": merged_rows}, indent=2),
+        encoding="utf-8",
+    )
     finish_job_run(ctx.db, run, status="completed", records_written=len(snapshot_records))
     return {
         "job_run_id": run.id,

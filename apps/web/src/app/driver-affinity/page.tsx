@@ -31,33 +31,78 @@ function refreshBannerMessage(response: RefreshDriverAffinityResponse | null) {
   return response.status === "blocked" ? response.message : null;
 }
 
+function isRosterOnlyFallback(report: DriverAffinityReport | null) {
+  return Boolean(
+    report &&
+      report.entryCount > 0 &&
+      !report.sourceMaxSessionEndUtc &&
+      report.entries.every((entry) => entry.contributingSessionCount === 0),
+  );
+}
+
+function sameSegmentSample(
+  left: DriverAffinityReport["segments"][number],
+  right: DriverAffinityReport["segments"][number],
+) {
+  return (
+    left.sourceSeasonsIncluded.join(",") ===
+      right.sourceSeasonsIncluded.join(",") &&
+    left.sourceSessionCodesIncluded.join(",") ===
+      right.sourceSessionCodesIncluded.join(",") &&
+    left.entries.map((entry) => entry.canonicalDriverKey).join(",") ===
+      right.entries.map((entry) => entry.canonicalDriverKey).join(",")
+  );
+}
+
 function SegmentLeaderboard({
   title,
   description,
   entryCount,
+  sourceSessionCodesIncluded,
+  sourceSeasonsIncluded,
   entries,
 }: {
   title: string;
   description: string;
   entryCount: number;
+  sourceSessionCodesIncluded: string[];
+  sourceSeasonsIncluded: number[];
   entries: DriverAffinityEntry[];
 }) {
+  const sessionLabel =
+    sourceSessionCodesIncluded.length > 0
+      ? sourceSessionCodesIncluded.join(" / ")
+      : "No session data";
+  const seasonLabel =
+    sourceSeasonsIncluded.length > 1
+      ? `${sourceSeasonsIncluded[0]}-${sourceSeasonsIncluded.at(-1)}`
+      : `${sourceSeasonsIncluded[0] ?? "season"}`;
+
   return (
     <Panel title={title}>
       <div className="space-y-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="space-y-3">
           <p className="text-sm text-[#9ca3af]">{description}</p>
-          <p className="text-xs text-[#6b7280]">{entryCount} drivers ranked</p>
+          <div className="flex flex-wrap gap-2 text-[11px] uppercase tracking-wider">
+            <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[#d1d5db]">
+              {entryCount} drivers
+            </span>
+            <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[#d1d5db]">
+              {sessionLabel}
+            </span>
+            <span className="rounded-md border border-white/[0.08] bg-white/[0.03] px-2 py-1 text-[#d1d5db]">
+              {seasonLabel}
+            </span>
+          </div>
         </div>
         <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-white/[0.06] text-[10px] uppercase tracking-wider text-[#6b7280]">
-                <th className="pb-2 text-left font-medium">Rank</th>
+                <th className="w-10 pb-2 text-left font-medium">#</th>
                 <th className="pb-2 text-left font-medium">Driver</th>
-                <th className="pb-2 text-left font-medium">Team</th>
                 <th className="pb-2 text-right font-medium">Affinity</th>
-                <th className="pb-2 text-left font-medium">Support</th>
+                <th className="pb-2 text-right font-medium">Sectors</th>
               </tr>
             </thead>
             <tbody>
@@ -66,23 +111,20 @@ function SegmentLeaderboard({
                   key={`${title}:${entry.canonicalDriverKey}`}
                   className="border-b border-white/[0.04] last:border-0"
                 >
-                  <td className="py-2 text-white">{entry.rank}</td>
-                  <td className="py-2 text-white">
+                  <td className="py-3 text-[#9ca3af]">{entry.rank}</td>
+                  <td className="py-3 text-white">
                     <div className="font-medium">{entry.displayName}</div>
                     <div className="text-[11px] text-[#6b7280]">
-                      {entry.displayDriverId ?? "driver unavailable"}
+                      {entry.teamName ?? entry.teamId ?? "Team unavailable"}
                     </div>
                   </td>
-                  <td className="py-2 text-[#9ca3af]">
-                    {entry.teamName ?? entry.teamId ?? "—"}
-                  </td>
-                  <td className="py-2 text-right font-semibold text-white">
+                  <td className="py-3 text-right text-base font-semibold text-white">
                     {entry.affinityScore.toFixed(3)}
                   </td>
-                  <td className="py-2 text-[#9ca3af]">
-                    {entry.contributingSessionCount} sessions ·{" "}
-                    {entry.contributingSessionCodes.join(", ")} ·{" "}
-                    {formatDateTime(entry.latestContributingSessionEndUtc)}
+                  <td className="py-3 text-right text-[11px] tabular-nums text-[#9ca3af]">
+                    S1 {entry.s1Strength.toFixed(2)} · S2{" "}
+                    {entry.s2Strength.toFixed(2)} · S3{" "}
+                    {entry.s3Strength.toFixed(2)}
                   </td>
                 </tr>
               ))}
@@ -111,18 +153,26 @@ export default async function DriverAffinityPage() {
     "Weekend operations readiness",
   );
   const report = reportState.data ?? refreshState.data?.report ?? null;
+  const rosterOnlyFallback = isRosterOnlyFallback(report);
   const affinityReadiness =
     readinessState.data?.actions.find(
       (action) => action.key === "driver_affinity",
     ) ?? null;
+  const readinessStatus =
+    rosterOnlyFallback && affinityReadiness?.status === "blocked"
+      ? "degraded"
+      : affinityReadiness?.status;
+  const readinessMessage = rosterOnlyFallback
+    ? "FP1 lap data is not hydrated yet; showing the current season roster."
+    : affinityReadiness?.message;
   const degradedMessages = [
     ...(!report
       ? collectResourceErrors([refreshState, reportState, readinessState])
       : collectResourceErrors([readinessState])),
-    ...(refreshBannerMessage(refreshState.data)
+    ...(!rosterOnlyFallback && refreshBannerMessage(refreshState.data)
       ? [refreshBannerMessage(refreshState.data) as string]
       : []),
-    ...(report && !report.isFresh && report.staleReason
+    ...(report && !rosterOnlyFallback && !report.isFresh && report.staleReason
       ? [report.staleReason]
       : []),
   ];
@@ -148,6 +198,10 @@ export default async function DriverAffinityPage() {
     currentSegment;
   const allHistorySegment =
     segments.find((segment) => segment.key === "all_history") ?? currentSegment;
+  const visibleSegments =
+    rosterOnlyFallback || sameSegmentSample(seasonSegment, allHistorySegment)
+      ? [currentSegment, seasonSegment]
+      : [currentSegment, seasonSegment, allHistorySegment];
 
   return (
     <div className="flex flex-col gap-6 p-6">
@@ -156,8 +210,8 @@ export default async function DriverAffinityPage() {
       <div>
         <h1 className="text-xl font-bold text-white">Driver Affinity</h1>
         <p className="mt-1 text-sm text-[#6b7280]">
-          Three views of pace strength for the current circuit: this weekend
-          only, 2026 season to date, and the full 2024-2026 sample.
+          Pace strength for the current circuit. Historical views appear when
+          distinct prior-season lap data is loaded.
         </p>
       </div>
 
@@ -169,8 +223,14 @@ export default async function DriverAffinityPage() {
         />
         <StatCard
           label="Freshness"
-          value={report.isFresh ? "Fresh" : "Stale"}
-          hint={formatDateTime(report.sourceMaxSessionEndUtc)}
+          value={
+            rosterOnlyFallback ? "Roster" : report.isFresh ? "Fresh" : "Stale"
+          }
+          hint={
+            rosterOnlyFallback
+              ? "FP1 data pending"
+              : formatDateTime(report.sourceMaxSessionEndUtc)
+          }
         />
         <StatCard
           label="Current GP Leader"
@@ -190,18 +250,16 @@ export default async function DriverAffinityPage() {
             <div className="flex flex-wrap items-center gap-2">
               <Badge
                 tone={
-                  affinityReadiness.status === "ready"
+                  readinessStatus === "ready"
                     ? "good"
-                    : affinityReadiness.status === "blocked"
+                    : readinessStatus === "blocked"
                       ? "warn"
                       : "default"
                 }
               >
-                {affinityReadiness.status}
+                {readinessStatus}
               </Badge>
-              <p className="text-sm text-[#9ca3af]">
-                {affinityReadiness.message}
-              </p>
+              <p className="text-sm text-[#9ca3af]">{readinessMessage}</p>
             </div>
             {affinityReadiness.lastJobRun ? (
               <p className="text-xs text-[#6b7280]">
@@ -219,24 +277,17 @@ export default async function DriverAffinityPage() {
       ) : null}
 
       <section className="grid gap-4 xl:grid-cols-3">
-        <SegmentLeaderboard
-          title={currentSegment.title}
-          description={currentSegment.description}
-          entryCount={currentSegment.entryCount}
-          entries={currentSegment.entries}
-        />
-        <SegmentLeaderboard
-          title={seasonSegment.title}
-          description={seasonSegment.description}
-          entryCount={seasonSegment.entryCount}
-          entries={seasonSegment.entries}
-        />
-        <SegmentLeaderboard
-          title={allHistorySegment.title}
-          description={allHistorySegment.description}
-          entryCount={allHistorySegment.entryCount}
-          entries={allHistorySegment.entries}
-        />
+        {visibleSegments.map((segment) => (
+          <SegmentLeaderboard
+            key={segment.key}
+            title={segment.title}
+            description={segment.description}
+            entryCount={segment.entryCount}
+            sourceSessionCodesIncluded={segment.sourceSessionCodesIncluded}
+            sourceSeasonsIncluded={segment.sourceSeasonsIncluded}
+            entries={segment.entries}
+          />
+        ))}
       </section>
     </div>
   );

@@ -3,10 +3,11 @@ import type {
   DriverAffinityReport,
   F1Meeting,
   F1Session,
+  LiveTradeSignalBoard,
+  ModelRun,
   PaperTradePosition,
   PaperTradeSession,
   PolymarketMarket,
-  RefreshDriverAffinityResponse,
 } from "@f1/shared-types";
 import { sdk } from "@f1/ts-sdk";
 import { Panel, StatCard } from "@f1/ui";
@@ -16,6 +17,9 @@ import { selectScheduleMeetings } from "../../lib/schedule";
 import { meetingRefreshTargetForConfig } from "../../lib/session-refresh";
 import { DriverAffinitySummary } from "../_components/driver-affinity-summary";
 import { WeekendCockpitPanel } from "../_components/weekend-cockpit-panel";
+import { CancelPaperRunButton } from "./cancel-paper-run-button";
+import { ModelReadinessPanel } from "./model-readiness-panel";
+import { calculatePaperTradingStats } from "./stats";
 
 export const revalidate = 60;
 
@@ -49,22 +53,23 @@ function fmtDateTime(value: string) {
   });
 }
 
-function affinityRefreshMessage(
-  response: RefreshDriverAffinityResponse | null,
-) {
-  if (!response) return null;
-  return response.status === "blocked" ? response.message : null;
-}
-
 function StatusBadge({ status }: { status: string }) {
   const color =
     status === "settled"
       ? "bg-green-500/10 text-green-400 border-green-500/20"
       : status === "open"
         ? "bg-blue-500/10 text-blue-400 border-blue-500/20"
-        : "bg-[#374151] text-[#9ca3af] border-white/10";
+        : status === "cancelled"
+          ? "bg-[#e10600]/10 text-[#ffb4b1] border-[#e10600]/20"
+          : "bg-[#374151] text-[#9ca3af] border-white/10";
   const label =
-    status === "settled" ? "Settled" : status === "open" ? "Open" : status;
+    status === "settled"
+      ? "Settled"
+      : status === "open"
+        ? "Open"
+        : status === "cancelled"
+          ? "Cancelled"
+          : status;
   return (
     <span
       className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider ${color}`}
@@ -82,273 +87,337 @@ function numberFromConfig(
   return typeof value === "number" ? value : null;
 }
 
-function sessionStrategySummary(session: PaperTradeSession) {
-  const config = session.configJson as Record<string, unknown> | null;
-  const summary = session.summaryJson as Record<string, unknown> | null;
-  const minEdge = numberFromConfig(config, "min_edge");
-  const betSize = numberFromConfig(config, "bet_size");
-  const feeRate = numberFromConfig(config, "fee_rate");
-  const maxOpenPositions = numberFromConfig(config, "max_open_positions");
-
-  if (config?.manual_trade === true) {
-    const driver =
-      typeof config.driver === "string" ? config.driver : "selected driver";
-    const marketQuestion =
-      typeof config.market_question === "string"
-        ? config.market_question
-        : null;
-    const basis =
-      typeof config.analysis_basis === "string" ? config.analysis_basis : null;
-    return {
-      title: "Manual analyst thesis",
-      description:
-        basis && marketQuestion
-          ? `${driver} view. ${basis}. Ticket: ${marketQuestion}`
-          : `${driver} view entered manually for this run.`,
-      minEdge,
-      betSize,
-      feeRate,
-      maxOpenPositions,
-      selectedDriver:
-        typeof summary?.selected_driver === "string"
-          ? summary.selected_driver
-          : null,
-    };
-  }
-
-  return {
-    title: "Rule-based stage portfolio",
-    description:
-      "Compares model YES probability against market YES price and buys the cheaper side when the edge clears the threshold.",
-    minEdge,
-    betSize,
-    feeRate,
-    maxOpenPositions,
-    selectedDriver: null,
-  };
+function isManualPickBundleSession(session: PaperTradeSession) {
+  const config = session.configJson;
+  return config?.manual_trade === true && config.manual_trade_batch === true;
 }
 
-function positionTicketLabel(side: string) {
-  return side === "buy_no" ? "Bought NO" : "Bought YES";
-}
-
-function formatShares(quantity: number) {
-  return `${quantity.toFixed(Number.isInteger(quantity) ? 0 : 2)} shares`;
-}
-
-function PositionCard({
-  position,
-  market,
-}: {
-  position: PaperTradePosition;
-  market: PolymarketMarket | null;
-}) {
-  const stake = position.quantity * position.entryPrice;
-  const maxPayout = position.quantity;
+function buildGpSessionGroupLabel(
+  gpSlug: string,
+  availableConfigs: {
+    short_code: string;
+    name: string;
+  }[],
+) {
+  const config = availableConfigs.find((item) => item.short_code === gpSlug);
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="space-y-1">
-          <a
-            href={`/markets/${position.marketId}`}
-            className="text-sm font-medium text-white hover:text-[#ff8b85]"
-          >
-            {market?.question ?? `Market ${position.marketId}`}
-          </a>
-          <p className="text-xs text-[#6b7280]">
-            {positionTicketLabel(position.side)} ·{" "}
-            {formatShares(position.quantity)} @ {fmtPct(position.entryPrice)} ·
-            stake {fmtUsd(stake)}
-          </p>
-        </div>
-        <StatusBadge status={position.status} />
-      </div>
-
-      <div className="mt-3 grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-5">
-        <p>Model YES {fmtPct(position.modelProb)}</p>
-        <p>Market YES {fmtPct(position.marketProb)}</p>
-        <p>Edge {fmtPct(position.edge)}</p>
-        <p>Max payout {fmtUsd(maxPayout)}</p>
-        <p className={pnlColor(position.realizedPnl)}>
-          PnL {fmtPnl(position.realizedPnl)}
-        </p>
-      </div>
-    </div>
+    config?.name ??
+    gpSlug.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase())
   );
 }
 
-function SessionRow({
-  session,
-  positions,
+function pickSideForPosition(position: PaperTradePosition) {
+  return position.side === "buy_no" ? "NO" : "YES";
+}
+
+function manualPickConfigByMarket(session: PaperTradeSession) {
+  const configPicks = session.configJson?.picks;
+  if (!Array.isArray(configPicks))
+    return new Map<string, Record<string, unknown>>();
+  return new Map(
+    configPicks
+      .filter(
+        (pick): pick is Record<string, unknown> =>
+          typeof pick === "object" && pick !== null,
+      )
+      .flatMap((pick) => {
+        const marketId = pick.market_id;
+        return typeof marketId === "string" ? [[marketId, pick] as const] : [];
+      }),
+  );
+}
+
+type GpPaperSessionGroup = {
+  gpSlug: string;
+  manualSessions: PaperTradeSession[];
+  modelSessions: PaperTradeSession[];
+};
+
+function PaperRunGroup({
+  kind,
+  sessions,
+  positionsBySessionId,
   marketsById,
 }: {
-  session: PaperTradeSession;
-  positions: PaperTradePosition[];
+  kind: "manual" | "model";
+  sessions: PaperTradeSession[];
+  positionsBySessionId: Map<string, PaperTradePosition[]>;
   marketsById: Map<string, PolymarketMarket>;
 }) {
-  const summary = session.summaryJson as Record<string, number> | null;
-  const strategy = sessionStrategySummary(session);
-  const trades = summary?.trades_executed ?? 0;
-  const pnl = summary?.total_pnl ?? null;
-  const winRate = summary?.win_rate ?? null;
+  const runCount = sessions.length;
+  const isManual = kind === "manual";
+  const positionsWithSession = sessions.flatMap((session) =>
+    (positionsBySessionId.get(session.id) ?? []).map((position) => ({
+      session,
+      position,
+    })),
+  );
+  const totalTrades = sessions.reduce(
+    (sum, session) =>
+      sum +
+      (numberFromConfig(session.summaryJson, "trades_executed") ||
+        positionsBySessionId.get(session.id)?.length ||
+        0),
+    0,
+  );
+  const totalPnl = sessions.reduce(
+    (sum, session) =>
+      sum + (numberFromConfig(session.summaryJson, "total_pnl") ?? 0),
+    0,
+  );
+  const openSessions = sessions.filter((session) => session.status === "open");
+  const settledSessions = sessions.filter(
+    (session) => session.status === "settled",
+  );
+  const groupStatus =
+    openSessions.length > 0
+      ? "open"
+      : settledSessions.length > 0 && settledSessions.length === sessions.length
+        ? "settled"
+        : sessions.every((session) => session.status === "cancelled")
+          ? "cancelled"
+          : "mixed";
+  const openSessionIds = openSessions.map((session) => session.id);
 
   return (
-    <div className="rounded-xl border border-white/[0.06] bg-[#1a1a28] p-5">
+    <div
+      className={`rounded-xl border p-5 ${
+        isManual
+          ? "border-[#e10600]/20 bg-[#1a1118]"
+          : "border-white/[0.06] bg-[#1a1a28]"
+      }`}
+    >
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="space-y-2">
           <div className="flex items-center gap-2">
             <span className="text-sm font-semibold tracking-wider text-white">
-              Paper-trading run
+              {isManual ? "Your picks" : "Model runs"}
             </span>
-            <StatusBadge status={session.status} />
+            <StatusBadge status={groupStatus} />
           </div>
           <p className="text-[11px] text-[#6b7280]">
-            {fmtDateTime(session.startedAt)}
+            {runCount} {isManual ? "manual" : "model"} run
+            {runCount === 1 ? "" : "s"} shown together
           </p>
-          <div>
-            <p className="text-xs font-medium text-white">{strategy.title}</p>
-            <p className="mt-1 max-w-2xl text-xs text-[#9ca3af]">
-              {strategy.description}
-            </p>
-          </div>
+          <p className="max-w-2xl text-xs text-[#9ca3af]">
+            {isManual
+              ? "These are the YES/NO picks you chose from Trade candidates. They are grouped here so one-click attempts stay readable against the model runs."
+              : "These are the YES/NO positions created by the model workflow. They are grouped here so the model side is easy to compare against your picks."}
+          </p>
         </div>
-        <div className="flex gap-6 text-right">
+        <div className="flex flex-wrap items-start justify-end gap-4 text-right">
           <div>
             <p className="text-[10px] uppercase tracking-wider text-[#6b7280]">
-              Trades
+              Picks
             </p>
-            <p className="text-lg font-bold text-white">{trades}</p>
-          </div>
-          <div>
-            <p className="text-[10px] uppercase tracking-wider text-[#6b7280]">
-              Win rate
-            </p>
-            <p className="text-lg font-bold text-white">{fmtPct(winRate)}</p>
+            <p className="text-lg font-bold text-white">{totalTrades}</p>
           </div>
           <div>
             <p className="text-[10px] uppercase tracking-wider text-[#6b7280]">
               PnL
             </p>
-            <p className={`text-lg font-bold tabular-nums ${pnlColor(pnl)}`}>
-              {fmtPnl(pnl)}
+            <p
+              className={`text-lg font-bold tabular-nums ${pnlColor(totalPnl)}`}
+            >
+              {fmtPnl(totalPnl)}
             </p>
           </div>
         </div>
       </div>
 
-      <details className="mt-4 rounded-lg border border-white/[0.06] bg-[#11131d] px-4 py-3">
-        <summary className="cursor-pointer text-sm font-medium text-white">
-          Show run details
-        </summary>
-        <div className="mt-4 space-y-4">
-          <div className="grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-4">
-            <p>Stage code: {session.gpSlug}</p>
-            <p>Run ID: {session.id}</p>
-            <p>Snapshot ID: {session.snapshotId ?? "None"}</p>
-            <p>Model run ID: {session.modelRunId ?? "None"}</p>
-          </div>
-
-          <div className="grid gap-2 text-xs text-[#9ca3af] md:grid-cols-2 xl:grid-cols-4">
-            <p>
-              Edge trigger:{" "}
-              {strategy.minEdge != null ? fmtPct(strategy.minEdge) : "—"}
-            </p>
-            <p>
-              Ticket size:{" "}
-              {strategy.betSize != null ? formatShares(strategy.betSize) : "—"}
-            </p>
-            <p>
-              Fee rate:{" "}
-              {strategy.feeRate != null ? fmtPct(strategy.feeRate) : "—"}
-            </p>
-            <p>
-              Max open tickets:{" "}
-              {strategy.maxOpenPositions != null
-                ? strategy.maxOpenPositions.toFixed(0)
-                : "—"}
-            </p>
-          </div>
-
-          {positions.length > 0 ? (
-            <div className="space-y-3">
-              {positions.map((position) => (
-                <PositionCard
-                  key={position.id}
-                  position={position}
-                  market={marketsById.get(position.marketId) ?? null}
-                />
-              ))}
-            </div>
-          ) : (
-            <p className="text-xs text-[#6b7280]">No positions recorded.</p>
-          )}
+      {positionsWithSession.length > 0 ? (
+        <div className="mt-4 overflow-x-auto">
+          <table className="min-w-full table-fixed divide-y divide-white/[0.06] text-left text-sm">
+            <colgroup>
+              {isManual ? (
+                <>
+                  <col className="w-[36%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[13%]" />
+                </>
+              ) : (
+                <>
+                  <col className="w-[38%]" />
+                  <col className="w-[12%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[17%]" />
+                </>
+              )}
+            </colgroup>
+            <thead className="text-[10px] font-bold uppercase tracking-[0.24em] text-[#6b7280]">
+              <tr>
+                <th className="min-w-0 py-2 pr-4">Market</th>
+                <th className="px-4 py-2 whitespace-nowrap">
+                  {isManual ? "Your pick" : "Model pick"}
+                </th>
+                {isManual ? (
+                  <th className="px-4 py-2 whitespace-nowrap">Model pick</th>
+                ) : null}
+                <th className="px-4 py-2 whitespace-nowrap">Model chance</th>
+                <th className="px-4 py-2 whitespace-nowrap">Market price</th>
+                <th className="px-4 py-2 whitespace-nowrap">Edge</th>
+                <th className="py-2 pl-4 whitespace-nowrap">Run</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-white/[0.06]">
+              {positionsWithSession.map(({ session, position }) => {
+                const market = marketsById.get(position.marketId) ?? null;
+                const pickConfig =
+                  manualPickConfigByMarket(session).get(position.marketId) ??
+                  null;
+                const modelPick =
+                  typeof pickConfig?.model_pick_side === "string"
+                    ? pickConfig.model_pick_side
+                    : "Review";
+                return (
+                  <tr key={position.id}>
+                    <td className="min-w-0 py-3 pr-4">
+                      <a
+                        href={`/markets/${position.marketId}`}
+                        className="block w-full min-w-0 break-words font-medium text-white transition-colors hover:text-[#ffb4b1]"
+                      >
+                        {market?.question ?? `Market ${position.marketId}`}
+                      </a>
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap font-semibold text-white">
+                      {pickSideForPosition(position)}
+                    </td>
+                    {isManual ? (
+                      <td className="px-4 py-3 whitespace-nowrap text-[#d1d5db]">
+                        {modelPick}
+                      </td>
+                    ) : null}
+                    <td className="px-4 py-3 whitespace-nowrap tabular-nums text-[#d1d5db]">
+                      {fmtPct(position.modelProb)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap tabular-nums text-[#d1d5db]">
+                      {fmtPct(position.marketProb)}
+                    </td>
+                    <td className="px-4 py-3 whitespace-nowrap tabular-nums text-[#d1d5db]">
+                      {fmtPct(position.edge)}
+                    </td>
+                    <td className="min-w-0 py-3 pl-4 whitespace-nowrap">
+                      <div className="inline-flex items-center gap-2 whitespace-nowrap">
+                        <span className="min-w-0 shrink-0 text-xs text-[#9ca3af]">
+                          {fmtDateTime(session.startedAt)}
+                        </span>
+                        <StatusBadge status={position.status} />
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
         </div>
-      </details>
+      ) : (
+        <p className="mt-4 text-xs text-[#6b7280]">
+          No positions loaded for this group.
+        </p>
+      )}
+
+      {openSessions.length > 0 ? (
+        <div className="mt-4 flex flex-wrap gap-2 border-t border-white/[0.06] pt-3">
+          <CancelPaperRunButton
+            sessionIds={openSessionIds}
+            label={openSessionIds.length === 1 ? "Cancel run" : "Cancel runs"}
+          />
+        </div>
+      ) : null}
     </div>
   );
 }
 
-function HowPaperTradingWorks({
-  latestSession,
+function PaperRunGpGroup({
+  gpLabel,
+  sessionsByType,
+  positionsBySessionId,
+  marketsById,
+  isCurrent,
 }: {
-  latestSession: PaperTradeSession | null;
+  gpLabel: string;
+  sessionsByType: {
+    manual: PaperTradeSession[];
+    model: PaperTradeSession[];
+  };
+  positionsBySessionId: Map<string, PaperTradePosition[]>;
+  marketsById: Map<string, PolymarketMarket>;
+  isCurrent: boolean;
 }) {
-  const strategy = latestSession ? sessionStrategySummary(latestSession) : null;
+  const totalRuns = sessionsByType.manual.length + sessionsByType.model.length;
+  const openSessionIds = [...sessionsByType.manual, ...sessionsByType.model]
+    .filter((session) => session.status === "open")
+    .map((session) => session.id);
+  if (totalRuns === 0) {
+    return (
+      <details className="rounded-xl border border-white/[0.06] bg-[#11131d] px-4 py-3">
+        <summary className="cursor-pointer text-sm font-medium text-white">
+          {gpLabel} (0)
+        </summary>
+        <p className="mt-4 text-xs text-[#6b7280]">
+          No paper-trading runs for this GP.
+        </p>
+      </details>
+    );
+  }
 
   return (
-    <Panel title="What Paper Trading Does" eyebrow="Quick read">
-      <div className="grid gap-3 md:grid-cols-3">
-        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
-          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
-            1. Compare
-          </p>
-          <p className="mt-2 text-sm text-white">
-            Reads the current stage&apos;s F1 markets and compares model YES
-            probability to the market&apos;s YES price.
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
-          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
-            2. Buy Tickets
-          </p>
-          <p className="mt-2 text-sm text-white">
-            Simulates buying YES or NO shares only when the edge clears the
-            configured trigger.
-          </p>
-          <p className="mt-1 text-xs text-[#6b7280]">
-            Current default: edge{" "}
-            {strategy?.minEdge != null ? fmtPct(strategy.minEdge) : "—"} · size{" "}
-            {strategy?.betSize != null ? formatShares(strategy.betSize) : "—"}
-          </p>
-        </div>
-        <div className="rounded-xl border border-white/[0.06] bg-[#11131d] p-4">
-          <p className="text-[10px] font-bold uppercase tracking-[0.3em] text-[#6b7280]">
-            3. Track Outcome
-          </p>
-          <p className="mt-2 text-sm text-white">
-            Keeps open and settled tickets, stake, payout profile, and PnL so
-            you can see exactly what the model would have bought.
-          </p>
-        </div>
+    <details
+      open={isCurrent}
+      className="rounded-xl border border-white/[0.06] bg-[#11131d] px-4 py-3"
+    >
+      <summary className="cursor-pointer text-sm font-medium text-white">
+        {gpLabel} ({totalRuns} runs)
+      </summary>
+      <div className="mt-4 flex flex-wrap gap-2">
+        {openSessionIds.length > 0 ? (
+          <CancelPaperRunButton
+            sessionIds={openSessionIds}
+            label={
+              openSessionIds.length === 1
+                ? "Cancel run"
+                : "Cancel all open runs"
+            }
+          />
+        ) : null}
       </div>
-    </Panel>
+      <div className="mt-4 flex flex-col gap-4">
+        {sessionsByType.manual.length > 0 ? (
+          <PaperRunGroup
+            kind="manual"
+            sessions={sessionsByType.manual}
+            positionsBySessionId={positionsBySessionId}
+            marketsById={marketsById}
+          />
+        ) : null}
+        {sessionsByType.model.length > 0 ? (
+          <PaperRunGroup
+            kind="model"
+            sessions={sessionsByType.model}
+            positionsBySessionId={positionsBySessionId}
+            marketsById={marketsById}
+          />
+        ) : null}
+      </div>
+    </details>
   );
 }
 
 export default async function PaperTradingPage() {
   const [
-    affinityRefreshState,
     affinityState,
     cockpitState,
     readinessState,
     meetingsState,
+    modelRunsState,
     paperSessionsState,
   ] = await Promise.all([
-    loadResource(
-      () => sdk.refreshDriverAffinity({ season: 2026 }),
-      null as RefreshDriverAffinityResponse | null,
-      "Driver affinity refresh",
-    ),
     loadResource(
       () => sdk.driverAffinity(2026),
       null as DriverAffinityReport | null,
@@ -365,14 +434,14 @@ export default async function PaperTradingPage() {
       [] as F1Meeting[],
       "Meeting feed",
     ),
+    loadResource(sdk.modelRuns, [] as ModelRun[], "Model runs"),
     loadResource(
       () => sdk.paperTradeSessions(),
       [] as PaperTradeSession[],
       "Paper trading sessions",
     ),
   ]);
-  const affinityReport =
-    affinityState.data ?? affinityRefreshState.data?.report ?? null;
+  const affinityReport = affinityState.data;
   const { season: scheduleSeason, meetings } = selectScheduleMeetings(
     meetingsState.data,
   );
@@ -385,17 +454,28 @@ export default async function PaperTradingPage() {
     "Session feed",
   );
   const sessions = paperSessionsState.data;
+  const activeSessions = sessions.filter(
+    (session) => session.status !== "cancelled",
+  );
+  const cancelledSessions = sessions.filter(
+    (session) => session.status === "cancelled",
+  );
+  const visibleSessions = sessions.slice(0, 10);
   const positionsState = await loadResource(
     () =>
       Promise.all(
-        sessions
-          .slice(0, 10)
-          .map((session) => sdk.paperTradePositions(session.id)),
+        visibleSessions.map((session) => sdk.paperTradePositions(session.id)),
       ),
     [] as PaperTradePosition[][],
     "Paper trading positions",
   );
   const positionsBySession = positionsState.data;
+  const positionsBySessionId = new Map(
+    visibleSessions.map(
+      (session, index) =>
+        [session.id, positionsBySession[index] ?? []] as const,
+    ),
+  );
   const allPositions = positionsBySession.flat();
   const uniqueMarketIds = [
     ...new Set(allPositions.map((position) => position.marketId)),
@@ -414,47 +494,66 @@ export default async function PaperTradingPage() {
   const marketsById = new Map(
     marketsState.data.map((market) => [market.id, market] as const),
   );
+  const selectedGpShortCode = cockpitState.data?.selectedGpShortCode ?? null;
+  const liveSignalBoardState = await loadResource(
+    () =>
+      selectedGpShortCode == null
+        ? Promise.resolve(null as LiveTradeSignalBoard | null)
+        : sdk.liveTradeSignalBoard(selectedGpShortCode),
+    null as LiveTradeSignalBoard | null,
+    "Trade candidates",
+  );
 
   const degradedMessages = collectResourceErrors([
     cockpitState,
     readinessState,
     f1SessionsState,
     meetingsState,
+    modelRunsState,
     paperSessionsState,
     positionsState,
     marketsState,
-  ])
-    .concat(
-      !affinityReport
-        ? collectResourceErrors([affinityRefreshState, affinityState])
-        : [],
-    )
-    .concat(
-      affinityRefreshMessage(affinityRefreshState.data)
-        ? [affinityRefreshMessage(affinityRefreshState.data) as string]
-        : [],
-      affinityReport && !affinityReport.isFresh && affinityReport.staleReason
-        ? [affinityReport.staleReason]
-        : [],
-    );
-
-  const totalTrades = sessions.reduce((sum, s) => {
-    const summary = s.summaryJson as Record<string, number> | null;
-    return sum + (summary?.trades_executed ?? 0);
-  }, 0);
-
-  const totalPnl = sessions.reduce((sum, s) => {
-    const summary = s.summaryJson as Record<string, number> | null;
-    return sum + (summary?.total_pnl ?? 0);
-  }, 0);
-
-  const settledPositions = allPositions.filter((p) => p.status === "settled");
-  const wins = settledPositions.filter((p) => (p.realizedPnl ?? 0) > 0);
-  const winRate =
-    settledPositions.length > 0 ? wins.length / settledPositions.length : null;
-  const latestSession = sessions[0] ?? null;
+    liveSignalBoardState,
+  ]).concat(!affinityReport ? collectResourceErrors([affinityState]) : []);
+  const currentGpStats = calculatePaperTradingStats(
+    activeSessions,
+    positionsBySessionId,
+    selectedGpShortCode,
+  );
+  const allTimeStats = calculatePaperTradingStats(
+    activeSessions,
+    positionsBySessionId,
+  );
+  const availableConfigs = cockpitState.data?.availableConfigs ?? [];
+  const activeSessionsWithGp = [...activeSessions, ...cancelledSessions].sort(
+    (a, b) => +new Date(b.startedAt) - +new Date(a.startedAt),
+  );
+  const groupedRunsByGp = new Map<string, PaperTradeSession[]>();
+  for (const session of activeSessionsWithGp) {
+    const bucket = groupedRunsByGp.get(session.gpSlug) ?? [];
+    bucket.push(session);
+    groupedRunsByGp.set(session.gpSlug, bucket);
+  }
+  const gpSessionGroups: GpPaperSessionGroup[] = Array.from(
+    groupedRunsByGp.entries(),
+  )
+    .map(([gpSlug, sessions]) => ({
+      gpSlug,
+      sessions,
+      manualSessions: sessions.filter(isManualPickBundleSession),
+      modelSessions: sessions.filter(
+        (session) => !isManualPickBundleSession(session),
+      ),
+    }))
+    .sort((a, b) => {
+      if (a.gpSlug === selectedGpShortCode && b.gpSlug !== selectedGpShortCode)
+        return -1;
+      if (a.gpSlug !== selectedGpShortCode && b.gpSlug === selectedGpShortCode)
+        return 1;
+      return 0;
+    });
   const refreshTargetsByGpShortCode = Object.fromEntries(
-    (cockpitState.data?.availableConfigs ?? []).map((config) => [
+    availableConfigs.map((config) => [
       config.short_code,
       meetingRefreshTargetForConfig(config, meetings, f1SessionsState.data),
     ]),
@@ -465,78 +564,132 @@ export default async function PaperTradingPage() {
       <PageStatusBanner messages={degradedMessages} />
 
       <div>
-        <h1 className="text-xl font-bold text-white">Paper Trading</h1>
+        <h1 className="text-xl font-bold text-white">Paper Trading Console</h1>
         <p className="mt-1 text-sm text-[#6b7280]">
-          Simulated YES and NO ticket buying for the current F1 stage. The
-          cockpit prepares the stage, this page shows what the model bought, how
-          much it staked, and how the run is performing.
+          Current F1 stage status, trade candidates, and simulated YES/NO ticket
+          results.
         </p>
       </div>
-
-      <HowPaperTradingWorks latestSession={latestSession} />
 
       <section className="grid gap-4 xl:grid-cols-[1.34fr_0.66fr]">
         <WeekendCockpitPanel
           initialStatus={cockpitState.data}
           initialReadiness={readinessState.data}
+          initialSignalBoard={liveSignalBoardState.data}
           refreshTargetsByGpShortCode={refreshTargetsByGpShortCode}
         />
-        <DriverAffinitySummary
-          report={affinityReport}
-          refreshMessage={affinityRefreshMessage(affinityRefreshState.data)}
-          readiness={
-            readinessState.data?.actions.find(
-              (action) => action.key === "driver_affinity",
-            ) ?? null
+        <div className="flex flex-col gap-4">
+          <ModelReadinessPanel
+            status={cockpitState.data}
+            modelRuns={modelRunsState.data}
+          />
+          <DriverAffinitySummary
+            report={affinityReport}
+            readiness={
+              readinessState.data?.actions.find(
+                (action) => action.key === "driver_affinity",
+              ) ?? null
+            }
+          />
+        </div>
+      </section>
+
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          label="Current GP runs"
+          value={currentGpStats.runs}
+          hint={selectedGpShortCode ?? "No GP selected"}
+        />
+        <StatCard
+          label="Current tickets"
+          value={currentGpStats.trades}
+          hint="this GP only"
+        />
+        <StatCard
+          label="Current win rate"
+          value={
+            currentGpStats.winRate != null
+              ? `${(currentGpStats.winRate * 100).toFixed(1)}%`
+              : "—"
           }
+          hint={`${currentGpStats.settledPositions} settled tickets`}
+        />
+        <StatCard
+          label="Current PnL"
+          value={
+            <span className={pnlColor(currentGpStats.totalPnl)}>
+              {fmtPnl(currentGpStats.totalPnl)}
+            </span>
+          }
+          hint="realized P&L"
         />
       </section>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
-          label="Runs"
-          value={sessions.length}
-          hint="total paper-trading runs"
+          label="All-time runs"
+          value={allTimeStats.runs}
+          hint="all paper-trading runs"
         />
         <StatCard
-          label="Total tickets"
-          value={totalTrades}
-          hint="executed YES/NO tickets"
+          label="All-time tickets"
+          value={allTimeStats.trades}
+          hint="all executed tickets"
         />
         <StatCard
-          label="Win rate"
-          value={winRate != null ? `${(winRate * 100).toFixed(1)}%` : "—"}
-          hint="based on settled tickets"
+          label="All-time win rate"
+          value={
+            allTimeStats.winRate != null
+              ? `${(allTimeStats.winRate * 100).toFixed(1)}%`
+              : "—"
+          }
+          hint={`${allTimeStats.settledPositions} settled tickets loaded`}
         />
         <StatCard
-          label="Total PnL"
-          value={<span className={pnlColor(totalPnl)}>{fmtPnl(totalPnl)}</span>}
+          label="All-time PnL"
+          value={
+            <span className={pnlColor(allTimeStats.totalPnl)}>
+              {fmtPnl(allTimeStats.totalPnl)}
+            </span>
+          }
           hint="realized P&L"
         />
       </section>
 
-      {sessions.length === 0 ? (
-        <Panel title="No runs yet">
+      {selectedGpShortCode && gpSessionGroups.length === 0 ? (
+        <Panel title="Current GP results" eyebrow="This GP">
           <p className="text-sm text-[#6b7280]">
-            Run the current stage from the cockpit above and the simulated
-            tickets will appear here.
+            No paper-trading run exists for the current GP yet. Past GP runs
+            stay in the history below.
           </p>
         </Panel>
-      ) : (
-        <section className="flex flex-col gap-4">
+      ) : null}
+
+      {gpSessionGroups.length > 0 ? (
+        <section className="flex flex-col gap-3">
           <h2 className="text-sm font-semibold uppercase tracking-wider text-[#6b7280]">
-            Run history ({sessions.length})
+            Runs by GP ({gpSessionGroups.length})
           </h2>
-          {sessions.map((session, i) => (
-            <SessionRow
-              key={session.id}
-              session={session}
-              positions={positionsBySession[i] ?? []}
-              marketsById={marketsById}
-            />
-          ))}
+          <div className="flex flex-col gap-3">
+            {gpSessionGroups.map((group) => (
+              <PaperRunGpGroup
+                key={group.gpSlug}
+                gpLabel={buildGpSessionGroupLabel(
+                  group.gpSlug,
+                  availableConfigs,
+                )}
+                sessionsByType={{
+                  manual: group.manualSessions,
+                  model: group.modelSessions,
+                }}
+                positionsBySessionId={positionsBySessionId}
+                marketsById={marketsById}
+                isCurrent={group.gpSlug === selectedGpShortCode}
+              />
+            ))}
+          </div>
         </section>
-      )}
+      ) : null}
     </div>
   );
 }

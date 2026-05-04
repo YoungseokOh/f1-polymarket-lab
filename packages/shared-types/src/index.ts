@@ -575,6 +575,126 @@ export interface ExecuteManualLivePaperTradeResponse {
   reason: string | null;
 }
 
+export interface ManualPaperTradePickRequest {
+  market_id: string;
+  token_id?: string | null;
+  model_run_id?: string | null;
+  snapshot_id?: string | null;
+  side_label: "YES" | "NO";
+  model_pick_side?: string | null;
+  model_prob: number;
+  market_price: number;
+}
+
+export interface RunManualPaperTradeRequest {
+  gp_short_code: string;
+  picks: ManualPaperTradePickRequest[];
+  bet_size?: number;
+  observed_at_utc?: string | null;
+}
+
+export interface RunManualPaperTradeResponse {
+  action: string;
+  status: string;
+  message: string;
+  gpShortCode: string;
+  ptSessionId: string;
+  pickCount: number;
+  openPositions: number;
+  totalPnl: number;
+  logPath: string | null;
+}
+
+export interface PromoteModelRunRequest {
+  model_run_id: string;
+  stage: string;
+}
+
+export interface PromoteBestModelRunRequest {
+  stage: string;
+}
+
+export interface BuildMultitaskSnapshotsRequest {
+  season?: number;
+  through_meeting_key?: number | null;
+  checkpoints?: string[];
+  stage?: string;
+}
+
+export interface BuildMultitaskSnapshotsResponse {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  season: number;
+  throughMeetingKey: number | null;
+  meetingKeys: number[];
+  completedMeetings: Record<string, unknown>[];
+  snapshotIds: string[];
+  snapshotCount: number;
+  rowCount: number;
+  manifestPath: string | null;
+  jobRunIds: string[];
+  warnings: string[];
+}
+
+export interface TrainMultitaskModelRequest {
+  season?: number;
+  manifest_path?: string | null;
+  stage?: string;
+  min_train_gps?: number;
+}
+
+export interface MultitaskModelTrainingRun {
+  modelRunId: string;
+  testMeetingKey: number;
+  trainMeetingKeys: number[];
+  predictionCount: number;
+  metrics: Record<string, unknown>;
+}
+
+export interface TrainMultitaskModelResponse {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  season: number;
+  manifestPath: string;
+  meetingKeys: number[];
+  splitCount: number;
+  modelRunIds: string[];
+  modelRunCount: number;
+  runs: MultitaskModelTrainingRun[];
+  skipped: string[];
+}
+
+export interface ScoreMultitaskSnapshotRequest {
+  snapshot_id: string;
+  stage?: string;
+}
+
+export interface ScoreMultitaskSnapshotResponse {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  snapshotId: string;
+  modelRunId: string;
+  sourceModelRunId: string;
+  artifactPath: string;
+  predictionCount: number;
+}
+
+export interface PromoteModelRunResponse {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  promotionId: string;
+  modelRunId: string;
+  candidateCount?: number | null;
+}
+
 export interface GPRegistryItem {
   name: string;
   short_code: string;
@@ -670,6 +790,7 @@ export interface WeekendCockpitStatus {
   focusStatus: "upcoming" | "live" | "ended";
   timelineCompletedCodes: string[];
   timelineActiveCode: string | null;
+  timelineSessionCodes: string[];
   sourceSession: F1Session | null;
   targetSession: F1Session | null;
   latestPaperSession: PaperTradeSession | null;

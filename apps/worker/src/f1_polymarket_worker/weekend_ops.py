@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import time
+import uuid
 from collections import Counter, defaultdict
 from collections.abc import Sequence
 from datetime import datetime, timedelta, timezone
@@ -93,8 +94,10 @@ from f1_polymarket_worker.multitask_snapshot import build_multitask_feature_snap
 from f1_polymarket_worker.ops_calendar import (
     EffectiveOpsMeeting,
     get_ops_stage_config,
+    infer_event_format_from_session_codes,
     list_ops_stage_configs,
     list_ops_stage_configs_for_meeting,
+    normalize_event_format,
     resolve_effective_ops_calendar,
     resolve_ops_season,
 )
@@ -146,6 +149,8 @@ MARKET_PROBE_SPECS = (
 )
 REGULAR_WEEKEND_SESSION_PATTERN = frozenset({"FP1", "FP2", "FP3", "Q", "R"})
 SPRINT_WEEKEND_SESSION_PATTERN = frozenset({"FP1", "SQ", "S", "Q", "R"})
+TIMELINE_SESSION_SEQUENCE_CONVENTIONAL = ("FP1", "FP2", "FP3", "Q", "R")
+TIMELINE_SESSION_SEQUENCE_SPRINT = ("FP1", "SQ", "S", "Q", "R")
 VALID_WEEKEND_SESSION_PATTERNS = (
     REGULAR_WEEKEND_SESSION_PATTERN,
     SPRINT_WEEKEND_SESSION_PATTERN,
@@ -160,6 +165,30 @@ def _report_slug_from_meeting(meeting: F1Meeting) -> str:
 
 def _validation_report_dir(*, root: Path, season: int, slug: str) -> Path:
     return root / "reports" / "validation" / str(season) / slug
+
+
+def _timeline_session_codes_for_meeting(
+    event_format: str | None,
+    sessions_by_code: dict[str, F1Session],
+) -> tuple[str, ...]:
+    normalized_format = normalize_event_format(event_format)
+    if normalized_format == "sprint":
+        return TIMELINE_SESSION_SEQUENCE_SPRINT
+    if normalized_format == "conventional":
+        session_codes = set(sessions_by_code.keys())
+        inferred_format = infer_event_format_from_session_codes(session_codes)
+        if inferred_format == "sprint":
+            return TIMELINE_SESSION_SEQUENCE_SPRINT
+        if inferred_format == "conventional":
+            return TIMELINE_SESSION_SEQUENCE_CONVENTIONAL
+
+    session_codes = set(sessions_by_code.keys())
+    inferred_format = infer_event_format_from_session_codes(session_codes)
+    if inferred_format == "sprint":
+        return TIMELINE_SESSION_SEQUENCE_SPRINT
+    if inferred_format == "conventional":
+        return TIMELINE_SESSION_SEQUENCE_CONVENTIONAL
+    return tuple(code for code in COCKPIT_TIMELINE_CODES if code in session_codes)
 
 
 def _event_as_payload(event: PolymarketEvent | None) -> dict[str, Any]:
@@ -968,60 +997,99 @@ def _primary_action_payload(
 ) -> dict[str, str]:
     source_name = _session_display_name(config.source_session_code)
     target_name = _session_display_name(config.target_session_code)
-    if run_step["status"] == "blocked":
-        return {
-            "primary_action_title": "Wait for this stage",
-            "primary_action_description": run_step["detail"],
-            "primary_action_cta": "Not ready yet",
-        }
     if sync_step["status"] == "ready":
         return {
-            "primary_action_title": "Update to latest",
+            "primary_action_title": "Prepare paper run",
             "primary_action_description": (
-                "This latest update will load the current Grand Prix schedule first, "
-                "then continue the remaining preparation steps."
+                "Loads the current Grand Prix schedule first, then continues through "
+                "market prep and creates a simulated paper-trading run."
             ),
-            "primary_action_cta": "Update to latest",
+            "primary_action_cta": "Prepare paper run",
+        }
+    blocked_prerequisite = next(
+        (
+            step
+            for step in (hydrate_step, settle_step, discover_step)
+            if step["status"] == "blocked"
+        ),
+        None,
+    )
+    if blocked_prerequisite is not None:
+        return {
+            "primary_action_title": "Waiting for this stage",
+            "primary_action_description": blocked_prerequisite["detail"],
+            "primary_action_cta": "Wait",
         }
     if hydrate_step["status"] == "ready":
         continuation = (
-            f", then settle finished {source_name} tickets and prepare {target_name} markets."
+            f", then settle finished {source_name} tickets, prepare {target_name} markets, "
+            "and create a simulated paper-trading run."
             if settle_step["status"] == "ready"
-            else f" and prepare {target_name} markets."
+            else f", prepare {target_name} markets, and create a simulated paper-trading run."
         )
         return {
-            "primary_action_title": "Update to latest",
+            "primary_action_title": "Prepare paper run",
             "primary_action_description": (
-                f"This latest update will load {source_name} results first{continuation}"
+                f"Loads {source_name} results first{continuation}"
             ),
-            "primary_action_cta": "Update to latest",
+            "primary_action_cta": "Prepare paper run",
         }
     if settle_step["status"] == "ready":
         return {
-            "primary_action_title": "Update to latest",
+            "primary_action_title": "Prepare paper run",
             "primary_action_description": (
-                f"This latest update will settle finished {source_name} tickets, "
-                f"prepare {target_name} markets, and continue into paper trading."
+                f"Settles finished {source_name} tickets, prepares {target_name} markets, "
+                "and creates a simulated paper-trading run."
             ),
-            "primary_action_cta": "Update to latest",
+            "primary_action_cta": "Prepare paper run",
         }
     if discover_step["status"] == "ready":
         return {
-            "primary_action_title": "Update to latest",
+            "primary_action_title": "Prepare paper run",
             "primary_action_description": (
-                f"This latest update will discover {target_name} markets first, "
-                "then continue into paper trading."
+                f"Finds {target_name} markets first, then creates a simulated "
+                "paper-trading run."
             ),
-            "primary_action_cta": "Update to latest",
+            "primary_action_cta": "Prepare paper run",
         }
-    rerun_label = "Update to latest" if latest_paper_session is not None else "Update to latest"
+    if run_step["status"] == "blocked":
+        return {
+            "primary_action_title": "Waiting for this stage",
+            "primary_action_description": run_step["detail"],
+            "primary_action_cta": "Wait",
+        }
+    rerun_label = (
+        "Rerun paper trading"
+        if latest_paper_session is not None
+        else "Run paper trading"
+    )
     return {
-        "primary_action_title": "Update to latest",
+        "primary_action_title": rerun_label,
         "primary_action_description": (
-            "All prerequisites are complete. You can run the next paper-trading stage now."
+            "All prerequisites are complete. This creates simulated paper positions only."
         ),
         "primary_action_cta": rerun_label,
     }
+
+
+def _is_model_only_blocked_status(status: dict[str, Any]) -> bool:
+    blockers = list(status.get("blockers") or [])
+    model_blockers = list(status.get("model_blockers") or [])
+    return bool(blockers) and blockers == model_blockers
+
+
+def _has_ready_preparation_step(status: dict[str, Any]) -> bool:
+    return any(
+        step.get("status") == "ready" and step.get("key") != "run_paper_trade"
+        for step in status.get("steps") or []
+    )
+
+
+def _has_completed_preparation_step(executed_steps: Sequence[dict[str, Any]]) -> bool:
+    return any(
+        step.get("status") == "completed" and step.get("key") != "run_paper_trade"
+        for step in executed_steps
+    )
 
 
 def _required_session_codes(config: GPConfig) -> set[str]:
@@ -1094,11 +1162,14 @@ def _find_stage_config(
 
 def _focus_session_state(
     sessions_by_code: dict[str, F1Session],
+    timeline_session_codes: Sequence[str],
     *,
     now: Any,
 ) -> tuple[F1Session | None, str, list[str], str | None]:
     ordered_sessions = [
-        sessions_by_code[code] for code in COCKPIT_TIMELINE_CODES if code in sessions_by_code
+        sessions_by_code[code]
+        for code in timeline_session_codes
+        if code in sessions_by_code
     ]
     completed_codes = [
         session.session_code
@@ -1140,8 +1211,13 @@ def _choose_default_config_for_meeting(
             return True
         return _session_has_ended(sessions_by_code.get(config.source_session_code), now=now)
 
+    timeline_session_codes = _timeline_session_codes_for_meeting(
+        event_format=None,
+        sessions_by_code=sessions_by_code,
+    )
     focus_session, _focus_status, _completed_codes, focus_code = _focus_session_state(
         sessions_by_code,
+        timeline_session_codes,
         now=now,
     )
     if _focus_status == "live" and focus_code == "FP1":
@@ -1271,12 +1347,13 @@ def _selected_config_for_operations(
 
 def _next_active_or_upcoming_session(
     sessions_by_code: dict[str, F1Session],
+    timeline_session_codes: Sequence[str],
     *,
     now: Any,
 ) -> F1Session | None:
     ordered_sessions = [
         session
-        for code in COCKPIT_TIMELINE_CODES
+        for code in timeline_session_codes
         if (session := sessions_by_code.get(code)) is not None
     ]
     for session in ordered_sessions:
@@ -1597,7 +1674,15 @@ def get_current_weekend_operations_readiness(
         if meeting is None
         else _latest_ended_session_for_meeting(ctx, meeting_id=meeting.id, now=now)
     )
-    next_active_session = _next_active_or_upcoming_session(sessions_by_code, now=now)
+    timeline_session_codes = _timeline_session_codes_for_meeting(
+        None if meeting is None else meeting.event_format,
+        sessions_by_code=sessions_by_code,
+    )
+    next_active_session = _next_active_or_upcoming_session(
+        sessions_by_code,
+        timeline_session_codes,
+        now=now,
+    )
     driver_affinity_status = get_driver_affinity_refresh_status(
         ctx,
         season=config.season,
@@ -2220,8 +2305,16 @@ def get_weekend_cockpit_status(
         selected_ops_meeting, selected_config = auto_meeting, auto_config
 
     meeting, sessions_by_code = _meeting_and_sessions_for_config(ctx, config=selected_config)
+    timeline_session_codes = _timeline_session_codes_for_meeting(
+        selected_ops_meeting.event_format,
+        sessions_by_code=sessions_by_code,
+    )
     focus_session, focus_status, timeline_completed_codes, timeline_active_code = (
-        _focus_session_state(sessions_by_code, now=now)
+        _focus_session_state(
+            sessions_by_code,
+            timeline_session_codes,
+            now=now,
+        )
     )
     source_session = (
         None
@@ -2259,7 +2352,10 @@ def get_weekend_cockpit_status(
     ]
     latest_paper_session = ctx.db.scalars(
         select(PaperTradeSession)
-        .where(PaperTradeSession.gp_slug == selected_config.short_code)
+        .where(
+            PaperTradeSession.gp_slug == selected_config.short_code,
+            PaperTradeSession.status != "cancelled",
+        )
         .order_by(PaperTradeSession.started_at.desc())
         .limit(1)
     ).first()
@@ -2647,6 +2743,7 @@ def get_weekend_cockpit_status(
         "focus_session": focus_session,
         "focus_status": focus_status,
         "timeline_completed_codes": timeline_completed_codes,
+        "timeline_session_codes": timeline_session_codes,
         "timeline_active_code": timeline_active_code,
         "source_session": source_session,
         "target_session": target_session,
@@ -3015,6 +3112,161 @@ def execute_manual_live_paper_trade(
     }
 
 
+def execute_manual_paper_trade_run(
+    ctx: PipelineContext,
+    *,
+    gp_short_code: str,
+    picks: Sequence[dict[str, Any]],
+    bet_size: float = 10.0,
+    observed_at_utc: datetime | None = None,
+) -> dict[str, Any]:
+    _, config = get_ops_stage_config(
+        ctx.db,
+        short_code=gp_short_code,
+        now=_ensure_utc(observed_at_utc or utc_now()),
+    )
+    if not picks:
+        raise ValueError("At least one manual pick is required")
+    if bet_size <= 0:
+        raise ValueError("bet_size must be positive")
+
+    entry_ts = _ensure_utc(observed_at_utc or utc_now())
+    session_id = str(uuid.uuid4())
+    positions: list[PaperTradePosition] = []
+    pick_summaries: list[dict[str, Any]] = []
+    seen_market_ids: set[str] = set()
+
+    for pick in picks:
+        market_id = str(pick.get("market_id") or "")
+        if not market_id:
+            raise ValueError("Each manual pick requires market_id")
+        if market_id in seen_market_ids:
+            raise ValueError(f"Duplicate manual pick for market_id={market_id}")
+        seen_market_ids.add(market_id)
+
+        side_label = str(pick.get("side_label") or "").upper()
+        if side_label not in {"YES", "NO"}:
+            raise ValueError("Manual pick side_label must be YES or NO")
+        market = ctx.db.get(PolymarketMarket, market_id)
+        if market is None:
+            raise KeyError(f"market_id={market_id} not found")
+
+        raw_market_price = pick.get("market_price")
+        raw_model_prob = pick.get("model_prob")
+        if raw_market_price is None:
+            raise ValueError("Each manual pick requires market_price")
+        if raw_model_prob is None:
+            raise ValueError("Each manual pick requires model_prob")
+        market_price = float(raw_market_price)
+        model_prob = float(raw_model_prob)
+        if not 0.0 <= market_price <= 1.0:
+            raise ValueError("market_price must be between 0 and 1")
+        if not 0.0 <= model_prob <= 1.0:
+            raise ValueError("model_prob must be between 0 and 1")
+
+        signal_action = "buy_yes" if side_label == "YES" else "buy_no"
+        entry_price = market_price if side_label == "YES" else 1.0 - market_price
+        edge = (
+            model_prob - market_price
+            if side_label == "YES"
+            else market_price - model_prob
+        )
+        token_id = pick.get("token_id")
+        positions.append(
+            PaperTradePosition(
+                session_id=session_id,
+                market_id=market.id,
+                token_id=str(token_id) if token_id else None,
+                side=signal_action,
+                quantity=bet_size,
+                entry_price=entry_price,
+                entry_time=entry_ts,
+                model_prob=model_prob,
+                market_prob=market_price,
+                edge=edge,
+                status="open",
+            )
+        )
+        pick_summaries.append(
+            {
+                "market_id": market.id,
+                "question": market.question,
+                "side_label": side_label,
+                "signal_action": signal_action,
+                "market_price": market_price,
+                "model_prob": model_prob,
+                "edge": edge,
+                "entry_price": entry_price,
+                "quantity": bet_size,
+                "model_pick_side": pick.get("model_pick_side"),
+            }
+        )
+
+    summary = {
+        "trades_executed": len(positions),
+        "open_positions": len(positions),
+        "settled_positions": 0,
+        "win_count": 0,
+        "loss_count": 0,
+        "win_rate": None,
+        "total_pnl": 0.0,
+        "daily_pnl": 0.0,
+        "manual_pick_count": len(positions),
+    }
+    log_payload = {
+        "action": "run-manual-paper-trade",
+        "gp_short_code": config.short_code,
+        "created_at_utc": entry_ts.isoformat(),
+        "bet_size": bet_size,
+        "picks": pick_summaries,
+        "summary": summary,
+    }
+    log_path = (
+        ctx.settings.data_root
+        / "reports"
+        / "paper_trading"
+        / "manual"
+        / f"{config.short_code}_manual_run_{entry_ts.strftime('%Y%m%dT%H%M%SZ')}.json"
+    )
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text(json.dumps(log_payload, indent=2, default=str), encoding="utf-8")
+
+    paper_session = PaperTradeSession(
+        id=session_id,
+        gp_slug=config.short_code,
+        snapshot_id=str(picks[0].get("snapshot_id") or "") or None,
+        model_run_id=str(picks[0].get("model_run_id") or "") or None,
+        status="open",
+        config_json={
+            "manual_trade": True,
+            "manual_trade_batch": True,
+            "manual_pick_count": len(positions),
+            "bet_size": bet_size,
+            "source": "trade_candidates",
+            "picks": pick_summaries,
+        },
+        summary_json=summary,
+        log_path=str(log_path),
+        started_at=entry_ts,
+        finished_at=None,
+    )
+    ctx.db.add(paper_session)
+    ctx.db.add_all(positions)
+    ctx.db.flush()
+
+    return {
+        "action": "run-manual-paper-trade",
+        "status": "ok",
+        "message": f"Created your manual paper run with {len(positions)} pick(s).",
+        "gp_short_code": config.short_code,
+        "pt_session_id": session_id,
+        "pick_count": len(positions),
+        "open_positions": len(positions),
+        "total_pnl": 0.0,
+        "log_path": str(log_path),
+    }
+
+
 def run_weekend_cockpit(
     ctx: PipelineContext,
     *,
@@ -3081,7 +3333,10 @@ def run_weekend_cockpit(
         )
         return result
 
-    if not status["ready_to_run"]:
+    can_prepare_before_model_gate = _is_model_only_blocked_status(
+        status
+    ) and _has_ready_preparation_step(status)
+    if not status["ready_to_run"] and not can_prepare_before_model_gate:
         detail = "; ".join(status["blockers"]) or "Weekend cockpit is blocked"
         finish_job_run(ctx.db, run, status="failed", records_written=0, error_message=detail)
         write_operation_report(
@@ -3298,6 +3553,55 @@ def run_weekend_cockpit(
                 raise ValueError(discover_step["detail"])
 
         if status["blockers"]:
+            if _is_model_only_blocked_status(status) and _has_completed_preparation_step(
+                executed_steps
+            ):
+                detail = "; ".join(status["blockers"])
+                message = (
+                    f"Weekend prep updated for {config.name} ({config.short_code}). "
+                    f"Paper trading still needs a promoted model. {detail}"
+                )
+                warnings = list(preflight_summary.get("warnings") or [])
+                warnings.append(detail)
+                finish_job_run(
+                    ctx.db,
+                    run,
+                    status="blocked",
+                    records_written=sum(
+                        int(step.get("count") or 0)
+                        for step in executed_steps
+                        if step.get("status") == "completed"
+                    ),
+                    error_message=detail,
+                )
+                result = {
+                    "action": "run-weekend-cockpit",
+                    "status": "blocked",
+                    "message": message,
+                    "gp_short_code": config.short_code,
+                    "snapshot_id": None,
+                    "model_run_id": None,
+                    "pt_session_id": None,
+                    "job_run_id": run.id,
+                    "report_path": None,
+                    "preflight_summary": preflight_summary,
+                    "warnings": warnings,
+                    "executed_steps": executed_steps,
+                    "details": None,
+                }
+                result["report_path"] = write_operation_report(
+                    root=ctx.settings.data_root,
+                    season=config.season,
+                    meeting_key=config.meeting_key,
+                    action="run-weekend-cockpit",
+                    payload={
+                        **result,
+                        "blockers": status["blockers"],
+                        "meeting_name": None if meeting is None else meeting.meeting_name,
+                    },
+                    job_run_id=run.id,
+                )
+                return result
             raise ValueError("; ".join(status["blockers"]))
 
         paper_result = run_gp_paper_trade_pipeline(

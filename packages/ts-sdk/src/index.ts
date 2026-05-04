@@ -5,6 +5,8 @@ import type {
   ArtifactRefreshSummary,
   BackfillBacktestsRequest,
   BacktestResult,
+  BuildMultitaskSnapshotsRequest,
+  BuildMultitaskSnapshotsResponse,
   CancelLiveTradeTicketRequest,
   CancelLiveTradeTicketResponse,
   CaptureLiveWeekendRequest,
@@ -45,6 +47,9 @@ import type {
   PolymarketEvent,
   PolymarketMarket,
   PricePoint,
+  PromoteBestModelRunRequest,
+  PromoteModelRunRequest,
+  PromoteModelRunResponse,
   RecordLiveTradeFillRequest,
   RecordLiveTradeFillResponse,
   RefreshDriverAffinityRequest,
@@ -53,10 +58,14 @@ import type {
   RefreshLatestSessionResponse,
   RefreshedSessionSummary,
   RunBacktestRequest,
+  RunManualPaperTradeRequest,
+  RunManualPaperTradeResponse,
   RunPaperTradeRequest,
   RunWeekendCockpitDetails,
   RunWeekendCockpitRequest,
   RunWeekendCockpitResponse,
+  ScoreMultitaskSnapshotRequest,
+  ScoreMultitaskSnapshotResponse,
   SetCalendarOverrideRequest,
   SignalDiagnostic,
   SignalRegistryEntry,
@@ -64,6 +73,8 @@ import type {
   SyncCalendarRequest,
   SyncF1MarketsRequest,
   TradeDecision,
+  TrainMultitaskModelRequest,
+  TrainMultitaskModelResponse,
   WeekendCockpitSettlementSummary,
   WeekendCockpitStatus,
   WeekendCockpitStep,
@@ -739,6 +750,11 @@ export const sdk = {
     >("/api/v1/actions/execute-manual-live-paper-trade", body).then(
       mapExecuteManualLivePaperTradeResponse,
     ),
+  runManualPaperTrade: (body: RunManualPaperTradeRequest) =>
+    apiPost<RunManualPaperTradeRequest, RunManualPaperTradeResponseApi>(
+      "/api/v1/actions/run-manual-paper-trade",
+      body,
+    ).then(mapRunManualPaperTradeResponse),
   weekendCockpitStatus: async (
     gpShortCode?: string,
   ): Promise<WeekendCockpitStatus> => {
@@ -768,6 +784,31 @@ export const sdk = {
       "/api/v1/actions/run-weekend-cockpit",
       body ?? {},
     ).then(mapRunWeekendCockpitResponse),
+  promoteModelRun: (body: PromoteModelRunRequest) =>
+    apiPost<PromoteModelRunRequest, PromoteModelRunResponseApi>(
+      "/api/v1/actions/promote-model-run",
+      body,
+    ).then(mapPromoteModelRunResponse),
+  promoteBestModelRun: (body: PromoteBestModelRunRequest) =>
+    apiPost<PromoteBestModelRunRequest, PromoteModelRunResponseApi>(
+      "/api/v1/actions/promote-best-model-run",
+      body,
+    ).then(mapPromoteModelRunResponse),
+  buildMultitaskSnapshots: (body: BuildMultitaskSnapshotsRequest) =>
+    apiPost<BuildMultitaskSnapshotsRequest, BuildMultitaskSnapshotsResponseApi>(
+      "/api/v1/actions/build-multitask-snapshots",
+      body,
+    ).then(mapBuildMultitaskSnapshotsResponse),
+  trainMultitaskModel: (body: TrainMultitaskModelRequest) =>
+    apiPost<TrainMultitaskModelRequest, TrainMultitaskModelResponseApi>(
+      "/api/v1/actions/train-multitask-model",
+      body,
+    ).then(mapTrainMultitaskModelResponse),
+  scoreMultitaskSnapshot: (body: ScoreMultitaskSnapshotRequest) =>
+    apiPost<ScoreMultitaskSnapshotRequest, ScoreMultitaskSnapshotResponseApi>(
+      "/api/v1/actions/score-multitask-snapshot",
+      body,
+    ).then(mapScoreMultitaskSnapshotResponse),
   driverAffinity: async (
     season = 2026,
     meetingKey?: number,
@@ -837,6 +878,15 @@ export const sdk = {
   paperTradeSession: async (sessionId: string): Promise<PaperTradeSession> => {
     const record = await apiGet<PaperTradeSessionApi>(
       `/api/v1/paper-trading/sessions/${encodeURIComponent(sessionId)}`,
+    );
+    return mapPaperTradeSession(record);
+  },
+  cancelPaperTradeSession: async (
+    sessionId: string,
+  ): Promise<PaperTradeSession> => {
+    const record = await apiPost<Record<string, never>, PaperTradeSessionApi>(
+      `/api/v1/paper-trading/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      {},
     );
     return mapPaperTradeSession(record);
   },
@@ -1316,6 +1366,7 @@ type WeekendCockpitStatusApi = {
   focus_status: WeekendCockpitStatus["focusStatus"];
   timeline_completed_codes: string[];
   timeline_active_code: string | null;
+  timeline_session_codes: string[];
   source_session: F1SessionApi | null;
   target_session: F1SessionApi | null;
   latest_paper_session: PaperTradeSessionApi | null;
@@ -1431,6 +1482,68 @@ type RunWeekendCockpitResponseApi = {
   warnings: string[];
   executed_steps: WeekendCockpitStepApi[];
   details: RunWeekendCockpitDetailsApi | null;
+};
+
+type PromoteModelRunResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  promotion_id: string;
+  model_run_id: string;
+  candidate_count?: number | null;
+};
+
+type BuildMultitaskSnapshotsResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  season: number;
+  through_meeting_key: number | null;
+  meeting_keys: number[];
+  completed_meetings: Record<string, unknown>[];
+  snapshot_ids: string[];
+  snapshot_count: number;
+  row_count: number;
+  manifest_path: string | null;
+  job_run_ids: string[];
+  warnings: string[];
+};
+
+type MultitaskModelTrainingRunApi = {
+  model_run_id: string;
+  test_meeting_key: number;
+  train_meeting_keys: number[];
+  prediction_count: number;
+  metrics: Record<string, unknown>;
+};
+
+type TrainMultitaskModelResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  season: number;
+  manifest_path: string;
+  meeting_keys: number[];
+  split_count: number;
+  model_run_ids: string[];
+  model_run_count: number;
+  runs: MultitaskModelTrainingRunApi[];
+  skipped: string[];
+};
+
+type ScoreMultitaskSnapshotResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  stage: string;
+  snapshot_id: string;
+  model_run_id: string;
+  source_model_run_id: string;
+  artifact_path: string;
+  prediction_count: number;
 };
 
 type WeekendCockpitSettlementSummaryApi = {
@@ -1552,6 +1665,18 @@ type ExecuteManualLivePaperTradeResponseApi = {
   edge: number;
   side_label: string | null;
   reason: string | null;
+};
+
+type RunManualPaperTradeResponseApi = {
+  action: string;
+  status: string;
+  message: string;
+  gp_short_code: string;
+  pt_session_id: string;
+  pick_count: number;
+  open_positions: number;
+  total_pnl: number;
+  log_path: string | null;
 };
 
 type CreateLiveTradeTicketResponseApi = {
@@ -1965,6 +2090,7 @@ function mapWeekendCockpitStatus(
     focusStatus: record.focus_status,
     timelineCompletedCodes: record.timeline_completed_codes,
     timelineActiveCode: record.timeline_active_code,
+    timelineSessionCodes: record.timeline_session_codes,
     sourceSession: record.source_session
       ? mapSession(record.source_session)
       : null,
@@ -2035,6 +2161,84 @@ function mapRunWeekendCockpitResponse(
     details: record.details
       ? mapRunWeekendCockpitDetails(record.details)
       : null,
+  };
+}
+
+function mapPromoteModelRunResponse(
+  record: PromoteModelRunResponseApi,
+): PromoteModelRunResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    stage: record.stage,
+    promotionId: record.promotion_id,
+    modelRunId: record.model_run_id,
+    ...(record.candidate_count !== undefined
+      ? { candidateCount: record.candidate_count }
+      : {}),
+  };
+}
+
+function mapBuildMultitaskSnapshotsResponse(
+  record: BuildMultitaskSnapshotsResponseApi,
+): BuildMultitaskSnapshotsResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    stage: record.stage,
+    season: record.season,
+    throughMeetingKey: record.through_meeting_key,
+    meetingKeys: record.meeting_keys,
+    completedMeetings: record.completed_meetings,
+    snapshotIds: record.snapshot_ids,
+    snapshotCount: record.snapshot_count,
+    rowCount: record.row_count,
+    manifestPath: record.manifest_path,
+    jobRunIds: record.job_run_ids,
+    warnings: record.warnings,
+  };
+}
+
+function mapTrainMultitaskModelResponse(
+  record: TrainMultitaskModelResponseApi,
+): TrainMultitaskModelResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    stage: record.stage,
+    season: record.season,
+    manifestPath: record.manifest_path,
+    meetingKeys: record.meeting_keys,
+    splitCount: record.split_count,
+    modelRunIds: record.model_run_ids,
+    modelRunCount: record.model_run_count,
+    runs: record.runs.map((run) => ({
+      modelRunId: run.model_run_id,
+      testMeetingKey: run.test_meeting_key,
+      trainMeetingKeys: run.train_meeting_keys,
+      predictionCount: run.prediction_count,
+      metrics: run.metrics,
+    })),
+    skipped: record.skipped,
+  };
+}
+
+function mapScoreMultitaskSnapshotResponse(
+  record: ScoreMultitaskSnapshotResponseApi,
+): ScoreMultitaskSnapshotResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    stage: record.stage,
+    snapshotId: record.snapshot_id,
+    modelRunId: record.model_run_id,
+    sourceModelRunId: record.source_model_run_id,
+    artifactPath: record.artifact_path,
+    predictionCount: record.prediction_count,
   };
 }
 
@@ -2198,6 +2402,22 @@ function mapExecuteManualLivePaperTradeResponse(
     edge: record.edge,
     sideLabel: record.side_label,
     reason: record.reason,
+  };
+}
+
+function mapRunManualPaperTradeResponse(
+  record: RunManualPaperTradeResponseApi,
+): RunManualPaperTradeResponse {
+  return {
+    action: record.action,
+    status: record.status,
+    message: record.message,
+    gpShortCode: record.gp_short_code,
+    ptSessionId: record.pt_session_id,
+    pickCount: record.pick_count,
+    openPositions: record.open_positions,
+    totalPnl: record.total_pnl,
+    logPath: record.log_path,
   };
 }
 

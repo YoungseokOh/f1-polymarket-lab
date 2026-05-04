@@ -1354,6 +1354,152 @@ def promote_best_model_run_command(
         )
 
 
+@app.command("promote-live-baseline-model-run")
+def promote_live_baseline_model_run_command(
+    model_run_id: str = typer.Option(..., "--model-run-id"),
+    stage: str = typer.Option("sq_pole_live_v1", "--stage"),
+    min_predictions: int = typer.Option(10, "--min-predictions"),
+    min_markets: int = typer.Option(10, "--min-markets"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import ModelRun
+
+    from f1_polymarket_worker.model_registry import (
+        evaluate_live_baseline_promotion_gate,
+        promote_live_baseline_model_run,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        model_run = session.get(ModelRun, model_run_id)
+        if model_run is None:
+            typer.echo(f"model_run_id={model_run_id} not found")
+            raise typer.Exit(1)
+
+        decision = evaluate_live_baseline_promotion_gate(
+            session,
+            model_run_id=model_run_id,
+            stage=stage,
+            min_predictions=min_predictions,
+            min_markets=min_markets,
+        )
+        if not execute:
+            if decision.eligible:
+                typer.echo(
+                    {
+                        "status": "planned",
+                        "stage": stage,
+                        "model_run_id": model_run_id,
+                        "model_name": model_run.model_name,
+                        "gate": decision.actuals,
+                    }
+                )
+            else:
+                typer.echo(
+                    "[plan] Live baseline promotion would fail: "
+                    + "; ".join(decision.failed_rules)
+                )
+            return
+
+        promotion = promote_live_baseline_model_run(
+            session,
+            model_run_id=model_run_id,
+            stage=stage,
+            min_predictions=min_predictions,
+            min_markets=min_markets,
+        )
+        typer.echo(
+            {
+                "status": "promoted",
+                "stage": promotion.stage,
+                "model_run_id": promotion.model_run_id,
+                "promotion_id": promotion.id,
+                "gate": promotion.gate_metrics_json,
+            }
+        )
+
+
+@app.command("promote-best-live-baseline-run")
+def promote_best_live_baseline_run_command(
+    stage: str = typer.Option("sq_pole_live_v1", "--stage"),
+    model_name: str = typer.Option("hybrid", "--model-name"),
+    min_predictions: int = typer.Option(10, "--min-predictions"),
+    min_markets: int = typer.Option(10, "--min-markets"),
+    execute: bool = typer.Option(False, "--execute/--plan-only"),
+) -> None:
+    from f1_polymarket_lab.storage.models import ModelRun
+    from sqlalchemy import select
+
+    from f1_polymarket_worker.model_registry import (
+        evaluate_live_baseline_promotion_gate,
+        promote_live_baseline_model_run,
+    )
+
+    settings = get_settings()
+    with db_session(settings.database_url) as session:
+        candidates = session.scalars(
+            select(ModelRun)
+            .where(
+                ModelRun.stage == stage,
+                ModelRun.model_family == "baseline",
+                ModelRun.model_name == model_name,
+                ModelRun.artifact_uri.is_not(None),
+            )
+            .order_by(ModelRun.created_at.desc())
+        ).all()
+        eligible: list[tuple[ModelRun, Any]] = []
+        failed: list[str] = []
+        for candidate in candidates:
+            decision = evaluate_live_baseline_promotion_gate(
+                session,
+                model_run_id=candidate.id,
+                stage=stage,
+                min_predictions=min_predictions,
+                min_markets=min_markets,
+            )
+            if decision.eligible:
+                eligible.append((candidate, decision))
+            else:
+                failed.append(f"{candidate.id}: {'; '.join(decision.failed_rules)}")
+
+        if not eligible:
+            typer.echo(f"No eligible live baseline candidates found for stage={stage}")
+            if failed:
+                typer.echo({"failed_candidates": failed[:5]})
+            raise typer.Exit(1)
+
+        model_run, decision = eligible[0]
+        if not execute:
+            typer.echo(
+                {
+                    "status": "planned",
+                    "stage": stage,
+                    "model_run_id": model_run.id,
+                    "model_name": model_run.model_name,
+                    "gate": decision.actuals,
+                    "candidate_count": len(eligible),
+                }
+            )
+            return
+
+        promotion = promote_live_baseline_model_run(
+            session,
+            model_run_id=model_run.id,
+            stage=stage,
+            min_predictions=min_predictions,
+            min_markets=min_markets,
+        )
+        typer.echo(
+            {
+                "status": "promoted",
+                "stage": promotion.stage,
+                "model_run_id": promotion.model_run_id,
+                "promotion_id": promotion.id,
+                "gate": promotion.gate_metrics_json,
+            }
+        )
+
+
 @app.command("score-multitask-snapshot")
 def score_multitask_snapshot_command(
     snapshot_id: str = typer.Option(..., "--snapshot-id"),

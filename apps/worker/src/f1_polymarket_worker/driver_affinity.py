@@ -34,6 +34,11 @@ from f1_polymarket_worker.pipeline import PipelineContext, hydrate_f1_session
 
 AFFINITY_RELEVANT_SESSION_CODES: tuple[str, ...] = ("FP1", "FP2", "FP3", "Q")
 DEFAULT_SEGMENT_KEY = "current_gp"
+HISTORICAL_BASELINE_SEASON_WEIGHTS: dict[int, float] = {
+    2024: 1.0,
+    2025: 1.0,
+    2026: 0.5,
+}
 
 
 def _ensure_utc(value: datetime | str | None) -> datetime | None:
@@ -279,6 +284,77 @@ def _display_rows_by_identity(
     return selected
 
 
+def _season_active_driver_identities(
+    ctx: PipelineContext,
+    *,
+    season: int,
+    as_of_utc: datetime,
+) -> set[str]:
+    from f1_polymarket_lab.storage.models import F1SessionResult
+
+    rows = ctx.db.execute(
+        select(F1Driver.full_name, F1Driver.broadcast_name, F1Driver.id)
+        .join(F1SessionResult, F1SessionResult.driver_id == F1Driver.id)
+        .join(F1Session, F1Session.id == F1SessionResult.session_id)
+        .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+        .where(
+            F1Meeting.season == season,
+            F1Session.date_end_utc.is_not(None),
+            F1Session.date_end_utc <= as_of_utc,
+        )
+        .group_by(F1Driver.full_name, F1Driver.broadcast_name, F1Driver.id)
+    ).all()
+    return {
+        canonical_driver_identity(
+            full_name=row.full_name,
+            broadcast_name=row.broadcast_name,
+            driver_id=row.id,
+        )
+        for row in rows
+    }
+
+
+def _latest_result_positions_by_identity(
+    ctx: PipelineContext,
+    *,
+    meeting_id: str,
+    now: datetime,
+) -> dict[str, int]:
+    from f1_polymarket_lab.storage.models import F1SessionResult
+
+    sessions = _relevant_sessions(ctx, meeting_id=meeting_id)
+    ended_sessions = _ended_sessions(sessions, now=now)
+    for session in sorted(
+        ended_sessions,
+        key=lambda item: (_ensure_utc(item.date_end_utc) or now, item.session_key),
+        reverse=True,
+    ):
+        rows = ctx.db.execute(
+            select(
+                F1Driver.full_name,
+                F1Driver.broadcast_name,
+                F1Driver.id,
+                F1SessionResult.position,
+            )
+            .join(F1SessionResult, F1SessionResult.driver_id == F1Driver.id)
+            .where(
+                F1SessionResult.session_id == session.id,
+                F1SessionResult.position.is_not(None),
+            )
+        ).all()
+        if rows:
+            return {
+                canonical_driver_identity(
+                    full_name=row.full_name,
+                    broadcast_name=row.broadcast_name,
+                    driver_id=row.id,
+                ): int(row.position)
+                for row in rows
+                if row.position is not None
+            }
+    return {}
+
+
 def _build_affinity_entries(
     ctx: PipelineContext,
     *,
@@ -362,6 +438,45 @@ def _build_affinity_entries(
     return entries
 
 
+def _profile_source_summary(
+    ctx: PipelineContext,
+    *,
+    now: datetime,
+    season_exact: int | None = None,
+    min_season: int = 2024,
+) -> tuple[list[str], list[int]]:
+    from f1_polymarket_lab.storage.models import F1Lap
+
+    stmt = (
+        select(F1Session.session_code, F1Meeting.season)
+        .join(F1Meeting, F1Meeting.id == F1Session.meeting_id)
+        .join(F1Lap, F1Lap.session_id == F1Session.id)
+        .where(
+            F1Session.session_code.in_(DEFAULT_AFFINITY_SESSION_CODES),
+            F1Meeting.season >= min_season,
+            F1Session.date_end_utc.is_not(None),
+            F1Session.date_end_utc <= now,
+            F1Lap.sector_1_seconds.is_not(None),
+            F1Lap.sector_1_seconds > 5,
+            F1Lap.sector_2_seconds.is_not(None),
+            F1Lap.sector_2_seconds > 5,
+            F1Lap.sector_3_seconds.is_not(None),
+            F1Lap.sector_3_seconds > 5,
+        )
+        .group_by(F1Session.session_code, F1Meeting.season)
+    )
+    if season_exact is not None:
+        stmt = stmt.where(F1Meeting.season == season_exact)
+    rows = ctx.db.execute(stmt).all()
+    code_order = {code: index for index, code in enumerate(DEFAULT_AFFINITY_SESSION_CODES)}
+    codes = sorted(
+        {row.session_code for row in rows if row.session_code},
+        key=lambda code: code_order.get(code, len(code_order)),
+    )
+    seasons = sorted({int(row.season) for row in rows})
+    return codes, seasons
+
+
 def _build_affinity_segments(
     ctx: PipelineContext,
     *,
@@ -409,7 +524,52 @@ def _build_affinity_segments(
         display_rows=display_rows,
         identity_map=identity_map,
         min_season=2024,
-        season_weights=DEFAULT_AFFINITY_SEASON_WEIGHTS,
+        season_weights=HISTORICAL_BASELINE_SEASON_WEIGHTS,
+    )
+    current_driver_identities = {
+        entry["canonical_driver_key"] for entry in current_gp_entries
+    } or set(
+        _latest_result_positions_by_identity(
+            ctx,
+            meeting_id=meeting.id,
+            now=now,
+        )
+    )
+
+    def _current_drivers_only(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        if not current_driver_identities:
+            return entries
+        filtered = [
+            entry for entry in entries if entry["canonical_driver_key"] in current_driver_identities
+        ]
+        for index, entry in enumerate(filtered, start=1):
+            entry["rank"] = index
+        return filtered
+
+    season_entries = _current_drivers_only(season_entries)
+    historical_entries = _current_drivers_only(historical_entries)
+    season_source_codes, season_source_seasons = _profile_source_summary(
+        ctx,
+        now=now,
+        season_exact=season,
+        min_season=season,
+    )
+    historical_source_codes, historical_source_seasons = _profile_source_summary(
+        ctx,
+        now=now,
+        min_season=2024,
+    )
+    historical_title = (
+        f"{historical_source_seasons[0]}-{historical_source_seasons[-1]} History"
+        if len(historical_source_seasons) > 1
+        else "History"
+    )
+    historical_description = (
+        f"Full {historical_source_seasons[0]}-{historical_source_seasons[-1]} "
+        f"{', '.join(historical_source_codes)} sample with 2026 downweighted, translated into "
+        f"{circuit_short_name or 'current circuit'}-weighted pace."
+        if len(historical_source_seasons) > 1
+        else "Historical FP/Q lap data is not loaded yet; this sample currently matches 2026."
     )
 
     return [
@@ -437,20 +597,17 @@ def _build_affinity_segments(
                 f"All 2026 {', '.join(session_codes)} sessions so far, scored against "
                 f"{circuit_short_name or 'current circuit'} sector weights."
             ),
-            "source_session_codes_included": session_codes,
-            "source_seasons_included": [season],
+            "source_session_codes_included": season_source_codes,
+            "source_seasons_included": season_source_seasons or [season],
             "entry_count": len(season_entries),
             "entries": season_entries,
         },
         {
             "key": "all_history",
-            "title": "2024-2026 History",
-            "description": (
-                f"Full 2024-2026 {', '.join(session_codes)} sample, still translated into "
-                f"{circuit_short_name or 'current circuit'}-weighted pace."
-            ),
-            "source_session_codes_included": session_codes,
-            "source_seasons_included": [2024, 2025, 2026],
+            "title": historical_title,
+            "description": historical_description,
+            "source_session_codes_included": historical_source_codes,
+            "source_seasons_included": historical_source_seasons or [season],
             "entry_count": len(historical_entries),
             "entries": historical_entries,
         },
@@ -639,6 +796,117 @@ def augment_driver_affinity_report(
     }
 
 
+def _build_identity_only_affinity_report(
+    ctx: PipelineContext,
+    *,
+    season: int,
+    meeting: F1Meeting,
+    now: datetime,
+) -> dict[str, Any]:
+    track_weights = compute_track_sector_weights(
+        ctx.db,
+        circuit_short_name=meeting.circuit_short_name or "",
+        as_of_utc=now,
+    )
+    display_rows = _display_rows_by_identity(
+        ctx,
+        season=season,
+        as_of_utc=now,
+    )
+    active_identities = _season_active_driver_identities(
+        ctx,
+        season=season,
+        as_of_utc=now,
+    )
+    if active_identities:
+        display_rows = {
+            identity: row for identity, row in display_rows.items() if identity in active_identities
+        }
+    latest_result_positions = _latest_result_positions_by_identity(
+        ctx,
+        meeting_id=meeting.id,
+        now=now,
+    )
+    if latest_result_positions:
+        display_rows = {
+            identity: row
+            for identity, row in display_rows.items()
+            if identity in latest_result_positions
+        }
+    ranked_rows = sorted(
+        display_rows.items(),
+        key=lambda item: (
+            latest_result_positions.get(item[0], 9999),
+            int(item[1].get("driver_number") or 9999),
+            str(item[1].get("display_name") or item[0]).lower(),
+            str(item[1].get("display_driver_id") or item[0]),
+        ),
+    )
+    entries: list[dict[str, Any]] = []
+    for index, (canonical_driver_key, display_row) in enumerate(ranked_rows, start=1):
+        entries.append(
+            {
+                "canonical_driver_key": canonical_driver_key,
+                "display_driver_id": display_row.get("display_driver_id"),
+                "display_name": display_row["display_name"],
+                "display_broadcast_name": display_row.get("display_broadcast_name"),
+                "driver_number": display_row.get("driver_number"),
+                "team_id": display_row.get("team_id"),
+                "team_name": display_row.get("team_name"),
+                "country_code": display_row.get("country_code"),
+                "headshot_url": display_row.get("headshot_url"),
+                "rank": index,
+                "affinity_score": 0.0,
+                "s1_strength": 0.0,
+                "s2_strength": 0.0,
+                "s3_strength": 0.0,
+                "track_s1_fraction": track_weights["s1_fraction"],
+                "track_s2_fraction": track_weights["s2_fraction"],
+                "track_s3_fraction": track_weights["s3_fraction"],
+                "contributing_session_count": 0,
+                "contributing_session_codes": [],
+                "latest_contributing_session_code": None,
+                "latest_contributing_session_end_utc": None,
+            }
+        )
+    current_segment = {
+        "key": DEFAULT_SEGMENT_KEY,
+        "title": "Current Grand Prix",
+        "description": (
+            f"{meeting.meeting_name} roster fallback. "
+            "Affinity scores will populate after lap data hydrates for "
+            f"{meeting.circuit_short_name or 'the current circuit'}."
+        ),
+        "source_session_codes_included": [],
+        "source_seasons_included": [season],
+        "entry_count": len(entries),
+        "entries": entries,
+    }
+    return {
+        "season": season,
+        "meeting_key": meeting.meeting_key,
+        "meeting": _meeting_payload(meeting),
+        "computed_at_utc": now.isoformat(),
+        "as_of_utc": now.isoformat(),
+        "lookback_start_season": 2024,
+        "session_code_weights": DEFAULT_AFFINITY_SESSION_WEIGHTS,
+        "season_weights": {
+            str(key): value for key, value in DEFAULT_AFFINITY_SEASON_WEIGHTS.items()
+        },
+        "track_weights": track_weights,
+        "default_segment_key": DEFAULT_SEGMENT_KEY,
+        "segments": [current_segment],
+        "source_session_codes_included": [],
+        "source_max_session_end_utc": None,
+        "latest_ended_relevant_session_code": None,
+        "latest_ended_relevant_session_end_utc": None,
+        "entry_count": len(entries),
+        "is_fresh": False,
+        "stale_reason": None,
+        "entries": entries,
+    }
+
+
 def get_driver_affinity_report(
     ctx: PipelineContext,
     *,
@@ -654,8 +922,17 @@ def get_driver_affinity_report(
     )
     report = _load_report(path)
     if report is None:
-        raise FileNotFoundError(
-            f"No driver affinity report found for season={season} meeting_key={meeting.meeting_key}"
+        return augment_driver_affinity_report(
+            ctx,
+            report=_build_identity_only_affinity_report(
+                ctx,
+                season=season,
+                meeting=meeting,
+                now=now,
+            ),
+            season=season,
+            meeting_key=meeting.meeting_key,
+            now=now,
         )
     return augment_driver_affinity_report(
         ctx,
