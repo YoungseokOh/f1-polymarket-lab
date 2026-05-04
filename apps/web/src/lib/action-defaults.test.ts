@@ -4,6 +4,7 @@ import {
   buildDashboardDemoIngestRequest,
   buildDashboardMarketSyncRequest,
   buildLatestSessionRefreshRequest,
+  buildPaperTradingLocalRefreshRequest,
 } from "./action-defaults";
 
 describe("buildDashboardMarketSyncRequest", () => {
@@ -30,7 +31,7 @@ describe("buildDashboardDemoIngestRequest", () => {
 });
 
 describe("buildLatestSessionRefreshRequest", () => {
-  it("uses a lighter latest-session refresh request for non-race sessions", () => {
+  it("keeps latest-session button refreshes off OpenF1 by default", () => {
     expect(
       buildLatestSessionRefreshRequest("meeting:1281", {
         id: "session:11249",
@@ -45,7 +46,7 @@ describe("buildLatestSessionRefreshRequest", () => {
       discover_max_pages: 1,
       hydrate_market_history: false,
       sync_calendar: false,
-      hydrate_f1_session_data: true,
+      hydrate_f1_session_data: false,
       include_extended_f1_data: false,
       include_heavy_f1_data: false,
       refresh_artifacts: false,
@@ -66,6 +67,22 @@ describe("buildLatestSessionRefreshRequest", () => {
       search_fallback: false,
       discover_max_pages: 1,
       hydrate_market_history: false,
+      sync_calendar: false,
+      hydrate_f1_session_data: false,
+      include_extended_f1_data: false,
+      include_heavy_f1_data: false,
+      refresh_artifacts: false,
+    });
+  });
+});
+
+describe("buildPaperTradingLocalRefreshRequest", () => {
+  it("keeps paper trading model workflow refreshes off OpenF1 by default", () => {
+    expect(buildPaperTradingLocalRefreshRequest("meeting:1284")).toEqual({
+      meeting_id: "meeting:1284",
+      search_fallback: true,
+      discover_max_pages: 5,
+      hydrate_market_history: true,
       sync_calendar: false,
       hydrate_f1_session_data: false,
       include_extended_f1_data: false,

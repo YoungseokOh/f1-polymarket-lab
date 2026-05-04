@@ -7,6 +7,8 @@ from f1_polymarket_api.dependencies import get_db_session
 from f1_polymarket_api.schemas import (
     ActionStatusResponse,
     BackfillBacktestsRequest,
+    BuildMultitaskSnapshotsRequest,
+    BuildMultitaskSnapshotsResponse,
     CancelLiveTradeTicketRequest,
     CancelLiveTradeTicketResponse,
     CaptureLiveWeekendCountResponse,
@@ -20,6 +22,9 @@ from f1_polymarket_api.schemas import (
     ExecuteManualLivePaperTradeRequest,
     ExecuteManualLivePaperTradeResponse,
     IngestDemoRequest,
+    PromoteBestModelRunRequest,
+    PromoteModelRunRequest,
+    PromoteModelRunResponse,
     RecordLiveTradeFillRequest,
     RecordLiveTradeFillResponse,
     RefreshDriverAffinityRequest,
@@ -27,12 +32,18 @@ from f1_polymarket_api.schemas import (
     RefreshLatestSessionRequest,
     RefreshLatestSessionResponse,
     RunBacktestRequest,
+    RunManualPaperTradeRequest,
+    RunManualPaperTradeResponse,
     RunPaperTradeRequest,
     RunWeekendCockpitRequest,
     RunWeekendCockpitResponse,
+    ScoreMultitaskSnapshotRequest,
+    ScoreMultitaskSnapshotResponse,
     SetCalendarOverrideRequest,
     SyncCalendarRequest,
     SyncF1MarketsRequest,
+    TrainMultitaskModelRequest,
+    TrainMultitaskModelResponse,
 )
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import OperationalError as SQLAlchemyOperationalError
@@ -655,6 +666,38 @@ def action_execute_manual_live_paper_trade(
         )
 
 
+@action_router.post(
+    "/actions/run-manual-paper-trade",
+    response_model=RunManualPaperTradeResponse,
+)
+def action_run_manual_paper_trade(
+    body: RunManualPaperTradeRequest,
+    db: Session = Depends(get_db_session),
+) -> RunManualPaperTradeResponse:
+    from f1_polymarket_worker.pipeline import PipelineContext
+    from f1_polymarket_worker.weekend_ops import execute_manual_paper_trade_run
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = execute_manual_paper_trade_run(
+            ctx,
+            gp_short_code=body.gp_short_code,
+            picks=[pick.model_dump() for pick in body.picks],
+            bet_size=body.bet_size,
+            observed_at_utc=body.observed_at_utc,
+        )
+        db.commit()
+        return RunManualPaperTradeResponse.model_validate(result)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="run-manual-paper-trade failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
 @action_router.post("/actions/run-paper-trade", response_model=ActionStatusResponse)
 def action_run_paper_trade(
     body: RunPaperTradeRequest,
@@ -720,6 +763,198 @@ def action_run_weekend_cockpit(
             db,
             exc=exc,
             log_message="run-weekend-cockpit failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post("/actions/promote-model-run", response_model=PromoteModelRunResponse)
+def action_promote_model_run(
+    body: PromoteModelRunRequest,
+    db: Session = Depends(get_db_session),
+) -> PromoteModelRunResponse:
+    from f1_polymarket_worker.model_registry import promote_model_run
+
+    try:
+        promotion = promote_model_run(
+            db,
+            model_run_id=body.model_run_id,
+            stage=body.stage,
+        )
+        db.commit()
+        return PromoteModelRunResponse(
+            action="promote-model-run",
+            status="ok",
+            message=(
+                f"Model run {promotion.model_run_id} promoted for stage "
+                f"{body.stage}."
+            ),
+            stage=body.stage,
+            promotion_id=promotion.id,
+            model_run_id=promotion.model_run_id,
+        )
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="promote-model-run failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/build-multitask-snapshots",
+    response_model=BuildMultitaskSnapshotsResponse,
+)
+def action_build_multitask_snapshots(
+    body: BuildMultitaskSnapshotsRequest,
+    db: Session = Depends(get_db_session),
+) -> BuildMultitaskSnapshotsResponse:
+    from f1_polymarket_worker.model_workflow import build_multitask_training_snapshots
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = build_multitask_training_snapshots(
+            ctx,
+            season=body.season,
+            through_meeting_key=body.through_meeting_key,
+            checkpoints=tuple(body.checkpoints),
+            stage=body.stage,
+        )
+        db.commit()
+        response = {
+            **result,
+            "action": "build-multitask-snapshots",
+            "message": (
+                f"Built {result['snapshot_count']} model snapshots for "
+                f"{len(result['completed_meetings'])} GP(s)."
+            ),
+        }
+        return BuildMultitaskSnapshotsResponse.model_validate(response)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="build-multitask-snapshots failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/train-multitask-model",
+    response_model=TrainMultitaskModelResponse,
+)
+def action_train_multitask_model(
+    body: TrainMultitaskModelRequest,
+    db: Session = Depends(get_db_session),
+) -> TrainMultitaskModelResponse:
+    from f1_polymarket_worker.model_workflow import train_multitask_walk_forward
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = train_multitask_walk_forward(
+            ctx,
+            season=body.season,
+            manifest_path=body.manifest_path,
+            stage=body.stage,
+            min_train_gps=body.min_train_gps,
+        )
+        db.commit()
+        response = {
+            **result,
+            "action": "train-multitask-model",
+            "message": (
+                f"Created {result['model_run_count']} model run(s) for "
+                f"{body.stage}."
+            ),
+        }
+        return TrainMultitaskModelResponse.model_validate(response)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="train-multitask-model failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/score-multitask-snapshot",
+    response_model=ScoreMultitaskSnapshotResponse,
+)
+def action_score_multitask_snapshot(
+    body: ScoreMultitaskSnapshotRequest,
+    db: Session = Depends(get_db_session),
+) -> ScoreMultitaskSnapshotResponse:
+    from f1_polymarket_worker.model_workflow import score_multitask_snapshot
+    from f1_polymarket_worker.pipeline import PipelineContext
+
+    try:
+        ctx = PipelineContext(db=db, execute=True)
+        result = score_multitask_snapshot(
+            ctx,
+            snapshot_id=body.snapshot_id,
+            stage=body.stage,
+        )
+        db.commit()
+        response = {
+            **result,
+            "action": "score-multitask-snapshot",
+            "message": (
+                f"Scored snapshot {body.snapshot_id} with model run "
+                f"{result['model_run_id']}."
+            ),
+        }
+        return ScoreMultitaskSnapshotResponse.model_validate(response)
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="score-multitask-snapshot failed",
+            key_error_status=404,
+            value_error_status=409,
+        )
+
+
+@action_router.post(
+    "/actions/promote-best-model-run",
+    response_model=PromoteModelRunResponse,
+)
+def action_promote_best_model_run(
+    body: PromoteBestModelRunRequest,
+    db: Session = Depends(get_db_session),
+) -> PromoteModelRunResponse:
+    from f1_polymarket_worker.model_registry import (
+        eligible_promotion_candidates,
+        promote_best_model_run,
+    )
+
+    try:
+        candidates = eligible_promotion_candidates(db, stage=body.stage)
+        promotion = promote_best_model_run(db, stage=body.stage)
+        db.commit()
+        return PromoteModelRunResponse(
+            action="promote-best-model-run",
+            status="ok",
+            message=(
+                f"Promoted best model run for stage {body.stage}."
+                f" Selected {promotion.model_run_id}."
+            ),
+            stage=body.stage,
+            promotion_id=promotion.id,
+            model_run_id=promotion.model_run_id,
+            candidate_count=len(candidates),
+        )
+    except Exception as exc:
+        _raise_action_error(
+            db,
+            exc=exc,
+            log_message="promote-best-model-run failed",
             key_error_status=404,
             value_error_status=409,
         )

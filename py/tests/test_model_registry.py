@@ -14,8 +14,11 @@ from f1_polymarket_lab.storage.models import (
 )
 from f1_polymarket_worker.model_registry import (
     MULTITASK_PROMOTION_STAGE,
+    SQ_POLE_LIVE_PROMOTION_STAGE,
     eligible_promotion_candidates,
+    evaluate_live_baseline_promotion_gate,
     promote_best_model_run,
+    promote_live_baseline_model_run,
     promote_model_run,
     score_promoted_multitask_snapshot,
 )
@@ -184,6 +187,177 @@ def test_promote_best_model_run_selects_highest_eligible_candidate(tmp_path: Pat
         assert [candidate[0].id for candidate in candidates] == ["run-b", "run-a"]
         assert promotion.model_run_id == "run-b"
         assert promotion.status == "active"
+    finally:
+        session.close()
+
+
+def test_promote_live_baseline_model_run_uses_operational_gate(tmp_path: Path) -> None:
+    session = build_session()
+    try:
+        snapshot_path = tmp_path / "miami-sq.parquet"
+        rows = [
+            {
+                "row_id": f"row-{index}",
+                "market_id": f"market-{index}",
+                "token_id": f"token-{index}",
+                "entry_yes_price": 0.35,
+                "label_yes": None,
+            }
+            for index in range(12)
+        ]
+        pl.DataFrame(rows).write_parquet(snapshot_path)
+        session.add_all(
+            [
+                FeatureSnapshot(
+                    id="snapshot-sq",
+                    market_id=None,
+                    session_id=None,
+                    as_of_ts=datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc),
+                    snapshot_type="miami_fp1_to_sq_pole_live_snapshot",
+                    feature_version="miami_fp1_to_sq_pole_live_snapshot_v1",
+                    storage_path=str(snapshot_path),
+                    row_count=12,
+                ),
+                ModelRun(
+                    id="run-sq-hybrid",
+                    stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+                    model_family="baseline",
+                    model_name="hybrid",
+                    dataset_version="miami_fp1_to_sq_pole_live_snapshot_v1",
+                    feature_snapshot_id="snapshot-sq",
+                    metrics_json={
+                        "row_count": 12,
+                        "bet_count": 3,
+                        "average_edge": 0.11,
+                    },
+                    artifact_uri=str(snapshot_path),
+                ),
+                ModelRunPromotion(
+                    id="promotion-old-sq",
+                    model_run_id="run-old-sq",
+                    stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+                    status="active",
+                    gate_metrics_json={"live_baseline_gate": 1.0},
+                    promoted_at=datetime(2026, 5, 1, 18, 0, tzinfo=timezone.utc),
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                ModelPrediction(
+                    id=f"prediction-{index}",
+                    model_run_id="run-sq-hybrid",
+                    market_id=f"market-{index}",
+                    token_id=f"token-{index}",
+                    as_of_ts=datetime(2026, 5, 1, 19, 5, tzinfo=timezone.utc),
+                    probability_yes=0.45,
+                    probability_no=0.55,
+                    raw_score=0.3,
+                    calibration_version="none",
+                )
+                for index in range(12)
+            ]
+        )
+        session.commit()
+
+        decision = evaluate_live_baseline_promotion_gate(
+            session,
+            model_run_id="run-sq-hybrid",
+            stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+        )
+        promotion = promote_live_baseline_model_run(
+            session,
+            model_run_id="run-sq-hybrid",
+            stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+        )
+        session.commit()
+
+        previous = session.get(ModelRunPromotion, "promotion-old-sq")
+
+        assert decision.eligible is True
+        assert decision.actuals["row_count"] == 12.0
+        assert decision.actuals["labeled_row_count"] == 0.0
+        assert promotion.status == "active"
+        assert promotion.gate_metrics_json is not None
+        assert promotion.gate_metrics_json["promotion_gate"] == "live_baseline_v1"
+        assert promotion.gate_metrics_json["model_name"] == "hybrid"
+        assert previous is not None
+        assert previous.status == "superseded"
+    finally:
+        session.close()
+
+
+def test_live_baseline_promotion_gate_rejects_incomplete_predictions(
+    tmp_path: Path,
+) -> None:
+    session = build_session()
+    try:
+        snapshot_path = tmp_path / "miami-sq.parquet"
+        pl.DataFrame(
+            [
+                {
+                    "row_id": f"row-{index}",
+                    "market_id": f"market-{index}",
+                    "token_id": f"token-{index}",
+                    "entry_yes_price": 0.35,
+                    "label_yes": None,
+                }
+                for index in range(12)
+            ]
+        ).write_parquet(snapshot_path)
+        session.add_all(
+            [
+                FeatureSnapshot(
+                    id="snapshot-sq",
+                    market_id=None,
+                    session_id=None,
+                    as_of_ts=datetime(2026, 5, 1, 19, 0, tzinfo=timezone.utc),
+                    snapshot_type="miami_fp1_to_sq_pole_live_snapshot",
+                    feature_version="miami_fp1_to_sq_pole_live_snapshot_v1",
+                    storage_path=str(snapshot_path),
+                    row_count=12,
+                ),
+                ModelRun(
+                    id="run-sq-hybrid",
+                    stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+                    model_family="baseline",
+                    model_name="hybrid",
+                    dataset_version="miami_fp1_to_sq_pole_live_snapshot_v1",
+                    feature_snapshot_id="snapshot-sq",
+                    artifact_uri=str(snapshot_path),
+                ),
+            ]
+        )
+        session.add_all(
+            [
+                ModelPrediction(
+                    id=f"prediction-{index}",
+                    model_run_id="run-sq-hybrid",
+                    market_id=f"market-{index}",
+                    token_id=f"token-{index}",
+                    as_of_ts=datetime(2026, 5, 1, 19, 5, tzinfo=timezone.utc),
+                    probability_yes=0.45,
+                    probability_no=0.55,
+                    raw_score=0.3,
+                    calibration_version="none",
+                )
+                for index in range(9)
+            ]
+        )
+        session.commit()
+
+        decision = evaluate_live_baseline_promotion_gate(
+            session,
+            model_run_id="run-sq-hybrid",
+            stage=SQ_POLE_LIVE_PROMOTION_STAGE,
+        )
+
+        assert decision.eligible is False
+        assert any("prediction_count=9" in rule for rule in decision.failed_rules)
+        assert any(
+            "prediction_count=9 must equal snapshot row_count=12" in rule
+            for rule in decision.failed_rules
+        )
     finally:
         session.close()
 

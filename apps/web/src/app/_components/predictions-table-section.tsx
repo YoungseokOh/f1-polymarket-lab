@@ -38,17 +38,16 @@ type PredictionRow = {
   marketQuestion: string;
   marketPrice: number | null;
   modelName: string;
-  modelFamily: string;
   stageLabel: string;
   probabilityYes: number | null;
-  calibrationVersion: string | null;
   asOfTs: string;
+  gap: number | null;
 };
 
 const runColumns: Column<RunRow>[] = [
   {
     key: "run",
-    header: "Run",
+    header: "Model",
     render: (row) => (
       <div>
         <p className="font-medium text-white">{row.modelName}</p>
@@ -61,7 +60,7 @@ const runColumns: Column<RunRow>[] = [
   },
   {
     key: "coverage",
-    header: "Coverage",
+    header: "Forecasts",
     render: (row) => (
       <span className="tabular-nums text-sm text-[#d1d5db]">
         {row.rowCount ?? "—"} rows
@@ -71,7 +70,7 @@ const runColumns: Column<RunRow>[] = [
   },
   {
     key: "brier",
-    header: "Brier",
+    header: "Error",
     render: (row) =>
       row.brierScore != null ? (
         <span className="font-mono text-sm tabular-nums text-white">
@@ -102,7 +101,7 @@ const runColumns: Column<RunRow>[] = [
   },
   {
     key: "createdAt",
-    header: "Created",
+    header: "Built",
     render: (row) => (
       <span className="tabular-nums text-xs text-[#6b7280]">
         {formatDateTimeShort(row.createdAt)}
@@ -115,69 +114,74 @@ const runColumns: Column<RunRow>[] = [
 const predictionColumns: Column<PredictionRow>[] = [
   {
     key: "market",
-    header: "Market question",
+    header: "Market",
     render: (row) => (
       <div>
         <p className="font-medium text-white">{row.marketQuestion}</p>
         <p className="mt-1 text-xs text-[#9ca3af]">
-          {row.marketPrice != null
-            ? `Current market price ${formatPriceCents(row.marketPrice)}`
-            : "Current market price unavailable"}
+          {row.stageLabel} · {row.modelName}
         </p>
       </div>
     ),
     sortValue: (row) => row.marketQuestion,
   },
   {
-    key: "run",
-    header: "Model context",
-    render: (row) => (
-      <div>
-        <p className="text-sm text-[#d1d5db]">{row.modelName}</p>
-        <p className="mt-1 text-xs text-[#9ca3af]">
-          {row.modelFamily} · {row.stageLabel}
-        </p>
-      </div>
-    ),
-    sortValue: (row) => `${row.modelName}:${row.stageLabel}`,
-  },
-  {
-    key: "yesProbability",
-    header: "YES chance",
+    key: "modelChance",
+    header: "Model says",
     render: (row) => (
       <div>
         <p className="font-semibold tabular-nums text-white">
           {formatProbability(row.probabilityYes)}
         </p>
-        <p className="mt-1 text-xs tabular-nums text-[#6b7280]">
-          Fair price {formatPriceCents(row.probabilityYes)}
+        <p className="mt-1 text-xs text-[#6b7280]">
+          Fair YES price {formatPriceCents(row.probabilityYes)}
         </p>
       </div>
     ),
     sortValue: (row) => row.probabilityYes ?? -1,
   },
   {
-    key: "signal",
-    header: "Signal",
+    key: "marketPrice",
+    header: "Market price",
+    render: (row) => (
+      <span className="font-semibold tabular-nums text-white">
+        {formatPriceCents(row.marketPrice)}
+      </span>
+    ),
+    sortValue: (row) => row.marketPrice ?? -1,
+  },
+  {
+    key: "gap",
+    header: "Difference",
     render: (row) => {
       const signal = describePredictionSignal(row.probabilityYes);
+      const gapLabel =
+        row.gap == null
+          ? "—"
+          : `${row.gap >= 0 ? "+" : ""}${(row.gap * 100).toFixed(1)} pts`;
 
       return (
         <div>
           <Badge tone={signal.tone}>{signal.label}</Badge>
-          <p className="mt-1 text-xs text-[#6b7280]">
-            {row.calibrationVersion && row.calibrationVersion !== "none"
-              ? `Calibration ${row.calibrationVersion}`
-              : "No calibration layer"}
+          <p
+            className={`mt-1 text-xs font-medium tabular-nums ${
+              row.gap == null
+                ? "text-[#6b7280]"
+                : row.gap >= 0
+                  ? "text-race-green"
+                  : "text-race-red"
+            }`}
+          >
+            {gapLabel}
           </p>
         </div>
       );
     },
-    sortValue: (row) => row.probabilityYes ?? 0,
+    sortValue: (row) => row.gap ?? 0,
   },
   {
     key: "asOf",
-    header: "As of",
+    header: "Updated",
     render: (row) => (
       <span className="tabular-nums text-xs text-[#6b7280]">
         {formatDateTimeShort(row.asOfTs)}
@@ -193,12 +197,26 @@ export function PredictionsTableSection({
   markets,
   calibrationPoints,
   calibrationMessage,
+  title = "Current predictions",
+  eyebrow,
+  description,
+  emptyTitle = "No predictions to show",
+  emptyMessage = "There are no model predictions for this view yet.",
+  showPredictions = true,
+  showModelHealth = true,
 }: {
   modelRuns: ModelRun[];
   predictions: ModelPrediction[];
   markets: PolymarketMarket[];
   calibrationPoints: CalibrationPoint[];
   calibrationMessage: string;
+  title?: string;
+  eyebrow?: string;
+  description?: string;
+  emptyTitle?: string;
+  emptyMessage?: string;
+  showPredictions?: boolean;
+  showModelHealth?: boolean;
 }) {
   const marketsById = new Map(markets.map((market) => [market.id, market]));
   const runsById = new Map(modelRuns.map((run) => [run.id, run]));
@@ -240,11 +258,13 @@ export function PredictionsTableSection({
           market?.question ?? prediction.marketId ?? "Unlinked market",
         marketPrice: market?.lastTradePrice ?? null,
         modelName: run?.modelName ?? "Unknown model",
-        modelFamily: run?.modelFamily ?? "Unknown family",
         stageLabel: stage.label,
         probabilityYes: prediction.probabilityYes,
-        calibrationVersion: prediction.calibrationVersion,
         asOfTs: prediction.asOfTs,
+        gap:
+          prediction.probabilityYes != null && market?.lastTradePrice != null
+            ? prediction.probabilityYes - market.lastTradePrice
+            : null,
       };
     })
     .sort((a, b) => {
@@ -257,45 +277,58 @@ export function PredictionsTableSection({
 
   return (
     <>
-      <div className="grid gap-4 xl:grid-cols-[1.25fr_1fr]">
-        <Panel title="Run scoreboard" eyebrow={`${runRows.length} runs`}>
-          <DataTable
-            columns={runColumns}
-            data={runRows}
-            rowKey={(row) => row.id}
-            emptyMessage="No model runs are available yet."
-          />
-        </Panel>
-
-        <Panel title="Calibration snapshot" eyebrow="Settled outcomes">
-          {calibrationPoints.length > 0 ? (
-            <div className="space-y-3">
-              <CalibrationChart points={calibrationPoints} />
-              <p className="text-xs text-[#6b7280]">{calibrationMessage}</p>
-            </div>
-          ) : (
-            <EmptyState
-              title="Not enough joined outcomes yet"
-              description={calibrationMessage}
+      {showPredictions && (
+        <Panel
+          title={title}
+          eyebrow={eyebrow ?? `${predictionRows.length} rows`}
+        >
+          {description && (
+            <p className="mb-4 max-w-3xl text-sm text-[#9ca3af]">
+              {description}
+            </p>
+          )}
+          {predictionRows.length > 0 ? (
+            <DataTable
+              columns={predictionColumns}
+              data={predictionRows}
+              rowKey={(row) => row.id}
+              onRowClick={(row) =>
+                row.marketId ? `/markets/${row.marketId}` : undefined
+              }
+              emptyMessage={emptyMessage}
             />
+          ) : (
+            <EmptyState title={emptyTitle} description={emptyMessage} />
           )}
         </Panel>
-      </div>
+      )}
 
-      <Panel
-        title="Latest market forecasts"
-        eyebrow={`${predictionRows.length} forecast rows`}
-      >
-        <DataTable
-          columns={predictionColumns}
-          data={predictionRows}
-          rowKey={(row) => row.id}
-          onRowClick={(row) =>
-            row.marketId ? `/markets/${row.marketId}` : undefined
-          }
-          emptyMessage="No model forecasts are available yet."
-        />
-      </Panel>
+      {showModelHealth && (
+        <div className="grid gap-4 xl:grid-cols-[1.25fr_1fr]">
+          <Panel title="Model health" eyebrow={`${runRows.length} runs`}>
+            <DataTable
+              columns={runColumns}
+              data={runRows}
+              rowKey={(row) => row.id}
+              emptyMessage="No model runs are available yet."
+            />
+          </Panel>
+
+          <Panel title="Past accuracy" eyebrow="Settled markets">
+            {calibrationPoints.length > 0 ? (
+              <div className="space-y-3">
+                <CalibrationChart points={calibrationPoints} />
+                <p className="text-xs text-[#6b7280]">{calibrationMessage}</p>
+              </div>
+            ) : (
+              <EmptyState
+                title="Not enough joined outcomes yet"
+                description={calibrationMessage}
+              />
+            )}
+          </Panel>
+        </div>
+      )}
     </>
   );
 }

@@ -40,6 +40,7 @@ from f1_polymarket_lab.common import (
     MarketTaxonomy,
     coerce_market_taxonomy,
     market_group_for_taxonomy,
+    utc_now,
 )
 from f1_polymarket_lab.storage.models import (
     BacktestResult,
@@ -135,6 +136,7 @@ def _weekend_cockpit_status_response(payload: dict[str, Any]) -> WeekendCockpitS
         focus_status=payload["focus_status"],
         timeline_completed_codes=payload["timeline_completed_codes"],
         timeline_active_code=payload["timeline_active_code"],
+        timeline_session_codes=payload["timeline_session_codes"],
         source_session=(
             None
             if payload["source_session"] is None
@@ -978,6 +980,41 @@ def paper_trading_session(
     record = db.get(PaperTradeSession, session_id)
     if not record:
         raise HTTPException(status_code=404, detail="Paper trade session not found")
+    return PaperTradeSessionResponse.model_validate(record)
+
+
+@router.post(
+    "/paper-trading/sessions/{session_id}/cancel",
+    response_model=PaperTradeSessionResponse,
+)
+def cancel_paper_trading_session(
+    session_id: str,
+    db: Session = Depends(get_db_session),
+) -> PaperTradeSessionResponse:
+    record = db.get(PaperTradeSession, session_id)
+    if not record:
+        raise HTTPException(status_code=404, detail="Paper trade session not found")
+    if record.status == "settled":
+        raise HTTPException(status_code=409, detail="Settled paper runs cannot be cancelled")
+    if record.status != "cancelled":
+        now = utc_now()
+        record.status = "cancelled"
+        record.finished_at = now
+        summary = dict(record.summary_json or {})
+        summary["cancelled_at"] = now.isoformat()
+        summary["cancel_reason"] = "Cancelled by operator"
+        record.summary_json = summary
+        positions = db.scalars(
+            select(PaperTradePosition).where(
+                PaperTradePosition.session_id == session_id,
+                PaperTradePosition.status == "open",
+            )
+        ).all()
+        for position in positions:
+            position.status = "cancelled"
+            position.exit_time = now
+        db.commit()
+        db.refresh(record)
     return PaperTradeSessionResponse.model_validate(record)
 
 

@@ -13,7 +13,7 @@ from f1_polymarket_lab.storage.models import (
     ModelRunPromotion,
 )
 from f1_polymarket_lab.storage.repository import upsert_records
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 mlflow: Any
@@ -28,6 +28,12 @@ SQ_POLE_LIVE_PROMOTION_STAGE = "sq_pole_live_v1"
 SPRINT_WINNER_LIVE_PROMOTION_STAGE = "sprint_winner_live_v1"
 MULTITASK_EXPERIMENT_NAME = "weekend_ops.multitask_qr"
 SUPPORTED_MULTITASK_SOURCE_CHECKPOINTS = frozenset({"FP1", "FP2", "FP3", "Q"})
+LIVE_BASELINE_PROMOTION_STAGES = frozenset(
+    {
+        SQ_POLE_LIVE_PROMOTION_STAGE,
+        SPRINT_WINNER_LIVE_PROMOTION_STAGE,
+    }
+)
 
 PROMOTION_THRESHOLDS = {
     "total_pnl_min": 0.0,
@@ -346,6 +352,185 @@ def promote_model_run(
     )
     if promotion is None:
         raise RuntimeError("Failed to persist model promotion")
+    return promotion
+
+
+def evaluate_live_baseline_promotion_gate(
+    session: Session,
+    *,
+    model_run_id: str,
+    stage: str,
+    min_predictions: int = 10,
+    min_markets: int = 10,
+) -> PromotionDecision:
+    import polars as pl
+
+    failed_rules: list[str] = []
+    model_run = session.get(ModelRun, model_run_id)
+    if model_run is None:
+        return PromotionDecision(
+            eligible=False,
+            actuals={"model_run_found": 0.0},
+            failed_rules=[f"model_run_id={model_run_id} not found"],
+        )
+
+    if stage not in LIVE_BASELINE_PROMOTION_STAGES:
+        failed_rules.append(f"stage={stage} is not a supported live baseline stage")
+    if model_run.stage != stage:
+        failed_rules.append(f"model_run stage={model_run.stage} must equal stage={stage}")
+    if model_run.model_family != "baseline":
+        failed_rules.append(f"model_family={model_run.model_family} must be baseline")
+    if not model_run.artifact_uri:
+        failed_rules.append("artifact_uri is required")
+    if not model_run.feature_snapshot_id:
+        failed_rules.append("feature_snapshot_id is required")
+
+    snapshot = (
+        None
+        if not model_run.feature_snapshot_id
+        else session.get(FeatureSnapshot, model_run.feature_snapshot_id)
+    )
+    if snapshot is None:
+        failed_rules.append("feature snapshot is required")
+    elif snapshot.storage_path is None:
+        failed_rules.append("snapshot storage_path is required")
+    elif model_run.dataset_version and snapshot.feature_version != model_run.dataset_version:
+        failed_rules.append(
+            "snapshot feature version must match model run dataset version: "
+            f"snapshot={snapshot.feature_version}, model_run={model_run.dataset_version}"
+        )
+
+    row_count = 0
+    labeled_row_count = 0
+    snapshot_market_count = 0
+    if snapshot is not None and snapshot.storage_path is not None:
+        snapshot_path = Path(snapshot.storage_path)
+        if not snapshot_path.exists():
+            failed_rules.append(f"snapshot file does not exist: {snapshot_path}")
+        else:
+            frame = pl.read_parquet(snapshot_path)
+            row_count = frame.height
+            if "market_id" in frame.columns:
+                snapshot_market_count = frame.select("market_id").unique().height
+            if "label_yes" in frame.columns:
+                labeled_row_count = frame.filter(pl.col("label_yes").is_not_null()).height
+
+    prediction_count = session.scalar(
+        select(func.count()).select_from(ModelPrediction).where(
+            ModelPrediction.model_run_id == model_run_id
+        )
+    )
+    prediction_count = int(prediction_count or 0)
+    prediction_market_count = len(
+        {
+            market_id
+            for market_id in session.scalars(
+                select(ModelPrediction.market_id).where(
+                    ModelPrediction.model_run_id == model_run_id,
+                    ModelPrediction.market_id.is_not(None),
+                )
+            ).all()
+            if market_id
+        }
+    )
+
+    if row_count < min_predictions:
+        failed_rules.append(f"snapshot row_count={row_count} must be >= {min_predictions}")
+    if prediction_count < min_predictions:
+        failed_rules.append(
+            f"prediction_count={prediction_count} must be >= {min_predictions}"
+        )
+    if snapshot_market_count < min_markets:
+        failed_rules.append(
+            f"snapshot market_count={snapshot_market_count} must be >= {min_markets}"
+        )
+    if prediction_market_count < min_markets:
+        failed_rules.append(
+            f"prediction market_count={prediction_market_count} must be >= {min_markets}"
+        )
+    if row_count > 0 and prediction_count != row_count:
+        failed_rules.append(
+            f"prediction_count={prediction_count} must equal snapshot row_count={row_count}"
+        )
+
+    return PromotionDecision(
+        eligible=not failed_rules,
+        actuals={
+            "live_baseline_gate": 1.0,
+            "min_predictions": float(min_predictions),
+            "min_markets": float(min_markets),
+            "row_count": float(row_count),
+            "labeled_row_count": float(labeled_row_count),
+            "snapshot_market_count": float(snapshot_market_count),
+            "prediction_count": float(prediction_count),
+            "prediction_market_count": float(prediction_market_count),
+        },
+        failed_rules=failed_rules,
+    )
+
+
+def promote_live_baseline_model_run(
+    session: Session,
+    *,
+    model_run_id: str,
+    stage: str,
+    min_predictions: int = 10,
+    min_markets: int = 10,
+) -> ModelRunPromotion:
+    model_run = session.get(ModelRun, model_run_id)
+    if model_run is None:
+        raise KeyError(f"model_run_id={model_run_id} not found")
+    decision = evaluate_live_baseline_promotion_gate(
+        session,
+        model_run_id=model_run_id,
+        stage=stage,
+        min_predictions=min_predictions,
+        min_markets=min_markets,
+    )
+    if not decision.eligible:
+        raise ValueError("Live baseline promotion gate failed: " + "; ".join(decision.failed_rules))
+
+    active_rows = session.scalars(
+        select(ModelRunPromotion).where(
+            ModelRunPromotion.stage == stage,
+            ModelRunPromotion.status == "active",
+        )
+    ).all()
+    for row in active_rows:
+        if row.model_run_id != model_run_id:
+            row.status = "superseded"
+
+    promotion_id = stable_uuid("promotion", stage, model_run_id)
+    promoted_at = utc_now()
+    upsert_records(
+        session,
+        ModelRunPromotion,
+        [
+            {
+                "id": promotion_id,
+                "model_run_id": model_run_id,
+                "stage": stage,
+                "status": "active",
+                "gate_metrics_json": {
+                    **decision.actuals,
+                    "model_name": model_run.model_name,
+                    "model_family": model_run.model_family,
+                    "promotion_gate": "live_baseline_v1",
+                },
+                "promoted_at": promoted_at,
+            }
+        ],
+        conflict_columns=["model_run_id", "stage"],
+    )
+    session.flush()
+    promotion = session.scalar(
+        select(ModelRunPromotion).where(
+            ModelRunPromotion.model_run_id == model_run_id,
+            ModelRunPromotion.stage == stage,
+        )
+    )
+    if promotion is None:
+        raise RuntimeError("Failed to persist live baseline model promotion")
     return promotion
 
 

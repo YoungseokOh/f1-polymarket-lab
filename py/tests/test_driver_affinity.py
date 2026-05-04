@@ -18,6 +18,7 @@ from f1_polymarket_lab.storage.models import (
 from f1_polymarket_worker.driver_affinity import (
     build_driver_affinity_report,
     get_driver_affinity_refresh_status,
+    get_driver_affinity_report,
     refresh_driver_affinity,
 )
 from f1_polymarket_worker.pipeline import PipelineContext
@@ -260,6 +261,105 @@ def test_driver_affinity_report_defaults_to_current_meeting_when_key_is_omitted(
             "season_to_date",
             "all_history",
         }
+    finally:
+        session.close()
+
+
+def test_driver_affinity_segments_limit_entries_to_current_meeting_drivers(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        seed_affinity_fixture(session)
+        prior_meeting = F1Meeting(
+            id="meeting-2026-australia",
+            meeting_key=1279,
+            season=2026,
+            meeting_name="Australian Grand Prix",
+            circuit_short_name="Melbourne",
+            start_date_utc=datetime(2026, 3, 6, 0, 0, tzinfo=timezone.utc),
+            end_date_utc=datetime(2026, 3, 8, 6, 0, tzinfo=timezone.utc),
+        )
+        prior_session = F1Session(
+            id="session-2026-australia-fp1",
+            meeting_id=prior_meeting.id,
+            session_key=11227,
+            session_name="Practice 1",
+            session_code="FP1",
+            session_type="Practice",
+            date_start_utc=datetime(2026, 3, 6, 1, 0, tzinfo=timezone.utc),
+            date_end_utc=datetime(2026, 3, 6, 2, 0, tzinfo=timezone.utc),
+            is_practice=True,
+        )
+        session.add_all(
+            [
+                prior_meeting,
+                prior_session,
+                F1Driver(
+                    id="driver:99",
+                    driver_number=99,
+                    full_name="Reserve DRIVER",
+                    broadcast_name="R DRIVER",
+                    team_id="team:mclaren",
+                ),
+            ]
+        )
+        for driver_id, base in [("driver:1", 10.0), ("driver:16", 11.0), ("driver:99", 9.0)]:
+            for lap_number in [1, 2]:
+                session.add(
+                    F1Lap(
+                        id=f"{prior_session.id}:{driver_id}:{lap_number}",
+                        session_id=prior_session.id,
+                        driver_id=driver_id,
+                        lap_number=lap_number,
+                        sector_1_seconds=base,
+                        sector_2_seconds=base + 10,
+                        sector_3_seconds=base + 5,
+                    )
+                )
+            session.add(
+                F1SessionResult(
+                    id=f"{prior_session.id}:{driver_id}",
+                    session_id=prior_session.id,
+                    driver_id=driver_id,
+                )
+            )
+        session.commit()
+
+        report = build_driver_affinity_report(
+            context,
+            season=2026,
+            meeting_key=1281,
+            as_of_utc=datetime(2026, 3, 27, 7, 1, tzinfo=timezone.utc),
+        )
+
+        season_segment = next(
+            segment for segment in report["segments"] if segment["key"] == "season_to_date"
+        )
+        assert "reserve driver" not in {
+            entry["canonical_driver_key"] for entry in season_segment["entries"]
+        }
+        assert season_segment["entry_count"] == 3
+    finally:
+        session.close()
+
+
+def test_driver_affinity_report_falls_back_to_identity_ranking_without_report(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    try:
+        seed_affinity_fixture(session)
+        report = get_driver_affinity_report(context, season=2026, meeting_key=1281)
+
+        assert report["season"] == 2026
+        assert report["meeting_key"] == 1281
+        assert report["entry_count"] == len(report["entries"])
+        assert report["entry_count"] == 3
+        assert report["entries"][0]["display_name"] == "George RUSSELL"
+        assert report["entries"][0]["affinity_score"] == 0.0
+        assert report["stale_reason"] is not None
+        assert "Missing hydrated data through" in report["stale_reason"]
     finally:
         session.close()
 

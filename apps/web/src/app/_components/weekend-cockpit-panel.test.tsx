@@ -41,8 +41,10 @@ vi.mock("@f1/ts-sdk", () => ({
     liveTradeTickets: vi.fn(),
     recordLiveTradeFill: vi.fn(),
     refreshLatestSession: vi.fn(),
+    runManualPaperTrade: vi.fn(),
     weekendCockpitStatus: vi.fn(),
     runWeekendCockpit: vi.fn(),
+    promoteBestModelRun: vi.fn(),
   },
 }));
 
@@ -211,6 +213,7 @@ const baseStatus: WeekendCockpitStatus = {
   focusStatus: "upcoming",
   timelineCompletedCodes: ["FP1"],
   timelineActiveCode: "FP2",
+  timelineSessionCodes: ["FP1", "FP2", "FP3", "Q", "R"],
   sourceSession: {
     id: "session:11246",
     sessionKey: 11246,
@@ -314,10 +317,10 @@ const baseStatus: WeekendCockpitStatus = {
     executionCount: 0,
     filledExecutionCount: 0,
   },
-  primaryActionTitle: "Update to latest",
+  primaryActionTitle: "Prepare paper run",
   primaryActionDescription:
-    "This latest update will discover FP2 markets first, then continue into paper trading.",
-  primaryActionCta: "Update to latest",
+    "Finds FP2 markets first, then creates a simulated paper-trading run.",
+  primaryActionCta: "Prepare paper run",
   explanation:
     "This stage uses FP1 results to settle finished FP1 tickets, find FP2 markets, and when ready continue into paper trading.",
 };
@@ -483,6 +486,10 @@ function buildLiveSignalBoard(): LiveTradeSignalBoard {
   };
 }
 
+function openAdvancedTools() {
+  fireEvent.click(screen.getByText("Advanced live tools"));
+}
+
 describe("WeekendCockpitPanel", () => {
   beforeEach(() => {
     vi.mocked(sdk.liveTradeSignalBoard).mockResolvedValue(
@@ -528,6 +535,26 @@ describe("WeekendCockpitPanel", () => {
       ticketId: "live-ticket-1",
       ticketStatus: "cancelled",
     });
+    vi.mocked(sdk.runManualPaperTrade).mockResolvedValue({
+      action: "run-manual-paper-trade",
+      status: "ok",
+      message: "Created your manual paper run with 1 pick(s).",
+      gpShortCode: "japan_fp1_fp2",
+      ptSessionId: "pt-manual-1",
+      pickCount: 1,
+      openPositions: 1,
+      totalPnl: 0,
+      logPath: null,
+    });
+    vi.mocked(sdk.promoteBestModelRun).mockResolvedValue({
+      action: "promote-best-model-run",
+      status: "ok",
+      message: "Promoted best model run for stage sq_pole_live_v1.",
+      stage: "sq_pole_live_v1",
+      promotionId: "promotion-1",
+      modelRunId: "model-run-1",
+      candidateCount: 3,
+    });
   });
 
   afterEach(() => {
@@ -540,6 +567,7 @@ describe("WeekendCockpitPanel", () => {
       <WeekendCockpitPanel
         initialStatus={baseStatus}
         initialReadiness={baseReadiness}
+        initialSignalBoard={buildLiveSignalBoard()}
         refreshTargetsByGpShortCode={{
           japan_fp1_fp2: {
             meetingId: "meeting:1281",
@@ -552,19 +580,44 @@ describe("WeekendCockpitPanel", () => {
     expect(
       screen.getAllByText("Use FP1 results to prepare FP2").length,
     ).toBeGreaterThan(0);
-    expect(screen.getAllByText("Latest update").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Update to latest").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("Action").length).toBeGreaterThan(0);
+    expect(screen.getByText("Market calls")).toBeInTheDocument();
+    const callsCaptions = screen.getAllByText((_, node) => {
+      if (!node) return false;
+      const text = node.textContent ?? "";
+      return text.includes("markets with highest model edge are shown first.");
+    });
+    expect(callsCaptions.length).toBeGreaterThan(0);
     expect(
-      screen.getByRole("button", { name: "Update to latest" }),
+      screen.getByText("Will George Russell top Practice 2?"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Model price")).toBeInTheDocument();
+    expect(screen.getByText("Model pick")).toBeInTheDocument();
+    expect(screen.getByText("Your pick")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "NO" }));
+    expect(screen.getByText("Your picks vs model")).toBeInTheDocument();
+    expect(screen.getByText("Your pick NO")).toBeInTheDocument();
+    expect(screen.getByText("Model pick YES")).toBeInTheDocument();
+    expect(screen.getByText("Different")).toBeInTheDocument();
+    expect(screen.getAllByText("Prepare paper run").length).toBeGreaterThan(0);
+    expect(
+      screen.getByRole("button", { name: "Prepare paper run" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Creates simulated paper positions only. Live tickets and real orders are separate.",
+      ),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Refresh Practice 1" }),
     ).toBeInTheDocument();
+    expect(screen.queryByText("Operations readiness")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live monitor")).not.toBeInTheDocument();
+    expect(screen.queryByText("Live tickets")).not.toBeInTheDocument();
+    expect(screen.queryByText("Signal board")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Capture 20s live sample" }),
-    ).toBeDisabled();
-    expect(screen.getByText("Operations readiness")).toBeInTheDocument();
-    expect(screen.getByText("Driver affinity refresh")).toBeInTheDocument();
+      screen.queryByText("Driver affinity refresh"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("japan_fp1_fp2")).not.toBeInTheDocument();
     expect(screen.queryByText("fp1_to_fp2")).not.toBeInTheDocument();
     expect(
@@ -573,7 +626,69 @@ describe("WeekendCockpitPanel", () => {
     expect(screen.queryByText("11246")).not.toBeInTheDocument();
   });
 
-  it("reveals advanced identifiers only after expanding advanced details", () => {
+  it("runs selected manual picks as a separate paper run", async () => {
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue({
+      ...baseStatus,
+      latestPaperSession: {
+        id: "pt-manual-1",
+        gpSlug: "japan_fp1_fp2",
+        snapshotId: "snapshot-1",
+        modelRunId: "model-run-1",
+        configJson: {
+          manual_trade: true,
+          manual_trade_batch: true,
+          manual_pick_count: 1,
+        },
+        logPath: null,
+        startedAt: "2026-03-27T05:25:00Z",
+        finishedAt: null,
+        status: "open",
+        summaryJson: {
+          trades_executed: 1,
+          open_positions: 1,
+          total_pnl: 0,
+        },
+      },
+    });
+
+    render(
+      <WeekendCockpitPanel
+        initialStatus={baseStatus}
+        initialReadiness={baseReadiness}
+        initialSignalBoard={buildLiveSignalBoard()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "NO" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run your picks" }));
+
+    await waitFor(() => {
+      expect(sdk.runManualPaperTrade).toHaveBeenCalledWith({
+        gp_short_code: "japan_fp1_fp2",
+        bet_size: 10,
+        picks: [
+          {
+            market_id: "market-1",
+            token_id: "token-1",
+            model_run_id: "model-run-1",
+            snapshot_id: "snapshot-1",
+            side_label: "NO",
+            model_pick_side: "YES",
+            model_prob: 0.6,
+            market_price: 0.33,
+          },
+        ],
+      });
+    });
+    expect(
+      await screen.findByText(
+        "Created your manual paper run with 1 pick(s). Compare it with the model run in Current GP runs below.",
+      ),
+    ).toBeInTheDocument();
+    expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith("japan_fp1_fp2");
+  });
+
+  it("reveals advanced live tools and identifiers after expanding advanced details", () => {
     render(
       <WeekendCockpitPanel
         initialStatus={baseStatus}
@@ -581,8 +696,12 @@ describe("WeekendCockpitPanel", () => {
       />,
     );
 
-    fireEvent.click(screen.getByText("Show advanced details"));
+    openAdvancedTools();
 
+    expect(screen.getByText("Operations readiness")).toBeInTheDocument();
+    expect(screen.getByText("Live monitor")).toBeInTheDocument();
+    expect(screen.getByText("Live tickets")).toBeInTheDocument();
+    expect(screen.getByText("Signal board")).toBeInTheDocument();
     expect(screen.getByText("japan_fp1_fp2")).toBeInTheDocument();
     expect(screen.getByText("fp1_to_fp2")).toBeInTheDocument();
     expect(screen.getByText("driver_fastest_lap_practice")).toBeInTheDocument();
@@ -594,9 +713,187 @@ describe("WeekendCockpitPanel", () => {
       ...baseStatus,
       readyToRun: false,
       modelReady: false,
+      requiredStage: "sq_pole_live_v1",
+      activeModelRunId: null,
+      selectedConfig: {
+        ...baseStatus.selectedConfig,
+        target_session_code: "SQ",
+        display_label: "Use FP1 results to prepare Sprint Qualifying",
+        display_description:
+          "Use FP1 results to find Sprint Qualifying markets and prepare paper trading.",
+      },
+      modelBlockers: [
+        "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+      ],
+      steps: baseStatus.steps.map((step) =>
+        step.key === "run_paper_trade"
+          ? {
+              ...step,
+              status: "blocked",
+              detail:
+                "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+            }
+          : step.key === "discover_target_markets"
+            ? {
+                ...step,
+                status: "completed",
+                detail: "Sprint Qualifying markets are already linked.",
+              }
+            : step,
+      ),
+      blockers: [
+        "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+      ],
+    };
+
+    render(<WeekendCockpitPanel initialStatus={blockedStatus} />);
+
+    expect(
+      screen.getAllByText(
+        "No trade candidates yet. The SQ model is not promoted.",
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(screen.queryByText("Model blockers")).not.toBeInTheDocument();
+    expect(screen.queryByText("Current blockers")).not.toBeInTheDocument();
+  });
+
+  it("auto-promotes required model before running when that is the only blocker", async () => {
+    const blockedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      readyToRun: false,
+      modelReady: false,
+      requiredStage: "sq_pole_live_v1",
+      activeModelRunId: null,
+      selectedConfig: {
+        ...baseStatus.selectedConfig,
+        target_session_code: "SQ",
+        stage_label: "FP1 -> SQ",
+        display_label: "Use FP1 results to prepare Sprint Qualifying",
+        display_description:
+          "Use FP1 results to find Sprint Qualifying markets and prepare paper trading.",
+      },
+      modelBlockers: [
+        "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+      ],
+      blockers: [
+        "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+      ],
+      steps: baseStatus.steps.map((step) =>
+        step.key === "run_paper_trade"
+          ? {
+              ...step,
+              status: "blocked",
+              detail:
+                "A promoted sq_pole_live_v1 champion is required before paper trading can run.",
+            }
+          : step.key === "discover_target_markets"
+            ? {
+                ...step,
+                status: "completed",
+                detail: "Sprint Qualifying markets are already linked.",
+              }
+            : step,
+      ),
+    };
+    const runRequest = deferred<RunWeekendCockpitResponse>();
+
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(baseStatus);
+    vi.mocked(sdk.runWeekendCockpit).mockReturnValue(runRequest.promise);
+
+    render(
+      <WeekendCockpitPanel
+        initialStatus={blockedStatus}
+        initialReadiness={baseReadiness}
+        initialSignalBoard={buildLiveSignalBoard()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Prepare paper run" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(sdk.promoteBestModelRun).toHaveBeenCalledWith({
+        stage: "sq_pole_live_v1",
+      });
+    });
+    expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith("japan_fp1_fp2");
+
+    runRequest.resolve({
+      action: "run-weekend-cockpit",
+      status: "ok",
+      message: "Weekend cockpit complete",
+      gpShortCode: "japan_fp1_fp2",
+      snapshotId: "snapshot-1",
+      modelRunId: "model-run-1",
+      ptSessionId: "pt-session-1",
+      jobRunId: null,
+      reportPath: null,
+      preflightSummary: null,
+      warnings: [],
+      executedSteps: [],
+      details: {
+        snapshotId: "snapshot-1",
+        modelRunId: "model-run-1",
+        baseline: "hybrid",
+        ptSessionId: "pt-session-1",
+        logPath: null,
+        totalSignals: 4,
+        tradesExecuted: 1,
+        openPositions: 1,
+        settledPositions: 1,
+        winCount: 0,
+        lossCount: 0,
+        winRate: null,
+        totalPnl: 0,
+        dailyPnl: 0,
+        settlement: {
+          settledSessionIds: ["pt-prev"],
+          settledGpSlugs: ["japan_fp3"],
+          settledPositions: 1,
+          manualPositionsSettled: 1,
+          unresolvedPositions: 0,
+          unresolvedSessionIds: [],
+          winnerDriverId: "driver:12",
+        },
+      },
+    });
+
+    await waitFor(() => {
+      expect(sdk.runWeekendCockpit).toHaveBeenCalledWith({
+        gp_short_code: "japan_fp1_fp2",
+      });
+    });
+    expect(sdk.promoteBestModelRun).toHaveBeenCalledTimes(1);
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "Paper run created. 1 simulated ticket. Review it in Current GP runs below. Settled 1 prior ticket.",
+        ),
+      ).toBeInTheDocument();
+    });
+  });
+
+  it("runs ready preparation steps before trying model promotion", async () => {
+    const blockedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      readyToRun: false,
+      modelReady: false,
       requiredStage: "multitask_qr",
       activeModelRunId: null,
+      selectedConfig: {
+        ...baseStatus.selectedConfig,
+        target_session_code: "R",
+        stage_label: "Q -> R",
+        display_label: "Use Qualifying results to prepare Race",
+        display_description:
+          "Use Qualifying results to find Race markets and prepare paper trading.",
+        required_model_stage: "multitask_qr",
+      },
       modelBlockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+      blockers: [
         "A promoted multitask_qr champion is required before paper trading can run.",
       ],
       steps: baseStatus.steps.map((step) =>
@@ -607,22 +904,135 @@ describe("WeekendCockpitPanel", () => {
               detail:
                 "A promoted multitask_qr champion is required before paper trading can run.",
             }
-          : step,
+          : step.key === "discover_target_markets"
+            ? {
+                ...step,
+                label: "Find Race markets",
+                status: "ready",
+                detail: "Race markets have not been found yet.",
+                sessionCode: "R",
+                resourceLabel: "Race markets",
+              }
+            : step,
       ),
+    };
+
+    vi.mocked(sdk.runWeekendCockpit).mockResolvedValue({
+      action: "run-weekend-cockpit",
+      status: "blocked",
+      message:
+        "Weekend prep updated for Japanese Grand Prix (japan_fp1_fp2). Paper trading still needs a promoted model.",
+      gpShortCode: "japan_fp1_fp2",
+      snapshotId: null,
+      modelRunId: null,
+      ptSessionId: null,
+      jobRunId: "job-1",
+      reportPath: null,
+      preflightSummary: null,
+      warnings: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
+      executedSteps: [],
+      details: null,
+    });
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(blockedStatus);
+
+    render(
+      <WeekendCockpitPanel
+        initialStatus={blockedStatus}
+        initialReadiness={baseReadiness}
+        initialSignalBoard={buildLiveSignalBoard()}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Prepare paper run" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(sdk.runWeekendCockpit).toHaveBeenCalledWith({
+        gp_short_code: "japan_fp1_fp2",
+      });
+    });
+    expect(sdk.promoteBestModelRun).not.toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        "Weekend prep updated for Japanese Grand Prix (japan_fp1_fp2). Paper trading still needs a promoted model.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("shows a clear message when required model promotion has no candidates", async () => {
+    const blockedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      readyToRun: false,
+      modelReady: false,
+      requiredStage: "multitask_qr",
+      activeModelRunId: null,
+      selectedConfig: {
+        ...baseStatus.selectedConfig,
+        target_session_code: "Q",
+        stage_label: "FP1 -> Q",
+        display_label: "Use FP1 results to prepare Qualifying",
+        display_description:
+          "Use FP1 results to find Qualifying markets and prepare paper trading.",
+        required_model_stage: "multitask_qr",
+      },
+      modelBlockers: [
+        "A promoted multitask_qr champion is required before paper trading can run.",
+      ],
       blockers: [
         "A promoted multitask_qr champion is required before paper trading can run.",
       ],
+      steps: baseStatus.steps.map((step) =>
+        step.key === "run_paper_trade"
+          ? {
+              ...step,
+              status: "blocked",
+              detail:
+                "A promoted multitask_qr champion is required before paper trading can run.",
+            }
+          : step.key === "discover_target_markets"
+            ? {
+                ...step,
+                status: "completed",
+                detail: "Qualifying markets are already linked.",
+              }
+            : step,
+      ),
     };
 
-    render(<WeekendCockpitPanel initialStatus={blockedStatus} />);
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(blockedStatus);
+    vi.mocked(sdk.promoteBestModelRun).mockRejectedValue(
+      new Error(
+        "API request failed: 409 No eligible promotion candidates found for stage=multitask_qr",
+      ),
+    );
 
-    expect(screen.getByText("Model blockers")).toBeInTheDocument();
-    expect(
-      screen.getAllByText(
-        "A promoted multitask_qr champion is required before paper trading can run.",
-      ).length,
-    ).toBeGreaterThan(0);
-    expect(screen.queryByText("Current blockers")).not.toBeInTheDocument();
+    render(
+      <WeekendCockpitPanel
+        initialStatus={blockedStatus}
+        initialReadiness={baseReadiness}
+      />,
+    );
+
+    const button = screen.getByRole("button", { name: "Prepare paper run" });
+    expect(button).toBeEnabled();
+    fireEvent.click(button);
+
+    await waitFor(() => {
+      expect(sdk.promoteBestModelRun).toHaveBeenCalledWith({
+        stage: "multitask_qr",
+      });
+    });
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          "No model candidates are ready for multitask_qr. Run that model stage first, then retry this action.",
+        ),
+      ).toBeInTheDocument();
+    });
+    expect(sdk.runWeekendCockpit).not.toHaveBeenCalled();
   });
 
   it("shows pending state immediately and completes the CTA run flow", async () => {
@@ -653,7 +1063,7 @@ describe("WeekendCockpitPanel", () => {
       />,
     );
 
-    const button = screen.getByRole("button", { name: "Update to latest" });
+    const button = screen.getByRole("button", { name: "Prepare paper run" });
     fireEvent.click(button);
 
     expect(sdk.runWeekendCockpit).toHaveBeenCalledWith({
@@ -699,9 +1109,15 @@ describe("WeekendCockpitPanel", () => {
 
     await waitFor(() => {
       expect(
-        screen.getByText("Weekend cockpit complete Settled 1 prior ticket."),
+        screen.getByText(
+          "Paper run created. 1 simulated ticket. Review it in Current GP runs below. Settled 1 prior ticket.",
+        ),
       ).toBeInTheDocument();
     });
+    expect(screen.getByText("Latest paper run")).toBeInTheDocument();
+    expect(
+      screen.getAllByText("Review Current GP runs").length,
+    ).toBeGreaterThan(0);
     expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith("japan_fp1_fp2");
   });
 
@@ -749,6 +1165,112 @@ describe("WeekendCockpitPanel", () => {
     });
   });
 
+  it("auto syncs to backend stage transitions in auto mode", async () => {
+    vi.useFakeTimers();
+
+    try {
+      const autoUpdatedStatus: WeekendCockpitStatus = {
+        ...baseStatus,
+        autoSelectedGpShortCode: "japan_fp1",
+        selectedGpShortCode: "japan_fp1",
+        selectedConfig: {
+          ...baseStatus.selectedConfig,
+          short_code: "japan_fp1",
+          target_session_code: "Q",
+          variant: "fp1_to_q",
+          stage_rank: 2,
+          stage_label: "FP1 -> Q",
+          display_label: "Use FP1 results to prepare Qualifying",
+          display_description:
+            "Use FP1 results to find Qualifying markets and prepare paper trading.",
+        },
+        timelineActiveCode: "Q",
+        timelineSessionCodes: ["FP1", "SQ", "S", "Q", "R"],
+        availableConfigs: baseStatus.availableConfigs,
+      };
+
+      vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(autoUpdatedStatus);
+
+      render(
+        <WeekendCockpitPanel
+          initialStatus={baseStatus}
+          initialReadiness={baseReadiness}
+        />,
+      );
+
+      expect(
+        screen.getByRole("heading", {
+          level: 3,
+          name: "Use FP1 results to prepare FP2",
+        }),
+      ).toBeInTheDocument();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20000);
+      });
+
+      expect(
+        screen.getByRole("heading", {
+          level: 3,
+          name: "Use FP1 results to prepare Qualifying",
+        }),
+      ).toBeInTheDocument();
+      expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith(undefined);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops background stage auto-sync after manual stage selection", async () => {
+    vi.useFakeTimers();
+
+    const autoUpdatedStatus: WeekendCockpitStatus = {
+      ...baseStatus,
+      autoSelectedGpShortCode: "japan_fp1",
+      selectedGpShortCode: "japan_fp1",
+      selectedConfig: {
+        ...baseStatus.selectedConfig,
+        short_code: "japan_fp1",
+        target_session_code: "Q",
+        variant: "fp1_to_q",
+        stage_rank: 2,
+        stage_label: "FP1 -> Q",
+        display_label: "Use FP1 results to prepare Qualifying",
+        display_description:
+          "Use FP1 results to find Qualifying markets and prepare paper trading.",
+      },
+      timelineActiveCode: "Q",
+      timelineSessionCodes: ["FP1", "SQ", "S", "Q", "R"],
+      availableConfigs: baseStatus.availableConfigs,
+    };
+    vi.mocked(sdk.weekendCockpitStatus).mockResolvedValue(autoUpdatedStatus);
+
+    try {
+      render(
+        <WeekendCockpitPanel
+          initialStatus={baseStatus}
+          initialReadiness={baseReadiness}
+        />,
+      );
+
+      const select = screen.getByLabelText("Stage");
+      fireEvent.change(select, { target: { value: "japan_fp1" } });
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20000);
+      });
+
+      expect(sdk.weekendCockpitStatus).toHaveBeenCalledWith("japan_fp1");
+      expect(sdk.weekendCockpitStatus).not.toHaveBeenCalledWith();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("captures a short live sample when the target session is live", async () => {
     const liveStatus: WeekendCockpitStatus = {
       ...baseStatus,
@@ -787,6 +1309,7 @@ describe("WeekendCockpitPanel", () => {
         initialReadiness={baseReadiness}
       />,
     );
+    openAdvancedTools();
 
     const button = screen.getByRole("button", {
       name: "Capture 20s live sample",
@@ -835,8 +1358,8 @@ describe("WeekendCockpitPanel", () => {
     expect(screen.getByText("book · 9")).toBeInTheDocument();
     expect(screen.getByText("Signal board")).toBeInTheDocument();
     expect(
-      screen.getByText("Will George Russell top Practice 2?"),
-    ).toBeInTheDocument();
+      screen.getAllByText("Will George Russell top Practice 2?").length,
+    ).toBeGreaterThan(0);
     expect(screen.getAllByText("+19.0 pts").length).toBeGreaterThan(0);
     expect(
       screen.getByText("Live best_bid_ask sample 06:20:00 UTC"),
@@ -883,6 +1406,7 @@ describe("WeekendCockpitPanel", () => {
         initialReadiness={baseReadiness}
       />,
     );
+    openAdvancedTools();
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -1010,6 +1534,7 @@ describe("WeekendCockpitPanel", () => {
         initialReadiness={blockedReadiness}
       />,
     );
+    openAdvancedTools();
 
     fireEvent.click(
       screen.getByRole("button", {
@@ -1058,6 +1583,7 @@ describe("WeekendCockpitPanel", () => {
         initialReadiness={baseReadiness}
       />,
     );
+    openAdvancedTools();
 
     fireEvent.click(screen.getByRole("button", { name: "Start live watch" }));
 

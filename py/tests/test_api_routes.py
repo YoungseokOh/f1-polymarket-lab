@@ -18,6 +18,7 @@ from f1_polymarket_lab.storage.models import (
     LiveTradeTicket,
     ModelRun,
     ModelRunPromotion,
+    PaperTradePosition,
     PaperTradeSession,
     PolymarketEvent,
     PolymarketMarket,
@@ -398,6 +399,30 @@ def build_test_client(tmp_path: Path) -> TestClient:
                     started_at=datetime(2026, 3, 26, 9, 0, tzinfo=timezone.utc),
                     finished_at=datetime(2026, 3, 26, 9, 5, tzinfo=timezone.utc),
                 ),
+                PaperTradeSession(
+                    id="pt-japan-open",
+                    gp_slug="japan_fp1_fp2",
+                    snapshot_id="snapshot-1",
+                    model_run_id="model-run-1",
+                    status="open",
+                    summary_json={"trades_executed": 1, "total_pnl": 0.0},
+                    started_at=datetime(2026, 3, 27, 5, 20, tzinfo=timezone.utc),
+                    finished_at=None,
+                ),
+                PaperTradePosition(
+                    id="pt-japan-open-pos-1",
+                    session_id="pt-japan-open",
+                    market_id="market-good",
+                    token_id="token-yes",
+                    side="buy_yes",
+                    quantity=10.0,
+                    entry_price=0.41,
+                    entry_time=datetime(2026, 3, 27, 5, 20, tzinfo=timezone.utc),
+                    model_prob=0.61,
+                    market_prob=0.41,
+                    edge=0.20,
+                    status="open",
+                ),
                 LiveTradeTicket(
                     id="live-ticket-1",
                     gp_slug="japan_fp1_fp2",
@@ -666,6 +691,7 @@ def test_weekend_cockpit_status_skips_cancelled_meetings_and_selects_miami(
     assert payload["focus_session"]["session_code"] == "FP1"
     assert payload["timeline_completed_codes"] == []
     assert payload["timeline_active_code"] == "FP1"
+    assert payload["timeline_session_codes"] == ["FP1", "SQ", "S", "Q", "R"]
     assert payload["required_stage"] == "sq_pole_live_v1"
     assert payload["model_ready"] is False
     assert payload["model_blockers"] == [
@@ -712,8 +738,8 @@ def test_weekend_cockpit_status_blocks_fp1_before_session_end(
     assert payload["required_stage"] == "multitask_qr"
     assert payload["active_model_run_id"] == "model-run-1"
     assert payload["model_blockers"] == []
-    assert payload["primary_action_title"] == "Wait for this stage"
-    assert payload["primary_action_cta"] == "Not ready yet"
+    assert payload["primary_action_title"] == "Waiting for this stage"
+    assert payload["primary_action_cta"] == "Wait"
     assert payload["steps"][1]["reason_code"] == "session_in_progress"
     assert payload["steps"][1]["actionable_after_utc"] == "2026-03-27T03:30:00Z"
     assert payload["steps"][1]["resource_label"] == "FP1 results"
@@ -975,6 +1001,188 @@ def test_run_weekend_cockpit_endpoint_returns_409_for_blockers(
     assert "FP1 ends at 2026-03-27T03:30:00+00:00" in response.text
 
 
+def test_promote_best_model_run_endpoint_promotes_top_candidate(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fake_candidates(*args, **kwargs):
+        return ["candidate-1", "candidate-2"]
+
+    def fake_promote(*args, **kwargs):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            id="promotion-best-sq",
+            model_run_id="run-best",
+        )
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_registry.eligible_promotion_candidates",
+        fake_candidates,
+    )
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_registry.promote_best_model_run",
+        fake_promote,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/promote-best-model-run",
+            json={"stage": "sq_pole_live_v1"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "promote-best-model-run"
+    assert payload["stage"] == "sq_pole_live_v1"
+    assert payload["promotion_id"] == "promotion-best-sq"
+    assert payload["model_run_id"] == "run-best"
+    assert payload["candidate_count"] == 2
+
+
+def test_promote_model_run_endpoint_returns_404_for_unknown_model_run(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fake_promote(*args, **kwargs):
+        raise KeyError("model_run_id=model-run-missing not found")
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_registry.promote_model_run",
+        fake_promote,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/promote-model-run",
+            json={"model_run_id": "model-run-missing", "stage": "sq_pole_live_v1"},
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 404
+    assert "model_run_id=model-run-missing not found" in response.text
+
+
+def test_build_multitask_snapshots_endpoint_runs_worker_workflow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_build(ctx, **kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "completed",
+            "stage": kwargs["stage"],
+            "season": kwargs["season"],
+            "through_meeting_key": kwargs["through_meeting_key"],
+            "meeting_keys": [1281, 1282, 1284],
+            "completed_meetings": [{"meeting_key": 1284, "snapshot_count": 4}],
+            "snapshot_ids": ["snapshot-1"],
+            "snapshot_count": 12,
+            "row_count": 84,
+            "manifest_path": str(tmp_path / "manifest.json"),
+            "job_run_ids": ["job-1"],
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_workflow.build_multitask_training_snapshots",
+        fake_build,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/build-multitask-snapshots",
+            json={
+                "season": 2026,
+                "through_meeting_key": 1284,
+                "stage": "multitask_qr",
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert calls == [
+        {
+            "season": 2026,
+            "through_meeting_key": 1284,
+            "checkpoints": ("FP1", "FP2", "FP3", "Q"),
+            "stage": "multitask_qr",
+        }
+    ]
+    assert payload["action"] == "build-multitask-snapshots"
+    assert payload["snapshot_count"] == 12
+    assert payload["row_count"] == 84
+    assert payload["meeting_keys"] == [1281, 1282, 1284]
+
+
+def test_train_multitask_model_endpoint_creates_model_runs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def fake_train(ctx, **kwargs):
+        calls.append(kwargs)
+        return {
+            "status": "completed",
+            "stage": kwargs["stage"],
+            "season": kwargs["season"],
+            "manifest_path": str(tmp_path / "manifest.json"),
+            "meeting_keys": [1281, 1282, 1284],
+            "split_count": 1,
+            "model_run_ids": ["model-run-1"],
+            "model_run_count": 1,
+            "runs": [
+                {
+                    "model_run_id": "model-run-1",
+                    "test_meeting_key": 1284,
+                    "train_meeting_keys": [1281, 1282],
+                    "prediction_count": 28,
+                    "metrics": {"roi_pct": 0.12},
+                }
+            ],
+            "skipped": [],
+        }
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.model_workflow.train_multitask_walk_forward",
+        fake_train,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/train-multitask-model",
+            json={
+                "season": 2026,
+                "stage": "multitask_qr",
+                "min_train_gps": 2,
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert calls == [
+        {
+            "season": 2026,
+            "manifest_path": None,
+            "stage": "multitask_qr",
+            "min_train_gps": 2,
+        }
+    ]
+    assert payload["action"] == "train-multitask-model"
+    assert payload["model_run_ids"] == ["model-run-1"]
+    assert payload["runs"][0]["metrics"] == {"roi_pct": 0.12}
+
+
 def test_backfill_backtests_endpoint_serializes_worker_result(
     tmp_path: Path,
 ) -> None:
@@ -1056,6 +1264,38 @@ def test_run_paper_trade_endpoint_accepts_dynamic_ops_stage_code(tmp_path: Path)
     assert jobs[0]["id"] == payload["job_run_id"]
     assert jobs[0]["job_name"] == "run-paper-trade"
     assert jobs[0]["planned_inputs"]["gp_short_code"] == "miami_fp1_q"
+
+
+def test_cancel_paper_trade_session_marks_open_run_and_positions_cancelled(
+    tmp_path: Path,
+) -> None:
+    with build_test_client(tmp_path) as client:
+        response = client.post("/api/v1/paper-trading/sessions/pt-japan-open/cancel")
+        positions_response = client.get(
+            "/api/v1/paper-trading/sessions/pt-japan-open/positions"
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "cancelled"
+    assert payload["finished_at"] is not None
+    assert payload["summary_json"]["cancel_reason"] == "Cancelled by operator"
+    assert positions_response.status_code == 200
+    positions = positions_response.json()
+    assert positions[0]["status"] == "cancelled"
+    assert positions[0]["exit_time"] is not None
+
+
+def test_cancel_paper_trade_session_rejects_settled_run(tmp_path: Path) -> None:
+    with build_test_client(tmp_path) as client:
+        response = client.post("/api/v1/paper-trading/sessions/pt-japan-pre/cancel")
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 409
+    assert "Settled paper runs" in response.json()["detail"]
 
 
 def test_ingest_demo_endpoint_queues_worker_job(tmp_path: Path) -> None:
@@ -1469,6 +1709,78 @@ def test_execute_manual_live_paper_trade_endpoint_serializes_worker_payload(
     assert captured["min_edge"] == 0.07
     assert captured["max_spread"] == 0.03
     assert captured["bet_size"] == 12
+
+
+def test_run_manual_paper_trade_endpoint_serializes_worker_payload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_run_manual(*args, **kwargs):
+        captured.update(kwargs)
+        return {
+            "action": "run-manual-paper-trade",
+            "status": "ok",
+            "message": "Created your manual paper run with 1 pick(s).",
+            "gp_short_code": "japan_fp1_fp2",
+            "pt_session_id": "pt-manual-1",
+            "pick_count": 1,
+            "open_positions": 1,
+            "total_pnl": 0.0,
+            "log_path": "/tmp/manual-run.json",
+        }
+
+    monkeypatch.setattr(
+        "f1_polymarket_worker.weekend_ops.execute_manual_paper_trade_run",
+        fake_run_manual,
+    )
+
+    with build_test_client(tmp_path) as client:
+        response = client.post(
+            "/api/v1/actions/run-manual-paper-trade",
+            json={
+                "gp_short_code": "japan_fp1_fp2",
+                "bet_size": 12,
+                "observed_at_utc": "2026-03-27T06:20:00Z",
+                "picks": [
+                    {
+                        "market_id": "market-1",
+                        "token_id": "token-1",
+                        "model_run_id": "model-run-live",
+                        "snapshot_id": "snapshot-live",
+                        "side_label": "NO",
+                        "model_pick_side": "YES",
+                        "model_prob": 0.62,
+                        "market_price": 0.41,
+                    }
+                ],
+            },
+        )
+
+    app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["action"] == "run-manual-paper-trade"
+    assert payload["gp_short_code"] == "japan_fp1_fp2"
+    assert payload["pt_session_id"] == "pt-manual-1"
+    assert payload["pick_count"] == 1
+    assert captured["gp_short_code"] == "japan_fp1_fp2"
+    assert captured["bet_size"] == 12
+    assert captured["observed_at_utc"] == datetime(2026, 3, 27, 6, 20, tzinfo=timezone.utc)
+    assert captured["picks"] == [
+        {
+            "market_id": "market-1",
+            "token_id": "token-1",
+            "model_run_id": "model-run-live",
+            "snapshot_id": "snapshot-live",
+            "side_label": "NO",
+            "model_pick_side": "YES",
+            "model_prob": 0.62,
+            "market_price": 0.41,
+        }
+    ]
 
 
 def test_driver_affinity_report_endpoint_serializes_worker_payload(

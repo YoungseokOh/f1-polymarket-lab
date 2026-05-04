@@ -476,6 +476,96 @@ class RefreshLatestSessionResponse(BaseModel):
     artifacts_refreshed: list[ArtifactRefreshResponse] = Field(default_factory=list)
 
 
+class PromoteModelRunRequest(BaseModel):
+    model_run_id: str
+    stage: str
+
+
+class PromoteBestModelRunRequest(BaseModel):
+    stage: str
+
+
+class BuildMultitaskSnapshotsRequest(BaseModel):
+    season: int = 2026
+    through_meeting_key: int | None = None
+    checkpoints: list[str] = Field(default_factory=lambda: ["FP1", "FP2", "FP3", "Q"])
+    stage: str = "multitask_qr"
+
+
+class BuildMultitaskSnapshotsResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    stage: str
+    season: int
+    through_meeting_key: int | None = None
+    meeting_keys: list[int] = Field(default_factory=list)
+    completed_meetings: list[dict[str, object]] = Field(default_factory=list)
+    snapshot_ids: list[str] = Field(default_factory=list)
+    snapshot_count: int
+    row_count: int = 0
+    manifest_path: str | None = None
+    job_run_ids: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TrainMultitaskModelRequest(BaseModel):
+    season: int = 2026
+    manifest_path: str | None = None
+    stage: str = "multitask_qr"
+    min_train_gps: int = Field(default=2, ge=1)
+
+
+class MultitaskModelTrainingRunResponse(BaseModel):
+    model_run_id: str
+    test_meeting_key: int
+    train_meeting_keys: list[int] = Field(default_factory=list)
+    prediction_count: int
+    metrics: dict[str, object] = Field(default_factory=dict)
+
+
+class TrainMultitaskModelResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    stage: str
+    season: int
+    manifest_path: str
+    meeting_keys: list[int] = Field(default_factory=list)
+    split_count: int
+    model_run_ids: list[str] = Field(default_factory=list)
+    model_run_count: int
+    runs: list[MultitaskModelTrainingRunResponse] = Field(default_factory=list)
+    skipped: list[str] = Field(default_factory=list)
+
+
+class ScoreMultitaskSnapshotRequest(BaseModel):
+    snapshot_id: str
+    stage: str = "multitask_qr"
+
+
+class ScoreMultitaskSnapshotResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    stage: str
+    snapshot_id: str
+    model_run_id: str
+    source_model_run_id: str
+    artifact_path: str
+    prediction_count: int
+
+
+class PromoteModelRunResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    stage: str
+    promotion_id: str
+    model_run_id: str
+    candidate_count: int | None = None
+
+
 class CaptureLiveWeekendRequest(BaseModel):
     session_key: int
     market_ids: list[str] | None = None
@@ -563,6 +653,36 @@ class ExecuteManualLivePaperTradeResponse(BaseModel):
     edge: float
     side_label: str | None = None
     reason: str | None = None
+
+
+class ManualPaperTradePickRequest(BaseModel):
+    market_id: str
+    token_id: str | None = None
+    model_run_id: str | None = None
+    snapshot_id: str | None = None
+    side_label: str
+    model_pick_side: str | None = None
+    model_prob: float = Field(ge=0.0, le=1.0)
+    market_price: float = Field(ge=0.0, le=1.0)
+
+
+class RunManualPaperTradeRequest(BaseModel):
+    gp_short_code: str
+    picks: list[ManualPaperTradePickRequest] = Field(min_length=1, max_length=20)
+    bet_size: float = Field(default=10.0, gt=0.0, le=1000.0)
+    observed_at_utc: datetime | None = None
+
+
+class RunManualPaperTradeResponse(BaseModel):
+    action: str
+    status: str
+    message: str
+    gp_short_code: str
+    pt_session_id: str
+    pick_count: int
+    open_positions: int
+    total_pnl: float
+    log_path: str | None = None
 
 
 class RunBacktestRequest(BaseModel):
@@ -654,6 +774,7 @@ class WeekendCockpitStatusResponse(BaseModel):
     focus_status: str
     timeline_completed_codes: list[str]
     timeline_active_code: str | None
+    timeline_session_codes: list[str]
     source_session: F1SessionResponse | None
     target_session: F1SessionResponse | None
     latest_paper_session: PaperTradeSessionResponse | None

@@ -121,6 +121,10 @@ OPS_STAGE_TEMPLATES: dict[str, dict[str, Any]] = {
 }
 
 
+def normalize_ops_short_code(value: str) -> str:
+    return slugify(value).replace("-", "_")
+
+
 @dataclass(frozen=True, slots=True)
 class EffectiveOpsMeeting:
     id: str
@@ -467,7 +471,7 @@ def get_ops_stage_config(
     short_code: str,
     now: datetime | None = None,
 ) -> tuple[EffectiveOpsMeeting, GPConfig]:
-    requested = slugify(short_code).replace("-", "_")
+    requested = normalize_ops_short_code(short_code)
     seasons: list[int] = []
     try:
         seasons.append(resolve_ops_season(session, now=now))
@@ -501,16 +505,17 @@ def get_ops_stage_config(
 
 def _build_ops_stage_config(*, meeting: EffectiveOpsMeeting, suffix: str) -> GPConfig:
     template = OPS_STAGE_TEMPLATES[suffix]
-    snapshot_type = template["snapshot_type_factory"](meeting.ops_slug)
+    ops_slug = normalize_ops_short_code(meeting.ops_slug)
+    snapshot_type = template["snapshot_type_factory"](ops_slug)
     return GPConfig(
         name=meeting.meeting_name,
-        short_code=f"{meeting.ops_slug}_{suffix}",
+        short_code=f"{ops_slug}_{suffix}",
         meeting_key=meeting.meeting_key,
         season=meeting.season,
         target_session_code=template["target_session_code"],
         snapshot_type=snapshot_type,
-        snapshot_dataset=template["snapshot_dataset_factory"](meeting.ops_slug),
-        baseline_stage=template["baseline_stage_factory"](meeting.ops_slug),
+        snapshot_dataset=template["snapshot_dataset_factory"](ops_slug),
+        baseline_stage=template["baseline_stage_factory"](ops_slug),
         baseline_names=template["baseline_names"],
         report_slug=template["report_slug_factory"](meeting.season, meeting.meeting_slug),
         title_suffix=template["title_suffix"],

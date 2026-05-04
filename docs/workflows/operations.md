@@ -178,6 +178,12 @@ uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli build-<
 # Run baseline model
 uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli run-<gp>-sq-pole-baseline \
   --snapshot-id <SNAPSHOT_ID> --execute
+
+# Promote a live baseline policy after coverage/provenance checks pass.
+# This is separate from the realized-PnL research promotion gate because live SQ/Sprint stages
+# may need a validated operating baseline before the target session has labels.
+uv run --package f1-polymarket-worker python -m f1_polymarket_worker.cli promote-best-live-baseline-run \
+  --stage sq_pole_live_v1 --model-name hybrid --execute
 ```
 
 For multitask Q/R research, treat the commands as two separate layers:

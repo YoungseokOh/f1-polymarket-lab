@@ -53,10 +53,14 @@ def timestamp_date_variants(
     if value is None:
         return ()
     observed = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    utc_observed = observed.astimezone(timezone.utc)
     variants = [observed.date()]
+    utc_date = utc_observed.date()
+    if utc_date not in variants:
+        variants.append(utc_date)
     offset = parse_utc_offset(gmt_offset)
     if offset is not None:
-        local_date = (observed + offset).date()
+        local_date = (utc_observed + offset).date()
         if local_date not in variants:
             variants.append(local_date)
     return tuple(variants)

@@ -27,16 +27,31 @@ export function buildDashboardDemoIngestRequest(): IngestDemoRequest {
 
 export function buildLatestSessionRefreshRequest(
   meetingId: string,
-  latestEndedSession: RefreshedSessionSummary | null,
+  _latestEndedSession: RefreshedSessionSummary | null,
 ): RefreshLatestSessionRequest {
-  const isRaceSession = latestEndedSession?.sessionCode === "R";
   return {
     meeting_id: meetingId,
     search_fallback: false,
     discover_max_pages: 1,
     hydrate_market_history: false,
     sync_calendar: false,
-    hydrate_f1_session_data: !isRaceSession,
+    hydrate_f1_session_data: false,
+    include_extended_f1_data: false,
+    include_heavy_f1_data: false,
+    refresh_artifacts: false,
+  };
+}
+
+export function buildPaperTradingLocalRefreshRequest(
+  meetingId: string,
+): RefreshLatestSessionRequest {
+  return {
+    meeting_id: meetingId,
+    search_fallback: true,
+    discover_max_pages: 5,
+    hydrate_market_history: true,
+    sync_calendar: false,
+    hydrate_f1_session_data: false,
     include_extended_f1_data: false,
     include_heavy_f1_data: false,
     refresh_artifacts: false,

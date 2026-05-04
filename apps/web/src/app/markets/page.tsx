@@ -47,16 +47,59 @@ function groupByTaxonomy(markets: PolymarketMarket[]) {
   return groups;
 }
 
-export default async function MarketsPage() {
-  const marketsState = await loadResource(
-    () => sdk.markets({ limit: 250 }),
-    [],
-    "Market feed",
-  );
-  const allMarkets = marketsState.data;
-  const degradedMessages = collectResourceErrors([marketsState]);
+function compactMeetingToken(meetingName: string | null | undefined): string {
+  return (meetingName ?? "")
+    .replace(/^Formula 1\s+/i, "")
+    .replace(/^F1\s+/i, "")
+    .replace(/\s+Grand Prix$/i, "")
+    .trim()
+    .toLowerCase();
+}
 
-  const markets = allMarkets.filter((market) => market.taxonomy !== "other");
+function isCurrentMeetingMarket(
+  market: PolymarketMarket,
+  meetingName: string | null | undefined,
+): boolean {
+  const meetingToken = compactMeetingToken(meetingName);
+  return Boolean(
+    meetingToken && market.question.toLowerCase().includes(meetingToken),
+  );
+}
+
+export default async function MarketsPage() {
+  const [marketsState, readinessState] = await Promise.all([
+    loadResource(
+      () => sdk.markets({ limit: 1000, active: true, closed: false }),
+      [],
+      "Market feed",
+    ),
+    loadResource(
+      () => sdk.currentWeekendReadiness({ season: 2026 }),
+      null,
+      "Current weekend",
+    ),
+  ]);
+  const allMarkets = marketsState.data;
+  const readiness = readinessState.data;
+  const degradedMessages = collectResourceErrors([
+    marketsState,
+    readinessState,
+  ]);
+  const currentMeetingName =
+    readiness?.meeting?.meetingName ?? readiness?.selectedConfig.name ?? null;
+  const targetSessionCode =
+    readiness?.selectedConfig.target_session_code ??
+    readiness?.nextActiveSession?.sessionCode ??
+    null;
+
+  const markets = allMarkets.filter(
+    (market) =>
+      market.taxonomy !== "other" &&
+      market.active &&
+      !market.closed &&
+      market.targetSessionCode === targetSessionCode &&
+      isCurrentMeetingMarket(market, currentMeetingName),
+  );
   const activeMarkets = markets.filter(
     (market) => market.active && !market.closed,
   );
@@ -87,64 +130,44 @@ export default async function MarketsPage() {
       <div>
         <h1 className="text-xl font-bold text-white">Market board</h1>
         <p className="mt-1 max-w-3xl text-sm text-[#6b7280]">
-          Browse the F1 questions currently tracked on Polymarket, grouped by
-          market family and labeled with the session they are meant to settle
-          against.
+          Current Grand Prix markets only. Finished races and old sessions are
+          hidden from this default view.
         </p>
       </div>
 
       <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
         <StatCard
-          label="Tracked markets"
-          value={markets.length}
-          hint="F1-linked questions"
+          label="Current race"
+          value={currentMeetingName ?? "—"}
+          hint="Default market scope"
         />
         <StatCard
-          label="Open now"
+          label="Session"
+          value={formatSessionCodeLabel(targetSessionCode)}
+          hint="Markets shown below"
+        />
+        <StatCard
+          label="Open markets"
           value={activeMarkets.length}
-          hint="Markets still trading"
+          hint="Trading now"
         />
         <StatCard
           label="With prices"
           value={pricedMarkets.length}
           hint="Markets with a latest trade price"
         />
-        <StatCard
-          label="Total volume"
-          value={formatCompactUsd(totalVolume)}
-          hint="Combined traded volume"
-        />
       </section>
 
-      <Panel title="How to read this board" eyebrow="Quick guide">
-        <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
-            <p className="text-sm font-medium text-white">
-              Read the question first
-            </p>
-            <p className="mt-2 text-sm text-[#9ca3af]">
-              Every row starts with the exact Polymarket question, so you can
-              understand the bet without decoding taxonomy labels.
-            </p>
-          </div>
-          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
-            <p className="text-sm font-medium text-white">
-              Use the session badge as context
-            </p>
-            <p className="mt-2 text-sm text-[#9ca3af]">
-              The session badge tells you whether the market should settle from
-              practice, qualifying, sprint, or race results.
-            </p>
-          </div>
-          <div className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4">
-            <p className="text-sm font-medium text-white">
-              Price, volume, and liquidity are separate
-            </p>
-            <p className="mt-2 text-sm text-[#9ca3af]">
-              The price shows the latest implied YES probability, while volume
-              and liquidity show how actively the market is trading.
-            </p>
-          </div>
+      <Panel title="What you are seeing" eyebrow="Plain status">
+        <div className="grid gap-3 md:grid-cols-2">
+          <p className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4 text-sm text-[#9ca3af]">
+            This board is filtered to open {currentMeetingName ?? "current GP"}{" "}
+            {formatSessionCodeLabel(targetSessionCode)} markets.
+          </p>
+          <p className="rounded-lg border border-white/[0.05] bg-white/[0.03] p-4 text-sm text-[#9ca3af]">
+            Price is the latest YES price. Volume and liquidity show how active
+            each market is.
+          </p>
         </div>
       </Panel>
 
@@ -152,7 +175,11 @@ export default async function MarketsPage() {
         <div className="rounded-xl border border-white/[0.06] bg-gradient-to-br from-[#1e1e2e] to-[#1a1a28] p-8 text-center">
           <p className="text-sm text-[#6b7280]">
             No F1 markets are loaded yet.{" "}
-            <Link href="/" className="text-[#e10600] hover:underline">
+            <Link
+              href="/"
+              prefetch={false}
+              className="text-[#e10600] hover:underline"
+            >
               Run Sync F1 Markets
             </Link>{" "}
             to populate the board.
@@ -203,6 +230,7 @@ export default async function MarketsPage() {
                     <Link
                       key={market.id}
                       href={`/markets/${market.id}`}
+                      prefetch={false}
                       className={`flex items-center justify-between gap-4 px-5 py-4 pl-7 transition-colors hover:bg-white/[0.03] ${
                         index < sortedList.length - 1
                           ? "border-b border-white/[0.03]"

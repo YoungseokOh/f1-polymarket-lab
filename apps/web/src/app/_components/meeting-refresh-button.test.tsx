@@ -92,7 +92,7 @@ describe("MeetingRefreshButton", () => {
       discover_max_pages: 1,
       hydrate_market_history: false,
       sync_calendar: false,
-      hydrate_f1_session_data: true,
+      hydrate_f1_session_data: false,
       include_extended_f1_data: false,
       include_heavy_f1_data: false,
       refresh_artifacts: false,
