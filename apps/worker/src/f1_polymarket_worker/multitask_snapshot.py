@@ -59,6 +59,30 @@ class CheckpointWindow:
     visible_sessions: tuple[str, ...]
 
 
+def _driver_key_from_id(driver_id: str | None, by_id: dict[str, F1Driver]) -> str | None:
+    """Normalized-name identity for a result driver_id.
+
+    F1 results are keyed by jolpica slug ids (``driver:russell``) while market
+    matching resolves to openf1 numeric ids (``driver:63``). Both share the same
+    normalized full name, so we join results to markets by that name instead of
+    the raw id. Falls back to the id slug when the F1Driver row has no full_name.
+    """
+    if driver_id is None:
+        return None
+    driver = by_id.get(driver_id)
+    name = (driver.full_name if driver is not None else None) or driver_id.split(":", 1)[-1]
+    key = _normalize_name(name or "")
+    return key or None
+
+
+def _driver_key_from_obj(driver: F1Driver | None) -> str | None:
+    if driver is None:
+        return None
+    name = driver.full_name or driver.id.split(":", 1)[-1]
+    key = _normalize_name(name or "")
+    return key or None
+
+
 def _checkpoint_window(checkpoint: str) -> CheckpointWindow:
     windows = {
         "FP1": ("FP1",),
@@ -257,7 +281,8 @@ def _build_market_family_rows(
         season=season,
         target_session_code=target_session_code,
     )
-    result_maps = _load_result_maps(ctx, sessions_by_code)
+    by_id = {driver.id: driver for driver in drivers}
+    result_maps = _load_result_maps(ctx, sessions_by_code, by_id)
     target_results = result_maps.get(target_session_code, {})
     rows: list[dict[str, Any]] = []
 
@@ -335,7 +360,13 @@ def _build_market_family_rows(
 def _load_result_maps(
     ctx: PipelineContext,
     sessions_by_code: dict[str, Any],
+    by_id: dict[str, F1Driver],
 ) -> dict[str, dict[str, F1SessionResult]]:
+    """Build per-session result maps keyed by normalized driver name.
+
+    Keying by name (rather than raw driver_id) lets us join jolpica-sourced
+    results to openf1-matched market drivers despite their differing id schemes.
+    """
     result_maps: dict[str, dict[str, F1SessionResult]] = {}
     for code in ("FP1", "FP2", "FP3", "Q", "R"):
         session = sessions_by_code.get(code)
@@ -345,7 +376,13 @@ def _load_result_maps(
         rows = ctx.db.scalars(
             select(F1SessionResult).where(F1SessionResult.session_id == session.id)
         ).all()
-        result_maps[code] = {row.driver_id: row for row in rows if row.driver_id is not None}
+        mapped: dict[str, F1SessionResult] = {}
+        for row in rows:
+            key = _driver_key_from_id(row.driver_id, by_id)
+            if key is None:
+                continue
+            mapped[key] = row
+        result_maps[code] = mapped
     return result_maps
 
 
@@ -404,11 +441,11 @@ def _result_for_checkpoint(
     result_maps: dict[str, dict[str, F1SessionResult]],
     *,
     session_code: str,
-    driver_id: str | None,
+    driver_key: str | None,
 ) -> F1SessionResult | None:
-    if driver_id is None or session_code not in checkpoint.visible_sessions:
+    if driver_key is None or session_code not in checkpoint.visible_sessions:
         return None
-    return result_maps.get(session_code, {}).get(driver_id)
+    return result_maps.get(session_code, {}).get(driver_key)
 
 
 def _trade_summary(
@@ -451,32 +488,33 @@ def _build_binary_market_row(
     driver_id = getattr(matched_driver, "id", None)
     if driver_id is None:
         return None
+    driver_key = _driver_key_from_obj(matched_driver)
 
     fp1_result = _result_for_checkpoint(
         checkpoint,
         result_maps,
         session_code="FP1",
-        driver_id=driver_id,
+        driver_key=driver_key,
     )
     fp2_result = _result_for_checkpoint(
         checkpoint,
         result_maps,
         session_code="FP2",
-        driver_id=driver_id,
+        driver_key=driver_key,
     )
     fp3_result = _result_for_checkpoint(
         checkpoint,
         result_maps,
         session_code="FP3",
-        driver_id=driver_id,
+        driver_key=driver_key,
     )
     q_result = _result_for_checkpoint(
         checkpoint,
         result_maps,
         session_code="Q",
-        driver_id=driver_id,
+        driver_key=driver_key,
     )
-    target_result = target_results.get(driver_id)
+    target_result = target_results.get(driver_key) if driver_key else None
     trade_count, last_trade_age_seconds = _trade_summary(
         trades=trades,
         as_of_ts=point.observed_at_utc,
@@ -530,11 +568,13 @@ def _build_h2h_rows(
     if driver_a is None or driver_b is None:
         return []
 
+    key_a = _driver_key_from_obj(driver_a)
+    key_b = _driver_key_from_obj(driver_b)
     q_result_a = _result_for_checkpoint(
-        checkpoint, result_maps, session_code="Q", driver_id=driver_a.id
+        checkpoint, result_maps, session_code="Q", driver_key=key_a
     )
-    target_result_a = result_maps.get(target_session_code, {}).get(driver_a.id)
-    target_result_b = result_maps.get(target_session_code, {}).get(driver_b.id)
+    target_result_a = result_maps.get(target_session_code, {}).get(key_a) if key_a else None
+    target_result_b = result_maps.get(target_session_code, {}).get(key_b) if key_b else None
     trade_count, last_trade_age_seconds = _trade_summary(
         trades=trades,
         as_of_ts=point.observed_at_utc,

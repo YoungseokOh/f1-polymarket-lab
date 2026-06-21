@@ -61,7 +61,13 @@ def _default_feature_cols(df: pl.DataFrame) -> list[str]:
 
 
 def _feature_tensor(df: pl.DataFrame, feature_cols: list[str]) -> torch.Tensor:
-    return torch.tensor(df.select(feature_cols).fill_null(0).rows(), dtype=torch.float32)
+    # Cast to Float64 before filling so all-null feature columns (inferred as the
+    # Null dtype, e.g. qualifying_position in a fold with no qualifying results)
+    # are coerced to numeric and fill_null can replace their Nones with 0.
+    selected = df.select(
+        [pl.col(col).cast(pl.Float64, strict=False) for col in feature_cols]
+    ).fill_null(0.0)
+    return torch.tensor(selected.rows(), dtype=torch.float32)
 
 
 def _label_tensor(df: pl.DataFrame) -> torch.Tensor:

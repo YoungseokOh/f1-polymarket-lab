@@ -21,6 +21,9 @@ from f1_polymarket_lab.storage.models import (
     PolymarketTrade,
 )
 from f1_polymarket_worker.multitask_snapshot import (
+    _driver_key_from_id,
+    _driver_key_from_obj,
+    _load_result_maps,
     build_multitask_checkpoint_rows,
     build_multitask_feature_snapshots,
 )
@@ -702,6 +705,74 @@ def test_build_multitask_checkpoint_rows_emits_all_supported_families(
     families = {row["target_market_family"] for row in rows if row["as_of_checkpoint"] == "Q"}
 
     assert families == {"constructor_pole", "h2h", "pole", "winner"}
+
+
+def test_driver_key_helpers_unify_jolpica_and_openf1_id_schemes() -> None:
+    # jolpica results key drivers by slug id (driver:russell); market matching
+    # resolves to openf1 numeric ids (driver:63). Both must collapse to one key.
+    slug_driver = F1Driver(id="driver:russell", full_name="George Russell", raw_payload={})
+    numeric_driver = F1Driver(id="driver:63", full_name="George RUSSELL", raw_payload={})
+    by_id = {slug_driver.id: slug_driver, numeric_driver.id: numeric_driver}
+
+    assert _driver_key_from_id("driver:russell", by_id) == "georgerussell"
+    assert _driver_key_from_obj(numeric_driver) == "georgerussell"
+    assert _driver_key_from_id("driver:russell", by_id) == _driver_key_from_obj(numeric_driver)
+
+    # A name-less jolpica result driver falls back to its id slug, which still
+    # normalizes to the same key as the named openf1 driver.
+    nameless = F1Driver(id="driver:max-verstappen", full_name=None, raw_payload={})
+    named = F1Driver(id="driver:1", full_name="Max VERSTAPPEN", raw_payload={})
+    assert _driver_key_from_id("driver:max-verstappen", {nameless.id: nameless}) == "maxverstappen"
+    assert _driver_key_from_obj(named) == "maxverstappen"
+
+
+def test_load_result_maps_keys_results_by_normalized_name(tmp_path: Path) -> None:
+    session, context = build_context(tmp_path)
+    meeting = F1Meeting(
+        id="meeting-x",
+        meeting_key=-202607,
+        season=2026,
+        meeting_name="Barcelona Grand Prix",
+        raw_payload={},
+    )
+    q = F1Session(
+        id="session-qx",
+        meeting_id=meeting.id,
+        session_key=99,
+        session_name="Qualifying",
+        session_code="Q",
+        date_start_utc=datetime(2026, 6, 13, 13, 0, tzinfo=timezone.utc),
+        date_end_utc=datetime(2026, 6, 13, 13, 0, tzinfo=timezone.utc),
+        raw_payload={},
+    )
+    # Result is keyed by the jolpica slug id; the openf1 numeric id is what market
+    # matching would return for the same driver.
+    slug_driver = F1Driver(
+        id="driver:russell", driver_number=63, full_name="George Russell", raw_payload={}
+    )
+    numeric_driver = F1Driver(
+        id="driver:63", driver_number=63, full_name="George RUSSELL", raw_payload={}
+    )
+    session.add_all([meeting, q, slug_driver, numeric_driver])
+    session.add(
+        F1SessionResult(
+            id="qx-russell",
+            session_id=q.id,
+            driver_id="driver:russell",
+            position=1,
+            raw_payload={},
+        )
+    )
+    session.commit()
+
+    by_id = {slug_driver.id: slug_driver, numeric_driver.id: numeric_driver}
+    result_maps = _load_result_maps(context, {"Q": q}, by_id)
+
+    # Retrievable via the numeric driver's key even though the row was stored
+    # under the slug id — this is the cross-scheme label join that was broken.
+    key = _driver_key_from_obj(numeric_driver)
+    assert key in result_maps["Q"]
+    assert result_maps["Q"][key].position == 1
 
 
 def test_build_multitask_feature_snapshots_persists_manifest_and_rows(

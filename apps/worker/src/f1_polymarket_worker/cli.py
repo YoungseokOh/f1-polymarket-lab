@@ -1083,7 +1083,7 @@ def train_multitask_walk_forward_command(
 ) -> None:
     """Train the shared-encoder multitask model across walk-forward GP splits."""
     import json
-    from datetime import datetime
+    from datetime import datetime, timezone
     from pathlib import Path
 
     import polars as pl_module
@@ -1116,12 +1116,33 @@ def train_multitask_walk_forward_command(
             return value.isoformat()
         return str(value)
 
+    def earliest_as_of(rows: list[dict[str, object]]) -> datetime:
+        earliest: datetime | None = None
+        for row in rows:
+            path = str(row.get("path") or "")
+            if not path:
+                continue
+            try:
+                frame = pl_module.read_parquet(path, columns=["as_of_ts"])
+            except Exception:
+                continue
+            if frame.height == 0 or "as_of_ts" not in frame.columns:
+                continue
+            candidate = frame["as_of_ts"].min()
+            if isinstance(candidate, datetime) and (earliest is None or candidate < earliest):
+                earliest = candidate
+        return earliest if earliest is not None else datetime.max.replace(tzinfo=timezone.utc)
+
     manifest_payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
     grouped: dict[int, list[dict[str, object]]] = {}
     for row in manifest_payload.get("snapshots", []):
         grouped.setdefault(int(row["meeting_key"]), []).append(row)
 
-    meeting_keys = sorted(grouped)
+    # Order chronologically by earliest as-of timestamp, not by meeting_key.
+    # Synthetic jolpica meetings use negative round-encoded keys (e.g. -202607 =
+    # 2026 round 7), so integer sorting reverses the season and would train on
+    # the future to test the past, breaking the walk-forward boundary.
+    meeting_keys = sorted(grouped, key=lambda mk: (earliest_as_of(grouped[mk]), mk))
     splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
     if not splits:
         typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
@@ -1172,8 +1193,11 @@ def train_multitask_walk_forward_command(
                 )
                 continue
 
-            train_df = pl_module.concat(train_frames)
-            test_df = pl_module.concat(test_frames)
+            # vertical_relaxed promotes all-null columns (e.g. qualifying_position in
+            # pre-Q checkpoints, inferred as Null dtype) to the supertype seen in
+            # other checkpoints (Int64), instead of raising a SchemaError on concat.
+            train_df = pl_module.concat(train_frames, how="vertical_relaxed")
+            test_df = pl_module.concat(test_frames, how="vertical_relaxed")
 
             model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
             artifact_dir = model_artifact_dir(

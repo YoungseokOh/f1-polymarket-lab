@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -144,7 +144,17 @@ def train_multitask_walk_forward(
         for meeting_key, rows in grouped.items()
         if row_counts_by_meeting.get(meeting_key, 0) > 0
     }
-    meeting_keys = sorted(grouped)
+    # Order meetings chronologically by their earliest as-of timestamp rather than
+    # by meeting_key. Synthetic jolpica meetings use negative round-encoded keys
+    # (e.g. -202607 = 2026 round 7), so integer sorting would reverse the season
+    # and break the time-aware walk-forward boundary.
+    meeting_keys = sorted(
+        grouped,
+        key=lambda meeting_key: (
+            _earliest_as_of_ts(grouped[meeting_key]),
+            meeting_key,
+        ),
+    )
     splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
     if not splits:
         raise ValueError(
@@ -181,8 +191,11 @@ def train_multitask_walk_forward(
             skipped.append(f"meeting_key={split.test_meeting_key}: no non-empty test rows")
             continue
 
-        train_df = pl.concat(train_frames)
-        test_df = pl.concat(test_frames)
+        # vertical_relaxed promotes all-null columns (e.g. qualifying_position in
+        # pre-Q checkpoints, inferred as Null dtype) to the supertype seen in other
+        # checkpoints (Int64), instead of raising a SchemaError on concat.
+        train_df = pl.concat(train_frames, how="vertical_relaxed")
+        test_df = pl.concat(test_frames, how="vertical_relaxed")
         model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
         artifact_dir = model_artifact_dir(
             data_root=Path(ctx.settings.data_root),
@@ -354,6 +367,30 @@ def _snapshot_ids_row_count(ctx: PipelineContext, snapshot_ids: list[str]) -> in
         if snapshot is not None and snapshot.row_count is not None:
             row_count += int(snapshot.row_count)
     return row_count
+
+
+def _earliest_as_of_ts(rows: list[dict[str, Any]]) -> datetime:
+    """Earliest as-of timestamp across a meeting's snapshot parquets.
+
+    Used to order walk-forward folds chronologically regardless of meeting_key
+    sign. Falls back to datetime.max when no timestamp can be read so such
+    meetings sort last (and are disambiguated by the secondary meeting_key sort).
+    """
+    earliest: datetime | None = None
+    for row in rows:
+        path = str(row.get("path") or "")
+        if not path:
+            continue
+        try:
+            frame = pl.read_parquet(path, columns=["as_of_ts"])
+        except Exception:
+            continue
+        if frame.height == 0 or "as_of_ts" not in frame.columns:
+            continue
+        candidate = frame["as_of_ts"].min()
+        if isinstance(candidate, datetime) and (earliest is None or candidate < earliest):
+            earliest = candidate
+    return earliest if earliest is not None else datetime.max.replace(tzinfo=timezone.utc)
 
 
 def _snapshot_path_row_count(path: str) -> int:

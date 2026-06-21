@@ -176,6 +176,14 @@ def log_run_to_mlflow(
             )
         return flattened
 
+    def sanitize_name(name: str) -> str:
+        # MLflow restricts param/metric names to alphanumerics and _ - . space : /
+        # Calibration bucket keys like "0-10%" carry a '%', so map disallowed
+        # characters to underscores before logging.
+        return "".join(
+            ch if (ch.isalnum() or ch in "_-. :/") else "_" for ch in name
+        )
+
     mlflow.set_tracking_uri(tracking_uri)
     experiment = mlflow.get_experiment_by_name(experiment_name)
     experiment_id = (
@@ -185,13 +193,16 @@ def log_run_to_mlflow(
     )
 
     with mlflow.start_run(experiment_id=experiment_id, run_name=run_name, tags=tags or {}) as run:
-        flat_params = flatten_values(params, numeric_only=False)
+        flat_params = {
+            sanitize_name(key): value
+            for key, value in flatten_values(params, numeric_only=False).items()
+        }
         if flat_params:
             mlflow.log_params(flat_params)
 
         flat_metrics = flatten_values(metrics, numeric_only=True)
         for key, value in flat_metrics.items():
-            mlflow.log_metric(key, value)
+            mlflow.log_metric(sanitize_name(key), value)
 
         mlflow.log_text(
             json.dumps({"params": params, "metrics": metrics}, indent=2, default=str),

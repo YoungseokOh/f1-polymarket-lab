@@ -11,6 +11,7 @@ from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.models.multitask_model import MultitaskModelConfig, MultitaskTabularModel
 from f1_polymarket_lab.models.multitask_trainer import (
     MultitaskTrainerConfig,
+    _feature_tensor,
     score_multitask_frame,
     train_multitask_split,
 )
@@ -20,6 +21,24 @@ from f1_polymarket_worker.cli import app
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from typer.testing import CliRunner
+
+
+def test_feature_tensor_coerces_all_null_columns() -> None:
+    # A pre-Q checkpoint fold can produce an all-null qualifying_position column,
+    # inferred by polars as the Null dtype. fill_null(0) cannot fill a Null column,
+    # so features must be cast to Float64 first.
+    frame = pl.DataFrame(
+        {
+            "entry_yes_price": [0.3, 0.4],
+            "qualifying_position": [None, None],
+        }
+    )
+    assert frame["qualifying_position"].dtype == pl.Null
+
+    tensor = _feature_tensor(frame, ["entry_yes_price", "qualifying_position"])
+
+    assert tensor.shape == (2, 2)
+    assert torch.equal(tensor[:, 1], torch.zeros(2))
 
 
 def test_multitask_model_returns_all_heads() -> None:
