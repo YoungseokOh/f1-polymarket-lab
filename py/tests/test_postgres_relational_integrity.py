@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import pytest
 from f1_polymarket_lab.storage.models import (
+    EntityMappingF1ToPolymarket,
     F1Lap,
     F1Meeting,
     F1Session,
+    MappingCandidate,
     PolymarketEvent,
     PolymarketMarket,
 )
@@ -88,3 +90,36 @@ def test_polymarket_market_requires_existing_event_on_postgres(postgres_engine: 
 
         stored_market_ids = session.scalars(select(PolymarketMarket.id)).all()
         assert stored_market_ids == ["market-1"]
+
+
+def test_mapping_ids_accept_composite_keys_on_postgres(postgres_engine: Engine) -> None:
+    # reconcile_mappings builds ids of the form "{market_id}:{session_id}" where each
+    # component is String(64). These exceed the original UUID-length (36) limit and used
+    # to fail with StringDataRightTruncation, rolling back the whole reconcile batch.
+    long_market_id = "polymarket-market-" + "9" * 46  # 64 chars
+    long_session_id = "session:historical:2026:10:" + "race" * 9 + "x"  # 64 chars
+    composite_id = f"{long_market_id}:{long_session_id}"  # 129 chars
+    assert len(composite_id) > 36
+
+    with Session(postgres_engine) as session:
+        session.add(
+            MappingCandidate(
+                id=composite_id,
+                candidate_type="driver_podium",
+                confidence=0.89,
+                matched_by="session_code_time_window",
+                status="candidate",
+            )
+        )
+        session.add(
+            EntityMappingF1ToPolymarket(
+                id=composite_id,
+                mapping_type="driver_podium",
+                confidence=0.89,
+                matched_by="session_code_time_window",
+            )
+        )
+        session.commit()
+
+        assert session.get(MappingCandidate, composite_id) is not None
+        assert session.get(EntityMappingF1ToPolymarket, composite_id) is not None

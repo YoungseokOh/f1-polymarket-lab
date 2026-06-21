@@ -813,7 +813,9 @@ class MarketTaxonomyLabel(Base):
 class MappingCandidate(Base):
     __tablename__ = "mapping_candidates"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    # Composite keys of the form "{market_id}:{session_id}" can reach ~129 chars
+    # (each component is String(64)); store with headroom instead of UUID length.
+    id: Mapped[str] = mapped_column(String(160), primary_key=True, default=uuid_str)
     f1_meeting_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("f1_meetings.id", ondelete="CASCADE"),
@@ -877,7 +879,9 @@ class ManualMappingOverride(Base):
 class EntityMappingF1ToPolymarket(Base):
     __tablename__ = "entity_mapping_f1_to_polymarket"
 
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=uuid_str)
+    # Shares the "{market_id}:{session_id}" / "override:{market_id}" key space with
+    # MappingCandidate, which can reach ~129 chars; store with headroom.
+    id: Mapped[str] = mapped_column(String(160), primary_key=True, default=uuid_str)
     f1_meeting_id: Mapped[str | None] = mapped_column(
         String(64),
         ForeignKey("f1_meetings.id", ondelete="CASCADE"),
