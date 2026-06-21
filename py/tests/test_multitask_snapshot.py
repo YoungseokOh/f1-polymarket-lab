@@ -745,6 +745,22 @@ def test_driver_key_helpers_unify_jolpica_and_openf1_id_schemes() -> None:
     assert _driver_key_from_obj(named) == "maxverstappen"
 
 
+def test_driver_key_uses_acronym_to_bridge_name_aliases() -> None:
+    # jolpica "Andrea Kimi Antonelli" vs openf1 "Kimi ANTONELLI" normalize to
+    # different names but share the FIA acronym (ANT), which must bridge them so
+    # the label join is not lost.
+    jolpica = F1Driver(
+        id="driver:antonelli", driver_number=12, name_acronym="ANT",
+        full_name="Andrea Kimi Antonelli", raw_payload={},
+    )
+    openf1 = F1Driver(
+        id="driver:12", driver_number=12, name_acronym="ANT",
+        full_name="Kimi ANTONELLI", raw_payload={},
+    )
+    assert _driver_key_from_id("driver:antonelli", {jolpica.id: jolpica}) == "ant"
+    assert _driver_key_from_obj(openf1) == "ant"
+
+
 def test_load_result_maps_keys_results_by_normalized_name(tmp_path: Path) -> None:
     session, context = build_context(tmp_path)
     meeting = F1Meeting(

@@ -59,28 +59,36 @@ class CheckpointWindow:
     visible_sessions: tuple[str, ...]
 
 
-def _driver_key_from_id(driver_id: str | None, by_id: dict[str, F1Driver]) -> str | None:
-    """Normalized-name identity for a result driver_id.
+def _driver_identity(driver: F1Driver | None, *, fallback: str | None) -> str | None:
+    """Stable cross-scheme driver key.
 
-    F1 results are keyed by jolpica slug ids (``driver:russell``) while market
-    matching resolves to openf1 numeric ids (``driver:63``). Both share the same
-    normalized full name, so we join results to markets by that name instead of
-    the raw id. Falls back to the id slug when the F1Driver row has no full_name.
+    F1 results are keyed by jolpica slug ids (``driver:antonelli``) while market
+    matching resolves to openf1 numeric ids (``driver:12``). The two schemes share
+    the FIA 3-letter acronym (``ANT``) and driver number even when full_name differs
+    ("Andrea Kimi Antonelli" vs "Kimi ANTONELLI"), so we key on the acronym first,
+    then full name, then the id slug. This recovers labels that a name-only join
+    drops on alias mismatches.
     """
+    acronym = getattr(driver, "name_acronym", None) if driver is not None else None
+    full_name = getattr(driver, "full_name", None) if driver is not None else None
+    slug = fallback.split(":", 1)[-1] if fallback else None
+    for candidate in (acronym, full_name, slug):
+        key = _normalize_name(candidate or "")
+        if key:
+            return key
+    return None
+
+
+def _driver_key_from_id(driver_id: str | None, by_id: dict[str, F1Driver]) -> str | None:
     if driver_id is None:
         return None
-    driver = by_id.get(driver_id)
-    name = (driver.full_name if driver is not None else None) or driver_id.split(":", 1)[-1]
-    key = _normalize_name(name or "")
-    return key or None
+    return _driver_identity(by_id.get(driver_id), fallback=driver_id)
 
 
 def _driver_key_from_obj(driver: F1Driver | None) -> str | None:
     if driver is None:
         return None
-    name = driver.full_name or driver.id.split(":", 1)[-1]
-    key = _normalize_name(name or "")
-    return key or None
+    return _driver_identity(driver, fallback=getattr(driver, "id", None))
 
 
 def _checkpoint_window(checkpoint: str) -> CheckpointWindow:

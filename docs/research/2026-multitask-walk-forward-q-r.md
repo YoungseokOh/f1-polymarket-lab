@@ -47,31 +47,34 @@ rounds (Austrian, British, Belgian) have price history but no results yet.
 - **Time-aware walk-forward** ordered by earliest as-of timestamp (not meeting_key,
   which is negative/round-encoded for jolpica meetings and would otherwise reverse
   the season).
-- **Labels join** across the jolpica/OpenF1 driver-id schemes by normalized driver
-  name. Rows whose matched driver has no target result (name-alias miss or
-  non-starter) are **dropped, not labeled 0**, so no false negatives are fabricated.
-- Snapshots after fixes: ~50 rows per FP checkpoint (18 pole + 18 winner + 14 h2h),
+- **Labels join** across the jolpica/OpenF1 driver-id schemes by the FIA 3-letter
+  acronym (e.g. `ANT`), which is stable across both schemes even when full_name
+  differs ("Andrea Kimi Antonelli" vs "Kimi ANTONELLI"); it falls back to
+  normalized name, then id slug. Rows whose matched driver still has no target
+  result are **dropped, not labeled 0**, so no false negatives are fabricated.
+  (Verified there are no acronym collisions among each session's participants.)
+- Snapshots after fixes: ~52 rows per FP checkpoint (20 pole + 20 winner + 12 h2h),
   32 rows at the Q checkpoint (winner + h2h only).
 
 ### Walk-forward folds (out-of-sample)
 
 | Fold | Train | Test | log_loss | Brier | ECE |
 |------|-------|------|----------|-------|-----|
-| 1 | Canadian | Monaco | **0.281** | **0.081** | 0.124 |
-| 2 | Canadian + Monaco | Barcelona | **0.449** | **0.121** | 0.079 |
+| 1 | Canadian | Monaco | **0.344** | **0.107** | 0.061 |
+| 2 | Canadian + Monaco | Barcelona | **0.338** | **0.104** | 0.047 |
 
-Fold 2 degrades on log_loss, consistent with a 2-GP training set and a single added
-weekend. Both folds are genuinely out-of-sample and chronological. (Numbers shifted
-from the first draft after removing Q-checkpoint pole leakage and false-negative
-labels.)
+Both folds are genuinely out-of-sample and chronological. Fold 1 is the harder test
+(a single sprint-weekend training GP against a Monaco that now carries a real pole
+positive, recovered via the acronym join); Fold 2 — trained on two GPs whose
+positives are now intact — is well-calibrated (ECE 0.047).
 
 ## Error analysis (Fold 2 — Barcelona, by market family)
 
 | Family | rows | log_loss | Brier | Notes |
 |--------|------|----------|-------|-------|
-| pole | 54 | 0.273 | 0.055 | sharpest head; favorite-driven |
-| winner | 72 | 0.358 | 0.055 | well-separated on the field |
-| h2h | 56 | 0.736 | 0.270 | near coin-flip (≈ 0.25 baseline); weakest head |
+| pole | 60 | 0.205 | 0.048 | sharpest head; favorite-driven |
+| winner | 80 | 0.201 | 0.048 | well-separated on the field |
+| h2h | 48 | 0.731 | 0.268 | near coin-flip (≈ 0.25 baseline); weakest head |
 
 The h2h head is the weakest (Brier ≈ 0.27) and is the priority for the next
 iteration, consistent with the modeling order (FP2/FP3 head-to-head first).
@@ -129,14 +132,15 @@ Landed after the pro/con review:
 - **De-duplicated training path**: the CLI now delegates to
   `model_workflow.train_multitask_walk_forward` (and reuses its chronological
   ordering helper for plan-only), so the two implementations can no longer diverge.
+- **Acronym-based driver identity**: the label join keys on the FIA acronym, which
+  bridges the jolpica/OpenF1 name aliases that previously dropped rows (recovered
+  Monaco's pole/winner positives and grew pole/winner to 20 rows/GP).
 
 ## Next steps
 
 1. Capture executable quotes to enable the PnL backtest (above).
 2. Strengthen the h2h head (richer FP2/FP3 pace deltas).
 3. Extend coverage as more 2026 rounds complete with retained price history.
-4. Resolve the Antonelli-style name-alias gap (jolpica "Andrea Kimi Antonelli" vs
-   market "Kimi Antonelli"). It no longer corrupts labels (the row is now dropped),
-   but the lost positives shrink an already small dataset — a driver-identity
-   mapping (non-name key) would recover them and also de-risk the jolpica/OpenF1
-   join more broadly.
+4. The Antonelli-style name-alias gap is resolved via the acronym join (positives
+   recovered). A fuller driver-identity table (number + acronym + name) would
+   harden the jolpica/OpenF1 mapping beyond modeling, for ingestion/reconcile too.
