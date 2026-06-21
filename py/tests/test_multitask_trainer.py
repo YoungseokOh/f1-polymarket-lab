@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from pathlib import Path
 
+import numpy as np
 import polars as pl
 import pytest
 import torch
@@ -11,6 +12,8 @@ from f1_polymarket_lab.common.settings import Settings
 from f1_polymarket_lab.models.multitask_model import MultitaskModelConfig, MultitaskTabularModel
 from f1_polymarket_lab.models.multitask_trainer import (
     MultitaskTrainerConfig,
+    _evaluate_subset,
+    _executable_prices,
     _feature_tensor,
     score_multitask_frame,
     train_multitask_split,
@@ -39,6 +42,29 @@ def test_feature_tensor_coerces_all_null_columns() -> None:
 
     assert tensor.shape == (2, 2)
     assert torch.equal(tensor[:, 1], torch.zeros(2))
+
+
+def test_executable_prices_uses_best_ask_and_nans_missing() -> None:
+    frame = pl.DataFrame({"entry_best_ask": [0.32, None]})
+    prices = _executable_prices(frame)
+    assert prices[0] == 0.32
+    assert np.isnan(prices[1])
+    # Missing column degrades to all-NaN rather than raising.
+    assert np.isnan(_executable_prices(pl.DataFrame({"x": [1, 2]}))).all()
+
+
+def test_evaluate_subset_places_no_bets_without_executable_price() -> None:
+    # Midpoint-only data (no best_ask) must yield zero bets — midpoint PnL is barred.
+    metrics = _evaluate_subset(
+        y_true=np.array([1.0, 0.0]),
+        y_prob=np.array([0.9, 0.1]),
+        prices=np.array([np.nan, np.nan]),
+        min_edge=0.05,
+    )
+    assert metrics["bet_count"] == 0
+    assert metrics["roi_pct"] is None
+    # Calibration metrics are still computed from probabilities.
+    assert metrics["brier_score"] is not None
 
 
 def test_multitask_model_returns_all_heads() -> None:
@@ -276,8 +302,10 @@ def test_train_multitask_walk_forward_cli_execute_persists_all_checkpoints(
         lambda: Settings(data_root=tmp_path),
     )
     monkeypatch.setattr("f1_polymarket_worker.cli.db_session", fake_db_session)
+    # The CLI delegates to model_workflow, which binds log_run_to_mlflow at import
+    # time, so patch the name as seen there.
     monkeypatch.setattr(
-        "f1_polymarket_worker.model_registry.log_run_to_mlflow",
+        "f1_polymarket_worker.model_workflow.log_run_to_mlflow",
         lambda **kwargs: "mlflow-test-run",
     )
 

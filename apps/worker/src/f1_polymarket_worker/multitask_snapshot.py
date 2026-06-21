@@ -110,6 +110,12 @@ def build_multitask_checkpoint_rows(
     window = _checkpoint_window(checkpoint)
     rows: list[dict[str, Any]] = []
     for target_session_code in ("Q", "R"):
+        # A checkpoint that already observes the target session cannot predict it:
+        # the Q checkpoint sees qualifying, so building Q-target (pole) rows there
+        # leaks the label and produces an inverted entry window. Predict Q from the
+        # practice checkpoints only; the R target is never in the visible window.
+        if target_session_code in window.visible_sessions:
+            continue
         try:
             rows.extend(
                 _build_market_family_rows(
@@ -515,6 +521,11 @@ def _build_binary_market_row(
         driver_key=driver_key,
     )
     target_result = target_results.get(driver_key) if driver_key else None
+    if target_result is None:
+        # No result for this driver under the joined name key (e.g. a name-alias
+        # mismatch or a non-starter). Drop the row rather than emit a false
+        # label_yes=0, which would otherwise corrupt an actual winner into a loss.
+        return None
     trade_count, last_trade_age_seconds = _trade_summary(
         trades=trades,
         as_of_ts=point.observed_at_utc,
@@ -546,7 +557,7 @@ def _build_binary_market_row(
         "fp3_gap_to_leader_seconds": _result_gap_seconds(fp3_result) if fp3_result else None,
         "qualifying_position": getattr(q_result, "position", None),
         "qualifying_gap_to_pole_seconds": _result_gap_seconds(q_result) if q_result else None,
-        "label_yes": int(getattr(target_result, "position", None) == 1) if target_result else 0,
+        "label_yes": int(getattr(target_result, "position", None) == 1),
         **_checkpoint_flags(checkpoint),
     }
 
@@ -575,6 +586,10 @@ def _build_h2h_rows(
     )
     target_result_a = result_maps.get(target_session_code, {}).get(key_a) if key_a else None
     target_result_b = result_maps.get(target_session_code, {}).get(key_b) if key_b else None
+    if target_result_a is None or target_result_b is None:
+        # Without both drivers' target results the head-to-head outcome is unknown;
+        # drop rather than defaulting the missing side to last place (a false label).
+        return []
     trade_count, last_trade_age_seconds = _trade_summary(
         trades=trades,
         as_of_ts=point.observed_at_utc,

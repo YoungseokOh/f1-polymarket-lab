@@ -1083,72 +1083,36 @@ def train_multitask_walk_forward_command(
 ) -> None:
     """Train the shared-encoder multitask model across walk-forward GP splits."""
     import json
-    from datetime import datetime, timezone
     from pathlib import Path
 
-    import polars as pl_module
-    from f1_polymarket_lab.common import stable_uuid
-    from f1_polymarket_lab.models import (
-        MultitaskTrainerConfig,
-        build_walk_forward_splits,
-        train_multitask_split,
+    from f1_polymarket_lab.models import build_walk_forward_splits
+
+    from f1_polymarket_worker.model_workflow import (
+        _earliest_as_of_ts,
+        train_multitask_walk_forward,
     )
-    from f1_polymarket_lab.storage.models import ModelPrediction, ModelRun
-    from f1_polymarket_lab.storage.repository import upsert_records
-
-    from f1_polymarket_worker.model_registry import (
-        log_run_to_mlflow,
-        mlflow_experiment_name_for_stage,
-        model_artifact_dir,
-    )
-
-    def load_snapshot_frames(paths: list[str]) -> list[pl_module.DataFrame]:
-        frames: list[pl_module.DataFrame] = []
-        for path in paths:
-            frame = pl_module.read_parquet(path)
-            if frame.height == 0 or frame.width == 0:
-                continue
-            frames.append(frame)
-        return frames
-
-    def serialize_timestamp(value: object) -> str:
-        if isinstance(value, datetime):
-            return value.isoformat()
-        return str(value)
-
-    def earliest_as_of(rows: list[dict[str, object]]) -> datetime:
-        earliest: datetime | None = None
-        for row in rows:
-            path = str(row.get("path") or "")
-            if not path:
-                continue
-            try:
-                frame = pl_module.read_parquet(path, columns=["as_of_ts"])
-            except Exception:
-                continue
-            if frame.height == 0 or "as_of_ts" not in frame.columns:
-                continue
-            candidate = frame["as_of_ts"].min()
-            if isinstance(candidate, datetime) and (earliest is None or candidate < earliest):
-                earliest = candidate
-        return earliest if earliest is not None else datetime.max.replace(tzinfo=timezone.utc)
 
     manifest_payload = json.loads(Path(manifest).read_text(encoding="utf-8"))
-    grouped: dict[int, list[dict[str, object]]] = {}
-    for row in manifest_payload.get("snapshots", []):
-        grouped.setdefault(int(row["meeting_key"]), []).append(row)
-
-    # Order chronologically by earliest as-of timestamp, not by meeting_key.
-    # Synthetic jolpica meetings use negative round-encoded keys (e.g. -202607 =
-    # 2026 round 7), so integer sorting reverses the season and would train on
-    # the future to test the past, breaking the walk-forward boundary.
-    meeting_keys = sorted(grouped, key=lambda mk: (earliest_as_of(grouped[mk]), mk))
-    splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
-    if not splits:
-        typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
-        raise typer.Exit(1)
+    snapshot_rows = [
+        row for row in manifest_payload.get("snapshots", []) if isinstance(row, dict)
+    ]
+    season = next(
+        (int(row["season"]) for row in snapshot_rows if row.get("season") is not None),
+        2026,
+    )
 
     if not execute:
+        grouped: dict[int, list[dict[str, object]]] = {}
+        for row in snapshot_rows:
+            if row.get("meeting_key") is None:
+                continue
+            grouped.setdefault(int(row["meeting_key"]), []).append(row)
+        # Reuse the module's chronological ordering so plan and execute never diverge.
+        meeting_keys = sorted(grouped, key=lambda mk: (_earliest_as_of_ts(grouped[mk]), mk))
+        splits = build_walk_forward_splits(meeting_keys, min_train=min_train_gps)
+        if not splits:
+            typer.echo(f"Need at least {min_train_gps + 1} GPs for walk-forward training.")
+            raise typer.Exit(1)
         for split in splits:
             typer.echo(
                 f"[plan] train on {split.train_meeting_keys} -> test {split.test_meeting_key}"
@@ -1157,155 +1121,27 @@ def train_multitask_walk_forward_command(
 
     settings = get_settings()
     with db_session(settings.database_url) as session:
-        all_results = []
-        checkpoint_order = {"FP1": 1, "FP2": 2, "FP3": 3, "Q": 4}
-        for split in splits:
-            train_paths: list[str] = []
-            for meeting_key in split.train_meeting_keys:
-                snapshots = sorted(
-                    grouped[meeting_key],
-                    key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
-                )
-                train_paths.extend(str(row["path"]) for row in snapshots)
+        context = PipelineContext(db=session, execute=True, settings=settings)
+        result = train_multitask_walk_forward(
+            context,
+            season=season,
+            manifest_path=manifest,
+            stage=stage,
+            min_train_gps=min_train_gps,
+        )
 
-            test_snapshots = sorted(
-                grouped[split.test_meeting_key],
-                key=lambda row: checkpoint_order.get(str(row.get("checkpoint")), 99),
-            )
-            if not train_paths:
-                typer.echo(f"Skipping test meeting_key={split.test_meeting_key}: no training data")
-                continue
-            if not test_snapshots:
-                typer.echo(f"Skipping test meeting_key={split.test_meeting_key}: no test data")
-                continue
-
-            train_frames = load_snapshot_frames(train_paths)
-            test_frames = load_snapshot_frames([str(row["path"]) for row in test_snapshots])
-            if not train_frames:
-                typer.echo(
-                    f"Skipping test meeting_key={split.test_meeting_key}: "
-                    "no non-empty training rows"
-                )
-                continue
-            if not test_frames:
-                typer.echo(
-                    f"Skipping test meeting_key={split.test_meeting_key}: no non-empty test rows"
-                )
-                continue
-
-            # vertical_relaxed promotes all-null columns (e.g. qualifying_position in
-            # pre-Q checkpoints, inferred as Null dtype) to the supertype seen in
-            # other checkpoints (Int64), instead of raising a SchemaError on concat.
-            train_df = pl_module.concat(train_frames, how="vertical_relaxed")
-            test_df = pl_module.concat(test_frames, how="vertical_relaxed")
-
-            model_run_id = stable_uuid("multitask-run", split.test_meeting_key, stage)
-            artifact_dir = model_artifact_dir(
-                data_root=Path(settings.data_root),
-                model_run_id=model_run_id,
-            )
-            result = train_multitask_split(
-                train_df,
-                test_df,
-                model_run_id=model_run_id,
-                stage=stage,
-                config=MultitaskTrainerConfig(),
-                artifact_dir=artifact_dir,
-            )
-
-            test_timestamps = (
-                [value for value in test_df["as_of_ts"].to_list() if isinstance(value, datetime)]
-                if "as_of_ts" in test_df.columns
-                else []
-            )
-            train_snapshot_ids = [
-                str(row["snapshot_id"])
-                for meeting_key in split.train_meeting_keys
-                for row in grouped[meeting_key]
-            ]
-            test_snapshot_ids = [str(row["snapshot_id"]) for row in test_snapshots]
-
-            artifact_dir.mkdir(parents=True, exist_ok=True)
-            (artifact_dir / "predictions.json").write_text(
-                json.dumps(result.predictions, indent=2, default=str),
-                encoding="utf-8",
-            )
-            (artifact_dir / "metrics.json").write_text(
-                json.dumps(result.metrics, indent=2, default=str),
-                encoding="utf-8",
-            )
-
-            registry_run_id = log_run_to_mlflow(
-                tracking_uri=settings.mlflow_tracking_uri,
-                experiment_name=mlflow_experiment_name_for_stage(stage),
-                run_name=f"{stage}:{split.test_meeting_key}",
-                params={
-                    **result.config,
-                    "manifest_path": manifest,
-                    "train_snapshot_ids": train_snapshot_ids,
-                    "test_snapshot_ids": test_snapshot_ids,
-                },
-                metrics=result.metrics,
-                tags={
-                    "stage": stage,
-                    "model_family": "torch_multitask",
-                    "test_meeting_key": str(split.test_meeting_key),
-                },
-                artifact_dir=artifact_dir,
-            )
-
-            run_record = {
-                "id": result.model_run_id,
-                "stage": stage,
-                "model_family": "torch_multitask",
-                "model_name": "shared_encoder_multitask_v2",
-                "dataset_version": "multitask_v1",
-                "feature_snapshot_id": None,
-                "test_start": min(test_timestamps) if test_timestamps else None,
-                "test_end": max(test_timestamps) if test_timestamps else None,
-                "config_json": {
-                    **result.config,
-                    "manifest_path": manifest,
-                    "train_snapshot_ids": train_snapshot_ids,
-                    "test_snapshot_ids": test_snapshot_ids,
-                },
-                "metrics_json": result.metrics,
-                "artifact_uri": str(artifact_dir),
-                "registry_run_id": registry_run_id,
-            }
-            upsert_records(session, ModelRun, [run_record], conflict_columns=["id"])
-
-            pred_records: list[dict[str, object]] = []
-            for row in result.predictions:
-                checkpoint = str((row.get("explanation_json") or {}).get("as_of_checkpoint", "NA"))
-                pred_records.append(
-                    {
-                        **row,
-                        "id": stable_uuid(
-                            "multitask-prediction",
-                            result.model_run_id,
-                            row.get("market_id"),
-                            row.get("token_id"),
-                            checkpoint,
-                            serialize_timestamp(row.get("as_of_ts")),
-                        ),
-                    }
-                )
-            upsert_records(
-                session,
-                ModelPrediction,
-                pred_records,
-            )
-
-            session.commit()
-            all_results.append(result)
-            typer.echo(
-                f"GP {split.test_meeting_key}: "
-                f"log_loss={result.metrics['log_loss']:.4f} "
-                f"brier={result.metrics['brier_score']:.4f}"
-            )
-
-        typer.echo(f"Multitask walk-forward training complete: {len(all_results)} folds evaluated.")
+    for run in result.get("runs", []):
+        metrics = run.get("metrics", {})
+        typer.echo(
+            f"GP {run.get('test_meeting_key')}: "
+            f"log_loss={metrics.get('log_loss')} brier={metrics.get('brier_score')}"
+        )
+    for note in result.get("skipped", []):
+        typer.echo(f"[skipped] {note}")
+    typer.echo(
+        "Multitask walk-forward training complete: "
+        f"{result.get('model_run_count', 0)} folds evaluated."
+    )
 
 
 @app.command("promote-model-run")

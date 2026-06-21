@@ -159,6 +159,17 @@ def _apply_serialized_calibrator(
     return np.interp(clipped, x_thresholds, y_thresholds)
 
 
+def _executable_prices(df: pl.DataFrame) -> np.ndarray:
+    """Executable YES entry price (best_ask) as float array, NaN when unavailable.
+
+    A YES buy fills at the best ask; the midpoint is not executable. Rows lacking a
+    positive best_ask become NaN so bet selection skips them.
+    """
+    if "entry_best_ask" not in df.columns:
+        return np.full(df.height, np.nan, dtype=np.float64)
+    return df["entry_best_ask"].cast(pl.Float64, strict=False).to_numpy().astype(np.float64)
+
+
 def _evaluate_subset(
     *,
     y_true: np.ndarray,
@@ -192,8 +203,10 @@ def _evaluate_subset(
     )
     ece = float(expected_calibration_error(y_true, y_prob))
     calibration_buckets = serialize_reliability_diagram(y_true, y_prob)
+    # Only rows with a valid executable price (positive best_ask) are tradeable.
+    tradeable = np.isfinite(prices) & (prices > 0.0)
     edges = y_prob - prices
-    selected = edges >= min_edge
+    selected = tradeable & (edges >= min_edge)
     bet_count = int(np.sum(selected))
     if bet_count > 0:
         selected_labels = y_true[selected]
@@ -432,7 +445,10 @@ def train_multitask_split(
     families_val = _family_array(val_df)
 
     test_labels = np.asarray(test_df["label_yes"].to_list(), dtype=np.float64)
-    test_prices = test_df["entry_yes_price"].to_numpy().astype(np.float64)
+    # Paper PnL must be priced at the executable quote (best_ask for a YES buy),
+    # not the midpoint — midpoint-only PnL is explicitly disallowed. Rows without
+    # a positive best_ask carry NaN here and are excluded from bet selection.
+    test_prices = _executable_prices(test_df)
     test_families = _family_array(test_df)
     test_checkpoints = _checkpoint_array(test_df)
 

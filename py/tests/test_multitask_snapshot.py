@@ -701,10 +701,29 @@ def test_build_multitask_checkpoint_rows_emits_all_supported_families(
     session, context = build_context(tmp_path)
     seed_multitask_fixture(session)
 
-    rows = build_multitask_checkpoint_rows(context, meeting_key=1281, season=2026, checkpoint="Q")
-    families = {row["target_market_family"] for row in rows if row["as_of_checkpoint"] == "Q"}
+    # All four families are valid at a pre-Q checkpoint (FP3 sees neither Q nor R,
+    # so both Q-target and R-target families are predictable).
+    rows = build_multitask_checkpoint_rows(context, meeting_key=1281, season=2026, checkpoint="FP3")
+    families = {row["target_market_family"] for row in rows if row["as_of_checkpoint"] == "FP3"}
 
     assert families == {"constructor_pole", "h2h", "pole", "winner"}
+
+
+def test_build_multitask_checkpoint_rows_excludes_q_target_at_q_checkpoint(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_multitask_fixture(session)
+
+    # The Q checkpoint observes qualifying, so Q-target families (pole /
+    # constructor_pole) would leak their label and are excluded; only the
+    # R-target families remain.
+    rows = build_multitask_checkpoint_rows(context, meeting_key=1281, season=2026, checkpoint="Q")
+    families = {row["target_market_family"] for row in rows}
+
+    assert "pole" not in families
+    assert "constructor_pole" not in families
+    assert families == {"h2h", "winner"}
 
 
 def test_driver_key_helpers_unify_jolpica_and_openf1_id_schemes() -> None:
@@ -773,6 +792,27 @@ def test_load_result_maps_keys_results_by_normalized_name(tmp_path: Path) -> Non
     key = _driver_key_from_obj(numeric_driver)
     assert key in result_maps["Q"]
     assert result_maps["Q"][key].position == 1
+
+
+def test_build_multitask_checkpoint_rows_excludes_rows_without_target_result(
+    tmp_path: Path,
+) -> None:
+    session, context = build_context(tmp_path)
+    seed_multitask_fixture(session)
+
+    # Remove Leclerc's qualifying result so his pole market can no longer be
+    # labeled. The row must be dropped, not emitted as a false label_yes=0.
+    session.execute(
+        F1SessionResult.__table__.delete().where(F1SessionResult.id == "q-leclerc")
+    )
+    session.commit()
+
+    rows = build_multitask_checkpoint_rows(context, meeting_key=1281, season=2026, checkpoint="FP3")
+    pole_driver_ids = {
+        row["driver_id"] for row in rows if row["target_market_family"] == "pole"
+    }
+
+    assert "driver-leclerc" not in pole_driver_ids
 
 
 def test_build_multitask_feature_snapshots_persists_manifest_and_rows(

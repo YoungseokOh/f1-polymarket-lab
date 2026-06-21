@@ -1,6 +1,8 @@
 # 2026 Multitask Walk-Forward Modeling (Q/R) — First Pass
 
-_Generated 2026-06-22. Stage: `multitask_qr` (shared-encoder multitask: pole / constructor_pole / winner / h2h heads)._
+_Generated 2026-06-22; revised after a pro/con review that surfaced and fixed
+four correctness defects (see [Engineering fixes](#engineering-fixes-landed-with-this-pass)).
+Stage: `multitask_qr` (shared-encoder multitask: pole / constructor_pole / winner / h2h heads)._
 
 ## Summary
 
@@ -36,40 +38,43 @@ rounds (Austrian, British, Belgian) have price history but no results yet.
 
 ## Modeling setup
 
-- **As-of snapshots** per GP at FP1 / FP2 / FP3 / Q checkpoints. Qualifying-derived
-  features are only visible at the Q checkpoint — verified that `qualifying_position`
-  is null for all pre-Q checkpoint rows (no leakage across the as-of boundary).
+- **As-of snapshots** per GP at FP1 / FP2 / FP3 / Q checkpoints. A checkpoint that
+  already observes the target session cannot predict it: the **Q (pole /
+  constructor_pole) target is built only from the FP checkpoints**, never at the Q
+  checkpoint (which would leak the label and produce an inverted entry window). The
+  R (winner / h2h) target is never observed by any FP/Q checkpoint. Verified that
+  `qualifying_position` is null for all pre-Q rows.
 - **Time-aware walk-forward** ordered by earliest as-of timestamp (not meeting_key,
   which is negative/round-encoded for jolpica meetings and would otherwise reverse
   the season).
-- Snapshots: 65 rows/checkpoint (22 pole + 22 h2h + 21 winner), labels join across
-  the jolpica/OpenF1 driver-id schemes by normalized driver name.
+- **Labels join** across the jolpica/OpenF1 driver-id schemes by normalized driver
+  name. Rows whose matched driver has no target result (name-alias miss or
+  non-starter) are **dropped, not labeled 0**, so no false negatives are fabricated.
+- Snapshots after fixes: ~50 rows per FP checkpoint (18 pole + 18 winner + 14 h2h),
+  32 rows at the Q checkpoint (winner + h2h only).
 
 ### Walk-forward folds (out-of-sample)
 
 | Fold | Train | Test | log_loss | Brier | ECE |
 |------|-------|------|----------|-------|-----|
-| 1 | Canadian | Monaco | **0.244** | **0.082** | 0.047 |
-| 2 | Canadian + Monaco | Barcelona | **0.412** | **0.126** | 0.113 |
+| 1 | Canadian | Monaco | **0.281** | **0.081** | 0.124 |
+| 2 | Canadian + Monaco | Barcelona | **0.449** | **0.121** | 0.079 |
 
-Fold 1 is well-calibrated; Fold 2 degrades, consistent with a 2-GP training set and
-a single added weekend. Both folds are genuinely out-of-sample and chronological.
+Fold 2 degrades on log_loss, consistent with a 2-GP training set and a single added
+weekend. Both folds are genuinely out-of-sample and chronological. (Numbers shifted
+from the first draft after removing Q-checkpoint pole leakage and false-negative
+labels.)
 
 ## Error analysis (Fold 2 — Barcelona, by market family)
 
-| Family | rows | log_loss | Brier | ECE | Notes |
-|--------|------|----------|-------|-----|-------|
-| pole | 88 | 0.251 | 0.057 | 0.117 | overpredicts favorites (10–20% bucket: predicted 16% vs actual 5%) |
-| winner | 84 | 0.270 | 0.063 | 0.132 | similar overconfidence on longshots |
-| h2h | 88 | 0.706 | 0.256 | 0.091 | near coin-flip (predicted 36% vs actual 45%); weakest head |
+| Family | rows | log_loss | Brier | Notes |
+|--------|------|----------|-------|-------|
+| pole | 54 | 0.273 | 0.055 | sharpest head; favorite-driven |
+| winner | 72 | 0.358 | 0.055 | well-separated on the field |
+| h2h | 56 | 0.736 | 0.270 | near coin-flip (≈ 0.25 baseline); weakest head |
 
-The h2h head is the weakest (Brier ≈ 0.26, barely better than 0.25 baseline) and is
-the priority for the next iteration, consistent with the modeling order (FP2/FP3
-head-to-head first).
-
-> Note: the trainer also reports a paper `roi_pct`/`bet_count` computed against
-> `entry_yes_price` (midpoint). These are **midpoint-only** and are deliberately
-> excluded from any PnL claim here — see below.
+The h2h head is the weakest (Brier ≈ 0.27) and is the priority for the next
+iteration, consistent with the modeling order (FP2/FP3 head-to-head first).
 
 ## Executable-price backtest status
 
@@ -81,9 +86,11 @@ midpoint-only evaluation. Current price history is midpoint/last-price only:
 - For the three modeling GPs, **0 of 451,806** in-window price points carry a
   positive `best_ask`.
 
-Consequently `settle_backtest` (which correctly gates on a positive `best_ask` and
-skips midpoint-only rows) places zero executable bets here — the guard behaves as
-designed; the data simply lacks the quotes.
+The trainer's paper PnL is now itself **gated on a positive executable `best_ask`**
+(it previously priced bets at the midpoint `entry_yes_price`). With no ask quotes
+available, both folds report **bet_count = 0 and roi_pct = None** — there is no
+midpoint PnL anywhere in the output. The standalone `settle_backtest` path applies
+the same gate (and currently expects the GP-registry snapshot schema).
 
 ### To unblock
 
@@ -110,10 +117,26 @@ designed; the data simply lacks the quotes.
 - **MLflow logging**: sanitize metric/param names (calibration bucket keys like
   `0-10%` contain `%`, which MLflow rejects).
 
+Landed after the pro/con review:
+
+- **Q-checkpoint leakage removed**: Q-target families are no longer built at the Q
+  checkpoint (the checkpoint that observes qualifying), eliminating both the inverted
+  entry window and the trivially-leaked pole label.
+- **No false-negative labels**: rows whose matched driver lacks a target result are
+  dropped instead of emitted as `label_yes=0`.
+- **Executable PnL gate**: the trainer prices paper bets at `best_ask` and skips rows
+  without a positive ask, so midpoint-only PnL can no longer appear in metrics.
+- **De-duplicated training path**: the CLI now delegates to
+  `model_workflow.train_multitask_walk_forward` (and reuses its chronological
+  ordering helper for plan-only), so the two implementations can no longer diverge.
+
 ## Next steps
 
 1. Capture executable quotes to enable the PnL backtest (above).
 2. Strengthen the h2h head (richer FP2/FP3 pace deltas).
 3. Extend coverage as more 2026 rounds complete with retained price history.
 4. Resolve the Antonelli-style name-alias gap (jolpica "Andrea Kimi Antonelli" vs
-   market "Kimi Antonelli") that drops one pole/winner label at Monaco.
+   market "Kimi Antonelli"). It no longer corrupts labels (the row is now dropped),
+   but the lost positives shrink an already small dataset — a driver-identity
+   mapping (non-name key) would recover them and also de-risk the jolpica/OpenF1
+   join more broadly.

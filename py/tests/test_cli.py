@@ -259,4 +259,4 @@ def test_bootstrap_db_creates_lineage_tables(tmp_path: Path) -> None:
     )
     assert cur.fetchone() == ("ingestion_job_runs",)
     cur.execute("SELECT version_num FROM alembic_version")
-    assert cur.fetchone() == ("20260425_0014",)
+    assert cur.fetchone() == ("20260621_0015",)
