@@ -12,6 +12,7 @@ from typing import Any, cast
 from f1_polymarket_lab.common import (
     payload_checksum,
     slugify,
+    stable_uuid,
     utc_now,
 )
 from f1_polymarket_lab.connectors import (
@@ -4506,6 +4507,10 @@ def capture_live_weekend(
     live_market_quotes: dict[str, dict[str, Any]] = {}
     if token_ids:
         ws_messages: list[dict[str, Any]] = []
+        # Every quote event with a usable executable price is retained as a price
+        # history time series (not just the latest per market), so future snapshots
+        # have real best_bid/best_ask in the pre-session entry window.
+        live_quote_events: list[dict[str, Any]] = []
         ws_connector = PolymarketLiveConnector()
 
         def _handle_polymarket(message: Any) -> None:
@@ -4534,6 +4539,13 @@ def capture_live_weekend(
                 token_id = _normalize_live_text(quote.get("token_id"))
                 if token_id is not None:
                     observed_token_ids.add(token_id)
+                    # token_id is required on PolymarketPriceHistory; only quotes
+                    # that carry one (and at least one price signal) are storable.
+                    if any(
+                        quote.get(key) is not None
+                        for key in ("best_ask", "best_bid", "price", "midpoint")
+                    ):
+                        live_quote_events.append(quote)
                 current_quote = live_market_quotes.get(market_id)
                 if _should_replace_live_market_quote(
                     current_quote,
@@ -4589,9 +4601,47 @@ def capture_live_weekend(
         if manifest_rows:
             upsert_records(ctx.db, PolymarketWsMessageManifest, manifest_rows)
             records_written += len(manifest_rows)
+        price_history_rows: list[dict[str, Any]] = []
+        seen_price_ids: set[str] = set()
+        for quote in live_quote_events:
+            token_id = _normalize_live_text(quote.get("token_id"))
+            if token_id is None:
+                continue
+            observed_at = parse_dt(quote.get("observed_at_utc")) or utc_now()
+            price_id = stable_uuid(
+                "ws-price",
+                quote["market_id"],
+                token_id,
+                observed_at.isoformat(),
+                quote.get("best_bid"),
+                quote.get("best_ask"),
+                quote.get("price"),
+            )
+            if price_id in seen_price_ids:
+                continue
+            seen_price_ids.add(price_id)
+            price_history_rows.append(
+                {
+                    "id": price_id,
+                    "market_id": str(quote["market_id"]),
+                    "token_id": token_id,
+                    "observed_at_utc": observed_at,
+                    "price": quote.get("price"),
+                    "midpoint": quote.get("midpoint"),
+                    "best_bid": quote.get("best_bid"),
+                    "best_ask": quote.get("best_ask"),
+                    "source_kind": "polymarket_ws",
+                    "raw_payload": quote,
+                }
+            )
+        if price_history_rows:
+            upsert_records(ctx.db, PolymarketPriceHistory, price_history_rows)
+            records_written += len(price_history_rows)
+        price_history_written = len(price_history_rows)
         records_written += ws_count
     else:
         ws_count = 0
+        price_history_written = 0
 
     finish_job_run(
         ctx.db,
@@ -4613,6 +4663,7 @@ def capture_live_weekend(
         "capture_seconds": duration_seconds,
         "openf1_messages": openf1_message_count,
         "polymarket_messages": ws_count,
+        "polymarket_price_history_written": price_history_written,
         "market_count": market_count,
         "polymarket_market_ids": live_market_ids,
         "records_written": records_written,

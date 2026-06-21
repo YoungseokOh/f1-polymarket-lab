@@ -2795,6 +2795,18 @@ def test_capture_live_weekend_persists_ws_manifest(
         assert len(ws_manifest) == 2
         assert {item.market_id for item in ws_manifest} == {"market-1"}
         assert {item.token_id for item in ws_manifest} == {"token-1", None}
+
+        # Live quotes are persisted as executable price history so future snapshots
+        # have real best_bid/best_ask in the pre-session entry window.
+        price_history = session.scalars(select(PolymarketPriceHistory)).all()
+        assert result["polymarket_price_history_written"] == len(price_history)
+        assert len(price_history) >= 2
+        assert {row.token_id for row in price_history} == {"token-1", "token-2"}
+        assert all(row.source_kind == "polymarket_ws" for row in price_history)
+        assert all(row.best_ask is not None for row in price_history)
+        token2 = next(row for row in price_history if row.token_id == "token-2")
+        assert token2.best_bid == 0.57
+        assert token2.best_ask == 0.59
     finally:
         session.close()
 

@@ -81,13 +81,15 @@ iteration, consistent with the modeling order (FP2/FP3 head-to-head first).
 
 ## Executable-price backtest status
 
-**Blocked.** The skill requires executable bid/ask (or order-book depth), not
-midpoint-only evaluation. Current price history is midpoint/last-price only:
+**Blocked for the three completed GPs; capture path now in place for upcoming
+GPs.** The skill requires executable bid/ask (or order-book depth), not
+midpoint-only evaluation. The historical price history is midpoint/last-price only:
 
 - `polymarket_price_history`: 919,844 rows, of which **3,848 (0.4%)** carry
   `best_ask` and 3,582 carry `best_bid`. `price` is 100% populated.
 - For the three modeling GPs, **0 of 451,806** in-window price points carry a
-  positive `best_ask`.
+  positive `best_ask` — and their markets are already resolved, so this cannot be
+  captured retroactively.
 
 The trainer's paper PnL is now itself **gated on a positive executable `best_ask`**
 (it previously priced bets at the midpoint `entry_yes_price`). With no ask quotes
@@ -95,11 +97,18 @@ available, both folds report **bet_count = 0 and roi_pct = None** — there is n
 midpoint PnL anywhere in the output. The standalone `settle_backtest` path applies
 the same gate (and currently expects the GP-registry snapshot schema).
 
+`capture-live-weekend` now **persists the live CLOB best_bid/best_ask quote stream
+into `polymarket_price_history`** (`source_kind="polymarket_ws"`), not just the WS
+manifest, so future captures land executable quotes in the same table the snapshot
+builder reads.
+
 ### To unblock
 
-1. Capture CLOB order-book bid/ask (or top-of-book) alongside the midpoint series,
-   especially in the pre-session entry window, for upcoming GPs.
-2. Re-run the walk-forward backtest once a completed GP has both labels and
+1. ✅ Live capture persists executable bid/ask to `polymarket_price_history`
+   (`source_kind="polymarket_ws"`).
+2. Schedule `capture-live-weekend` for the upcoming GP sessions (Austrian GP, 6/27
+   onward), covering the pre-session entry windows (FP3→Q, Q→R).
+3. Re-run the walk-forward backtest once a completed GP has both labels and
    captured executable quotes.
 3. Adapt `_enrich_snapshot_probabilities` / `settle_backtest` to the multitask
    snapshot schema (it currently expects the GP-registry snapshot shape and raises
@@ -138,8 +147,9 @@ Landed after the pro/con review:
 
 ## Next steps
 
-1. Capture executable quotes to enable the PnL backtest (above).
-2. Strengthen the h2h head (richer FP2/FP3 pace deltas).
+1. Live capture now persists executable quotes; schedule `capture-live-weekend`
+   for upcoming GP sessions so a completed GP gains an executable entry window.
+2. Strengthen the h2h head (richer FP2/FP3 pace deltas) once more GPs accumulate.
 3. Extend coverage as more 2026 rounds complete with retained price history.
 4. The Antonelli-style name-alias gap is resolved via the acronym join (positives
    recovered). A fuller driver-identity table (number + acronym + name) would
