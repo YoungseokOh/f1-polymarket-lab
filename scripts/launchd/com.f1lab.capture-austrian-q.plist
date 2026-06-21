@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.f1lab.capture-austrian-q</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/ysoh/Projects/f1-polymarket-lab/scripts/capture_austrian_2026.sh</string>
+    <string>-202600823</string>
+    <string>90</string>
+    <string>20</string>
+  </array>
+  <!-- 2026-06-27 21:00 KST (= 12:00 UTC). capture-live-weekend then waits to the
+       (Q 14:00 UTC - 90m = 12:30 UTC) window and streams to ~14:20 UTC. -->
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Month</key><integer>6</integer>
+    <key>Day</key><integer>27</integer>
+    <key>Hour</key><integer>21</integer>
+    <key>Minute</key><integer>0</integer>
+  </dict>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/ysoh/Projects/f1-polymarket-lab/data/reports/operations/austrian-2026-capture/launchd-q.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ysoh/Projects/f1-polymarket-lab/data/reports/operations/austrian-2026-capture/launchd-q.err.log</string>
+</dict>
+</plist>
